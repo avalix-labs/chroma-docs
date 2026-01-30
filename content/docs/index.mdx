@@ -1,13 +1,42 @@
 ---
-title: Hello World
-description: Your first document
+title: Introduction
+description: End-to-end testing library for wallet interactions across multiple blockchain ecosystems
+icon: Rocket
 ---
 
-Welcome to the docs! You can start writing documents in `/content/docs`.
+**Chroma** is an end-to-end (E2E) testing library for wallet interactions across multiple blockchain ecosystems. It enables developers to write automated tests that interact with real wallet extensions, providing a comprehensive testing solution for decentralized applications (dApps).
 
-## What is Next?
+Initially designed for the Polkadot ecosystem, Chroma is expanding to support EVM (Ethereum Virtual Machine) and SVM (Solana Virtual Machine) chains.
+
+## Features
+
+- **Real Wallet Testing** - Test with actual wallet extensions like Polkadot.js, Talisman, and more
+- **Playwright Integration** - Built on top of Playwright for reliable browser automation
+- **Multi-Chain Support** - Support for Polkadot, EVM, and SVM ecosystems
+- **CI/CD Ready** - Docker support for consistent testing environments
+
+## Quick Example
+
+```ts
+import { test } from '@avalix/chroma'
+
+test('connect wallet', async ({ page, wallets }) => {
+  const polkadotJs = wallets['polkadot-js']
+
+  await polkadotJs.importMnemonic({
+    seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk'
+  })
+
+  await page.goto('http://localhost:3000')
+  await polkadotJs.authorize()
+  await polkadotJs.approveTx()
+})
+```
+
+## Next Steps
 
 <Cards>
-  <Card title="Learn more about Next.js" href="https://nextjs.org/docs" />
-  <Card title="Learn more about Fumadocs" href="https://fumadocs.dev" />
+  <Card title="Installation" href="/docs/installation" description="Install Chroma and set up your project" />
+  <Card title="Quick Start" href="/docs/quick-start" description="Write your first wallet test" />
+  <Card title="API Reference" href="/docs/api/test-fixtures" description="Explore the full API" />
 </Cards>

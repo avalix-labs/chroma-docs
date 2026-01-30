@@ -1,0 +1,23 @@
+{
+  "title": "Chroma",
+  "description": "End-to-end testing library for Polkadot wallet interactions",
+  "root": true,
+  "pages": [
+    "index",
+    "---Getting Started---",
+    "installation",
+    "quick-start",
+    "configuration",
+    "---Wallets---",
+    "wallets/polkadot-js",
+    "wallets/talisman",
+    "---Guides---",
+    "guides/testing-dapps",
+    "guides/ci-cd",
+    "guides/docker",
+    "---API Reference---",
+    "api/test-fixtures",
+    "api/wallet-methods",
+    "api/utilities"
+  ]
+}
