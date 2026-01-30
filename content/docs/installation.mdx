@@ -1,0 +1,85 @@
+---
+title: Installation
+description: Install Chroma and configure your project
+icon: Download
+---
+
+## Prerequisites
+
+- Node.js 24 or higher
+- A package manager (npm, yarn, pnpm, or bun)
+
+## Existing Project
+
+If your project already has Playwright installed, simply add Chroma:
+
+```package-install
+@avalix/chroma
+```
+
+If Playwright is not yet installed, initialize it first:
+
+```bash
+npm init playwright@latest
+```
+
+Then add Chroma:
+
+```package-install
+@avalix/chroma
+```
+
+## Add Scripts
+
+Add these scripts to your `package.json`:
+
+```json title="package.json"
+{
+  "scripts": {
+    "test": "npx playwright test",
+    "test:ui": "npx playwright test --ui",
+    "test:prepare": "chroma download-extensions"
+  }
+}
+```
+
+## Setup .gitignore
+
+Add `.chroma` to your `.gitignore` file:
+
+```txt title=".gitignore"
+.chroma
+```
+
+## Download Wallet Extensions
+
+Run the prepare script to download wallet extensions:
+
+```bash
+npm run test:prepare
+```
+
+This will download the supported wallet extensions to the `.chroma` directory.
+
+## Running Tests
+
+Run tests in headless mode:
+
+```bash
+npm test
+```
+
+To run tests with UI mode (headed), use:
+
+```bash
+npm run test:ui
+```
+
+UI mode opens Playwright's interactive test runner where you can see the browser, step through tests, and debug visually.
+
+## Next Steps
+
+<Cards>
+  <Card title="Quick Start" href="/docs/quick-start" description="Write your first wallet interaction test" />
+  <Card title="Configuration" href="/docs/configuration" description="Configure Chroma for your project" />
+</Cards>
