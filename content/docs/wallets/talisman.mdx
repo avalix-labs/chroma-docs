@@ -1,0 +1,171 @@
+---
+title: Talisman
+description: Testing with Talisman wallet extension
+icon: Wallet
+---
+
+Talisman is a popular multi-chain wallet for the Polkadot ecosystem. Chroma provides full support for automating Talisman wallet interactions.
+
+## Setup
+
+Access the Talisman wallet through the `wallets` fixture:
+
+```ts
+import { test } from '@avalix/chroma'
+
+test('talisman test', async ({ wallets }) => {
+  const talisman = wallets['talisman']
+})
+```
+
+## Import Account
+
+Import an account using a mnemonic seed phrase:
+
+```ts
+await talisman.importMnemonic({
+  seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk',
+  name: 'My Test Account', // optional
+})
+```
+
+## Authorize Connection
+
+When your dApp requests wallet access:
+
+```ts
+// Your dApp triggers a connection request
+await page.click('button:has-text("Connect Wallet")')
+
+// Approve the request
+await talisman.authorize()
+```
+
+To reject a connection:
+
+```ts
+await talisman.authorize({ approve: false })
+```
+
+## Approve Transaction
+
+When your dApp requests transaction signing:
+
+```ts
+// Your dApp triggers a transaction
+await page.click('button:has-text("Submit")')
+
+// Approve the transaction
+await talisman.approveTx()
+```
+
+To reject a transaction:
+
+```ts
+await talisman.approveTx({ approve: false })
+```
+
+## Sign Message
+
+Approve message signing requests:
+
+```ts
+await page.click('button:has-text("Sign Message")')
+await talisman.signMessage()
+```
+
+## EVM Support
+
+Talisman supports Ethereum-compatible chains. Use the same methods for EVM transactions:
+
+```ts
+test('evm transaction', async ({ page, wallets }) => {
+  const talisman = wallets['talisman']
+  
+  await talisman.importMnemonic({
+    seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk',
+  })
+  
+  await page.goto('http://localhost:3000')
+  await talisman.authorize()
+  
+  // EVM transaction
+  await page.click('button:has-text("Send ETH")')
+  await talisman.approveTx()
+})
+```
+
+## Complete Example
+
+```ts title="tests/talisman.spec.ts"
+import { test, expect } from '@avalix/chroma'
+
+test.describe('Talisman Wallet', () => {
+  test.beforeEach(async ({ wallets }) => {
+    const talisman = wallets['talisman']
+    await talisman.importMnemonic({
+      seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk',
+    })
+  })
+
+  test('connect and transfer', async ({ page, wallets }) => {
+    const talisman = wallets['talisman']
+
+    await page.goto('http://localhost:3000')
+    await page.click('button:has-text("Connect")')
+    await talisman.authorize()
+
+    await expect(page.locator('.connected')).toBeVisible()
+
+    await page.fill('input[name="amount"]', '1.0')
+    await page.click('button:has-text("Send")')
+    await talisman.approveTx()
+
+    await expect(page.locator('.success')).toBeVisible()
+  })
+
+  test('multi-chain support', async ({ page, wallets }) => {
+    const talisman = wallets['talisman']
+
+    await page.goto('http://localhost:3000')
+    await talisman.authorize()
+
+    // Switch to Ethereum chain in your dApp
+    await page.click('button:has-text("Switch to Ethereum")')
+    
+    // Talisman handles EVM transactions
+    await page.click('button:has-text("Send ETH")')
+    await talisman.approveTx()
+  })
+})
+```
+
+## Troubleshooting
+
+### Extension not loading
+
+Make sure you've downloaded the extensions:
+
+```bash
+npx chroma download-extensions
+```
+
+### Popup not appearing
+
+Increase the timeout in your test:
+
+```ts
+test.setTimeout(60000)
+```
+
+### Account not found
+
+Ensure the mnemonic is imported before interacting with the dApp:
+
+```ts
+// Import FIRST
+await talisman.importMnemonic({ seed: '...' })
+
+// THEN navigate to dApp
+await page.goto('http://localhost:3000')
+```

@@ -1,0 +1,146 @@
+---
+title: Polkadot.js
+description: Testing with Polkadot.js wallet extension
+icon: Wallet
+---
+
+Polkadot.js is the official wallet extension for the Polkadot ecosystem. Chroma provides full support for automating Polkadot.js wallet interactions.
+
+## Setup
+
+Access the Polkadot.js wallet through the `wallets` fixture:
+
+```ts
+import { test } from '@avalix/chroma'
+
+test('polkadot.js test', async ({ wallets }) => {
+  const polkadotJs = wallets['polkadot-js']
+})
+```
+
+## Import Account
+
+Import an account using a mnemonic seed phrase:
+
+```ts
+await polkadotJs.importMnemonic({
+  seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk',
+  name: 'My Test Account', // optional
+})
+```
+
+## Authorize Connection
+
+When your dApp requests wallet access:
+
+```ts
+// Your dApp triggers a connection request
+await page.click('button:has-text("Connect Wallet")')
+
+// Approve the request
+await polkadotJs.authorize()
+```
+
+To reject a connection:
+
+```ts
+await polkadotJs.authorize({ approve: false })
+```
+
+## Approve Transaction
+
+When your dApp requests transaction signing:
+
+```ts
+// Your dApp triggers a transaction
+await page.click('button:has-text("Submit")')
+
+// Approve the transaction
+await polkadotJs.approveTx()
+```
+
+To reject a transaction:
+
+```ts
+await polkadotJs.approveTx({ approve: false })
+```
+
+## Sign Message
+
+Approve message signing requests:
+
+```ts
+await page.click('button:has-text("Sign Message")')
+await polkadotJs.signMessage()
+```
+
+## Complete Example
+
+```ts title="tests/polkadot-js.spec.ts"
+import { test, expect } from '@avalix/chroma'
+
+test.describe('Polkadot.js Wallet', () => {
+  test.beforeEach(async ({ wallets }) => {
+    const polkadotJs = wallets['polkadot-js']
+    await polkadotJs.importMnemonic({
+      seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk',
+    })
+  })
+
+  test('connect and transfer', async ({ page, wallets }) => {
+    const polkadotJs = wallets['polkadot-js']
+
+    await page.goto('http://localhost:3000')
+    await page.click('button:has-text("Connect")')
+    await polkadotJs.authorize()
+
+    await expect(page.locator('.connected')).toBeVisible()
+
+    await page.fill('input[name="amount"]', '1.0')
+    await page.click('button:has-text("Send")')
+    await polkadotJs.approveTx()
+
+    await expect(page.locator('.success')).toBeVisible()
+  })
+
+  test('reject connection', async ({ page, wallets }) => {
+    const polkadotJs = wallets['polkadot-js']
+
+    await page.goto('http://localhost:3000')
+    await page.click('button:has-text("Connect")')
+    await polkadotJs.authorize({ approve: false })
+
+    await expect(page.locator('.error')).toContainText('Connection rejected')
+  })
+})
+```
+
+## Troubleshooting
+
+### Extension not loading
+
+Make sure you've downloaded the extensions:
+
+```bash
+npx chroma download-extensions
+```
+
+### Popup not appearing
+
+Increase the timeout in your test:
+
+```ts
+test.setTimeout(60000)
+```
+
+### Account not found
+
+Ensure the mnemonic is imported before interacting with the dApp:
+
+```ts
+// Import FIRST
+await polkadotJs.importMnemonic({ seed: '...' })
+
+// THEN navigate to dApp
+await page.goto('http://localhost:3000')
+```
