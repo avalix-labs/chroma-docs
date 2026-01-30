@@ -1,0 +1,183 @@
+---
+title: Testing dApps
+description: Best practices for testing decentralized applications
+icon: TestTube
+---
+
+This guide covers best practices for testing your Polkadot dApps with Chroma.
+
+## Test Structure
+
+Organize your tests by feature or user flow:
+
+```
+tests/
+├── auth/
+│   ├── connect-wallet.spec.ts
+│   └── disconnect.spec.ts
+├── transactions/
+│   ├── transfer.spec.ts
+│   └── stake.spec.ts
+└── fixtures.ts
+```
+
+## Page Object Model
+
+Use the Page Object Model pattern for maintainable tests:
+
+```ts title="tests/pages/wallet-connect.ts"
+import { Page } from '@playwright/test'
+
+export class WalletConnectPage {
+  constructor(private page: Page) {}
+
+  async goto() {
+    await this.page.goto('/')
+  }
+
+  async clickConnect() {
+    await this.page.click('button:has-text("Connect Wallet")')
+  }
+
+  async selectWallet(name: string) {
+    await this.page.click(`button:has-text("${name}")`)
+  }
+
+  async isConnected() {
+    return this.page.locator('.wallet-address').isVisible()
+  }
+}
+```
+
+Usage:
+
+```ts title="tests/auth/connect-wallet.spec.ts"
+import { test, expect } from '@avalix/chroma'
+import { WalletConnectPage } from '../pages/wallet-connect'
+
+test('connect wallet flow', async ({ page, wallets }) => {
+  const polkadotJs = wallets['polkadot-js']
+  const connectPage = new WalletConnectPage(page)
+
+  await polkadotJs.importMnemonic({
+    seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk',
+  })
+
+  await connectPage.goto()
+  await connectPage.clickConnect()
+  await connectPage.selectWallet('Polkadot.js')
+  await polkadotJs.authorize()
+
+  expect(await connectPage.isConnected()).toBe(true)
+})
+```
+
+## Test Data Management
+
+Create reusable test accounts:
+
+```ts title="tests/fixtures.ts"
+import { test as base } from '@avalix/chroma'
+
+// Test accounts with known balances on testnet
+export const testAccounts = {
+  alice: {
+    seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk//Alice',
+    name: 'Alice',
+  },
+  bob: {
+    seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk//Bob',
+    name: 'Bob',
+  },
+}
+
+export const test = base.extend({
+  aliceWallet: async ({ wallets }, use) => {
+    const polkadotJs = wallets['polkadot-js']
+    await polkadotJs.importMnemonic(testAccounts.alice)
+    await use(polkadotJs)
+  },
+})
+```
+
+## Waiting for Blockchain State
+
+Use proper waiting strategies for blockchain operations:
+
+```ts
+test('wait for transaction confirmation', async ({ page, wallets }) => {
+  const polkadotJs = wallets['polkadot-js']
+  
+  // ... setup and authorize ...
+  
+  // Submit transaction
+  await page.click('button:has-text("Transfer")')
+  await polkadotJs.approveTx()
+  
+  // Wait for blockchain confirmation
+  await expect(page.locator('.tx-status'))
+    .toHaveText('Confirmed', { timeout: 30000 })
+})
+```
+
+## Error Handling Tests
+
+Test error scenarios:
+
+```ts
+test.describe('Error Handling', () => {
+  test('handle rejected connection', async ({ page, wallets }) => {
+    const polkadotJs = wallets['polkadot-js']
+    
+    await polkadotJs.importMnemonic({ seed: '...' })
+    await page.goto('/')
+    await page.click('button:has-text("Connect")')
+    
+    // Reject the connection
+    await polkadotJs.authorize({ approve: false })
+    
+    await expect(page.locator('.error-message'))
+      .toContainText('Connection rejected')
+  })
+
+  test('handle rejected transaction', async ({ page, wallets }) => {
+    const polkadotJs = wallets['polkadot-js']
+    
+    // ... connect wallet ...
+    
+    await page.click('button:has-text("Transfer")')
+    await polkadotJs.approveTx({ approve: false })
+    
+    await expect(page.locator('.error-message'))
+      .toContainText('Transaction rejected')
+  })
+})
+```
+
+## Debugging Tips
+
+### Slow mode
+
+Run tests in slow motion to see what's happening:
+
+```bash
+CHROMA_SLOW_MO=1000 npx playwright test
+```
+
+### Headed mode
+
+Run with visible browser:
+
+```bash
+npx playwright test --headed
+```
+
+### Debug mode
+
+Pause test execution for debugging:
+
+```ts
+test('debug test', async ({ page, wallets }) => {
+  await page.pause() // Opens Playwright Inspector
+})
+```

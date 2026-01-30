@@ -1,0 +1,220 @@
+---
+title: Docker Setup
+description: Run Chroma tests in Docker containers
+icon: Container
+---
+
+Docker provides consistent test environments across development machines and CI/CD pipelines.
+
+## Dockerfile
+
+Create a Dockerfile for your test environment:
+
+```dockerfile title="Dockerfile"
+FROM mcr.microsoft.com/playwright:v1.58.0-noble
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+
+# Install dependencies
+RUN npm ci
+
+# Download wallet extensions
+RUN npx chroma download-extensions
+
+# Copy test files
+COPY . .
+
+# Default command
+CMD ["npx", "playwright", "test"]
+```
+
+## Build Image
+
+```bash
+docker build -t chroma-test .
+```
+
+## Run Tests
+
+### Basic execution
+
+```bash
+docker run --rm --shm-size=2gb chroma-test
+```
+
+### Run specific test suite
+
+```bash
+# Polkadot.js tests
+docker run --rm --shm-size=2gb -e E2E_TARGET=polkadot-js chroma-test
+
+# EVM tests
+docker run --rm --shm-size=2gb -e E2E_TARGET=evm chroma-test
+```
+
+### Run specific test file
+
+```bash
+docker run --rm --shm-size=2gb chroma-test npx playwright test tests/wallet.spec.ts
+```
+
+## Docker Compose
+
+For complex setups with your dApp:
+
+```yaml title="docker-compose.yml"
+version: '3.8'
+
+services:
+  app:
+    build: .
+    ports:
+      - "3000:3000"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  e2e:
+    build:
+      context: .
+      dockerfile: Dockerfile.e2e
+    depends_on:
+      app:
+        condition: service_healthy
+    environment:
+      - BASE_URL=http://app:3000
+    shm_size: 2gb
+```
+
+Run with:
+
+```bash
+docker compose run --rm e2e
+```
+
+## Volume Mounts
+
+Mount test reports and screenshots:
+
+```bash
+docker run --rm \
+  --shm-size=2gb \
+  -v $(pwd)/playwright-report:/app/playwright-report \
+  -v $(pwd)/test-results:/app/test-results \
+  chroma-test
+```
+
+## Interactive Debugging
+
+Debug tests interactively:
+
+```bash
+docker run -it --rm \
+  --shm-size=2gb \
+  chroma-test bash
+```
+
+Inside the container:
+
+```bash
+# Run tests with debug output
+DEBUG=pw:api npx playwright test
+
+# Run single test
+npx playwright test tests/wallet.spec.ts --debug
+```
+
+## Headless vs Headed
+
+By default, tests run in headless mode in Docker. For debugging with a visible browser, use X11 forwarding:
+
+### Linux
+
+```bash
+docker run --rm \
+  --shm-size=2gb \
+  -e DISPLAY=$DISPLAY \
+  -v /tmp/.X11-unix:/tmp/.X11-unix \
+  chroma-test npx playwright test --headed
+```
+
+### macOS (with XQuartz)
+
+```bash
+xhost +localhost
+docker run --rm \
+  --shm-size=2gb \
+  -e DISPLAY=host.docker.internal:0 \
+  chroma-test npx playwright test --headed
+```
+
+## Optimizing Docker Builds
+
+### Multi-stage build
+
+```dockerfile title="Dockerfile"
+# Stage 1: Install dependencies
+FROM mcr.microsoft.com/playwright:v1.58.0-noble AS deps
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+RUN npx chroma download-extensions
+
+# Stage 2: Copy source and run tests
+FROM mcr.microsoft.com/playwright:v1.58.0-noble
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=deps /app/extensions ./extensions
+COPY . .
+CMD ["npx", "playwright", "test"]
+```
+
+### Layer caching
+
+```dockerfile
+# Copy package files first (changes less often)
+COPY package*.json ./
+RUN npm ci
+
+# Copy source files (changes more often)
+COPY . .
+```
+
+## Troubleshooting
+
+### "Browser closed unexpectedly"
+
+Increase shared memory:
+
+```bash
+docker run --shm-size=2gb ...
+```
+
+### Extension not found
+
+Ensure extensions are downloaded during build:
+
+```dockerfile
+RUN npx chroma download-extensions
+```
+
+### Permission errors
+
+Run as non-root user:
+
+```dockerfile
+USER pwuser
+```
+
+### Network issues
+
+For tests that need to connect to external services:
+
+```bash
+docker run --network host ...
+```
