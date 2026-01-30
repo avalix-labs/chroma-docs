@@ -1,0 +1,136 @@
+---
+title: Quick Start
+description: Write your first wallet interaction test
+icon: Zap
+---
+
+This guide will walk you through writing your first end-to-end test with Chroma.
+
+## Basic Test Structure
+
+Chroma extends Playwright's test fixtures with wallet-specific functionality:
+
+```ts
+import { test } from '@avalix/chroma'
+
+test('my first wallet test', async ({ page, wallets }) => {
+  // Get wallet instance
+  const polkadotJs = wallets['polkadot-js']
+  
+  // Import a test account
+  await polkadotJs.importMnemonic({
+    seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk'
+  })
+  
+  // Navigate to your dApp
+  await page.goto('http://localhost:3000')
+  
+  // Authorize the connection
+  await polkadotJs.authorize()
+})
+```
+
+## Importing Accounts
+
+Before testing wallet interactions, you need to import a test account:
+
+```ts
+// Import using mnemonic seed phrase
+await polkadotJs.importMnemonic({
+  seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk',
+  name: 'Test Account' // optional
+})
+```
+
+<Callout type="warn">
+  Never use real seed phrases in tests. Always use test accounts with no real funds.
+</Callout>
+
+## Authorizing Connections
+
+When your dApp requests wallet access, use `authorize()` to approve:
+
+```ts
+test('authorize dApp connection', async ({ page, wallets }) => {
+  const polkadotJs = wallets['polkadot-js']
+  
+  await polkadotJs.importMnemonic({
+    seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk'
+  })
+  
+  await page.goto('http://localhost:3000')
+  
+  // Click connect button in your dApp
+  await page.click('button:has-text("Connect Wallet")')
+  
+  // Approve the connection request in the wallet popup
+  await polkadotJs.authorize()
+})
+```
+
+## Approving Transactions
+
+To approve transaction signing requests:
+
+```ts
+test('approve transaction', async ({ page, wallets }) => {
+  const polkadotJs = wallets['polkadot-js']
+  
+  await polkadotJs.importMnemonic({
+    seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk'
+  })
+  
+  await page.goto('http://localhost:3000')
+  await polkadotJs.authorize()
+  
+  // Trigger a transaction in your dApp
+  await page.click('button:has-text("Send Transaction")')
+  
+  // Approve the transaction in the wallet
+  await polkadotJs.approveTx()
+})
+```
+
+## Complete Example
+
+Here's a complete test that connects a wallet and performs a transaction:
+
+```ts title="tests/transfer.spec.ts"
+import { test, expect } from '@avalix/chroma'
+
+test('transfer tokens', async ({ page, wallets }) => {
+  const polkadotJs = wallets['polkadot-js']
+  
+  // Setup account
+  await polkadotJs.importMnemonic({
+    seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk'
+  })
+  
+  // Navigate and connect
+  await page.goto('http://localhost:3000')
+  await page.click('button:has-text("Connect")')
+  await polkadotJs.authorize()
+  
+  // Verify connection
+  await expect(page.locator('.wallet-address')).toBeVisible()
+  
+  // Perform transfer
+  await page.fill('input[name="amount"]', '1.0')
+  await page.fill('input[name="recipient"]', '5GrwvaEF5zXb26Fz9rcQpDWS57CtERHpNehXCPcNoHGKutQY')
+  await page.click('button:has-text("Transfer")')
+  
+  // Approve transaction
+  await polkadotJs.approveTx()
+  
+  // Verify success
+  await expect(page.locator('.success-message')).toBeVisible()
+})
+```
+
+## Next Steps
+
+<Cards>
+  <Card title="Polkadot.js Wallet" href="/docs/wallets/polkadot-js" description="Full guide for Polkadot.js wallet" />
+  <Card title="Talisman Wallet" href="/docs/wallets/talisman" description="Full guide for Talisman wallet" />
+  <Card title="CI/CD Setup" href="/docs/guides/ci-cd" description="Run tests in continuous integration" />
+</Cards>
