@@ -18,7 +18,13 @@ Initially designed for the Polkadot ecosystem, Chroma is expanding to support EV
 ## Quick Example
 
 ```ts
-import { test } from '@avalix/chroma'
+import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{
+    type: 'polkadot-js'
+  }]
+})
 
 test('connect wallet', async ({ page, wallets }) => {
   const polkadotJs = wallets['polkadot-js']

@@ -56,11 +56,18 @@ export default defineConfig({
 You can configure tests to use multiple wallets:
 
 ```ts
-import { test } from '@avalix/chroma'
+import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [
+    { type: 'polkadot-js' },
+    { type: 'talisman' }
+  ]
+})
 
 test('use multiple wallets', async ({ wallets }) => {
   const polkadotJs = wallets['polkadot-js']
-  const talisman = wallets['talisman']
+  const talisman = wallets.talisman
   
   // Use different wallets in the same test
 })

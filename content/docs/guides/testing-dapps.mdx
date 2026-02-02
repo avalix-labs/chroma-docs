@@ -52,8 +52,14 @@ export class WalletConnectPage {
 Usage:
 
 ```ts title="tests/auth/connect-wallet.spec.ts"
-import { test, expect } from '@avalix/chroma'
+import { createWalletTest, expect } from '@avalix/chroma'
 import { WalletConnectPage } from '../pages/wallet-connect'
+
+const test = createWalletTest({
+  wallets: [{
+    type: 'polkadot-js'
+  }]
+})
 
 test('connect wallet flow', async ({ page, wallets }) => {
   const polkadotJs = wallets['polkadot-js']
@@ -77,7 +83,7 @@ test('connect wallet flow', async ({ page, wallets }) => {
 Create reusable test accounts:
 
 ```ts title="tests/fixtures.ts"
-import { test as base } from '@avalix/chroma'
+import { createWalletTest } from '@avalix/chroma'
 
 // Test accounts with known balances on testnet
 export const testAccounts = {
@@ -91,7 +97,13 @@ export const testAccounts = {
   },
 }
 
-export const test = base.extend({
+const baseTest = createWalletTest({
+  wallets: [{
+    type: 'polkadot-js'
+  }]
+})
+
+export const test = baseTest.extend({
   aliceWallet: async ({ wallets }, use) => {
     const polkadotJs = wallets['polkadot-js']
     await polkadotJs.importMnemonic(testAccounts.alice)
@@ -126,27 +138,13 @@ Test error scenarios:
 
 ```ts
 test.describe('Error Handling', () => {
-  test('handle rejected connection', async ({ page, wallets }) => {
-    const polkadotJs = wallets['polkadot-js']
-    
-    await polkadotJs.importMnemonic({ seed: '...' })
-    await page.goto('/')
-    await page.click('button:has-text("Connect")')
-    
-    // Reject the connection
-    await polkadotJs.authorize({ approve: false })
-    
-    await expect(page.locator('.error-message'))
-      .toContainText('Connection rejected')
-  })
-
   test('handle rejected transaction', async ({ page, wallets }) => {
     const polkadotJs = wallets['polkadot-js']
     
     // ... connect wallet ...
     
     await page.click('button:has-text("Transfer")')
-    await polkadotJs.approveTx({ approve: false })
+    await polkadotJs.rejectTx()
     
     await expect(page.locator('.error-message'))
       .toContainText('Transaction rejected')

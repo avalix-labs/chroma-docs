@@ -11,7 +11,13 @@ This guide will walk you through writing your first end-to-end test with Chroma.
 Chroma extends Playwright's test fixtures with wallet-specific functionality:
 
 ```ts
-import { test } from '@avalix/chroma'
+import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{
+    type: 'polkadot-js'
+  }]
+})
 
 test('my first wallet test', async ({ page, wallets }) => {
   // Get wallet instance
@@ -51,6 +57,14 @@ await polkadotJs.importMnemonic({
 When your dApp requests wallet access, use `authorize()` to approve:
 
 ```ts
+import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{
+    type: 'polkadot-js'
+  }]
+})
+
 test('authorize dApp connection', async ({ page, wallets }) => {
   const polkadotJs = wallets['polkadot-js']
   
@@ -73,6 +87,14 @@ test('authorize dApp connection', async ({ page, wallets }) => {
 To approve transaction signing requests:
 
 ```ts
+import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{
+    type: 'polkadot-js'
+  }]
+})
+
 test('approve transaction', async ({ page, wallets }) => {
   const polkadotJs = wallets['polkadot-js']
   
@@ -96,7 +118,13 @@ test('approve transaction', async ({ page, wallets }) => {
 Here's a complete test that connects a wallet and performs a transaction:
 
 ```ts title="tests/transfer.spec.ts"
-import { test, expect } from '@avalix/chroma'
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{
+    type: 'polkadot-js'
+  }]
+})
 
 test('transfer tokens', async ({ page, wallets }) => {
   const polkadotJs = wallets['polkadot-js']

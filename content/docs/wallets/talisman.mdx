@@ -8,43 +8,56 @@ Talisman is a popular multi-chain wallet for the Polkadot ecosystem. Chroma prov
 
 ## Setup
 
-Access the Talisman wallet through the `wallets` fixture:
+Create a test with Talisman wallet using `createWalletTest`:
 
 ```ts
-import { test } from '@avalix/chroma'
+import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{
+    type: 'talisman'
+  }]
+})
 
 test('talisman test', async ({ wallets }) => {
-  const talisman = wallets['talisman']
+  const talisman = wallets.talisman
 })
 ```
 
 ## Import Account
 
-Import an account using a mnemonic seed phrase:
+### Import Polkadot Mnemonic
+
+Import a Polkadot account using a mnemonic seed phrase:
 
 ```ts
-await talisman.importMnemonic({
+await talisman.importPolkadotMnemonic({
   seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk',
-  name: 'My Test Account', // optional
+  name: 'My Test Account',
+})
+```
+
+### Import Private Key
+
+Import an EVM account using a private key:
+
+```ts
+await talisman.importPrivateKey({
+  privateKey: '0x...',
+  name: 'My EVM Account',
 })
 ```
 
 ## Authorize Connection
 
-When your dApp requests wallet access:
+When your dApp requests wallet access, specify the account name to authorize:
 
 ```ts
 // Your dApp triggers a connection request
 await page.click('button:has-text("Connect Wallet")')
 
-// Approve the request
-await talisman.authorize()
-```
-
-To reject a connection:
-
-```ts
-await talisman.authorize({ approve: false })
+// Approve the request with account name
+await talisman.authorize({ accountName: 'My Test Account' })
 ```
 
 ## Approve Transaction
@@ -62,16 +75,7 @@ await talisman.approveTx()
 To reject a transaction:
 
 ```ts
-await talisman.approveTx({ approve: false })
-```
-
-## Sign Message
-
-Approve message signing requests:
-
-```ts
-await page.click('button:has-text("Sign Message")')
-await talisman.signMessage()
+await talisman.rejectTx()
 ```
 
 ## EVM Support
@@ -79,15 +83,24 @@ await talisman.signMessage()
 Talisman supports Ethereum-compatible chains. Use the same methods for EVM transactions:
 
 ```ts
+import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{
+    type: 'talisman'
+  }]
+})
+
 test('evm transaction', async ({ page, wallets }) => {
-  const talisman = wallets['talisman']
+  const talisman = wallets.talisman
   
-  await talisman.importMnemonic({
-    seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk',
+  await talisman.importPrivateKey({
+    privateKey: '0x...',
+    name: 'My EVM Account',
   })
   
   await page.goto('http://localhost:3000')
-  await talisman.authorize()
+  await talisman.authorize({ accountName: 'My EVM Account' })
   
   // EVM transaction
   await page.click('button:has-text("Send ETH")')
@@ -98,22 +111,29 @@ test('evm transaction', async ({ page, wallets }) => {
 ## Complete Example
 
 ```ts title="tests/talisman.spec.ts"
-import { test, expect } from '@avalix/chroma'
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{
+    type: 'talisman'
+  }]
+})
 
 test.describe('Talisman Wallet', () => {
   test.beforeEach(async ({ wallets }) => {
-    const talisman = wallets['talisman']
-    await talisman.importMnemonic({
+    const talisman = wallets.talisman
+    await talisman.importPolkadotMnemonic({
       seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk',
+      name: 'My Test Account',
     })
   })
 
   test('connect and transfer', async ({ page, wallets }) => {
-    const talisman = wallets['talisman']
+    const talisman = wallets.talisman
 
     await page.goto('http://localhost:3000')
     await page.click('button:has-text("Connect")')
-    await talisman.authorize()
+    await talisman.authorize({ accountName: 'My Test Account' })
 
     await expect(page.locator('.connected')).toBeVisible()
 
@@ -125,10 +145,10 @@ test.describe('Talisman Wallet', () => {
   })
 
   test('multi-chain support', async ({ page, wallets }) => {
-    const talisman = wallets['talisman']
+    const talisman = wallets.talisman
 
     await page.goto('http://localhost:3000')
-    await talisman.authorize()
+    await talisman.authorize({ accountName: 'My Test Account' })
 
     // Switch to Ethereum chain in your dApp
     await page.click('button:has-text("Switch to Ethereum")')
@@ -160,11 +180,11 @@ test.setTimeout(60000)
 
 ### Account not found
 
-Ensure the mnemonic is imported before interacting with the dApp:
+Ensure the account is imported before interacting with the dApp:
 
 ```ts
 // Import FIRST
-await talisman.importMnemonic({ seed: '...' })
+await talisman.importPolkadotMnemonic({ seed: '...', name: 'My Account' })
 
 // THEN navigate to dApp
 await page.goto('http://localhost:3000')

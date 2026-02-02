@@ -8,10 +8,16 @@ Polkadot.js is the official wallet extension for the Polkadot ecosystem. Chroma 
 
 ## Setup
 
-Access the Polkadot.js wallet through the `wallets` fixture:
+Create a test with Polkadot.js wallet using `createWalletTest`:
 
 ```ts
-import { test } from '@avalix/chroma'
+import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{
+    type: 'polkadot-js'
+  }]
+})
 
 test('polkadot.js test', async ({ wallets }) => {
   const polkadotJs = wallets['polkadot-js']
@@ -41,12 +47,6 @@ await page.click('button:has-text("Connect Wallet")')
 await polkadotJs.authorize()
 ```
 
-To reject a connection:
-
-```ts
-await polkadotJs.authorize({ approve: false })
-```
-
 ## Approve Transaction
 
 When your dApp requests transaction signing:
@@ -62,22 +62,19 @@ await polkadotJs.approveTx()
 To reject a transaction:
 
 ```ts
-await polkadotJs.approveTx({ approve: false })
-```
-
-## Sign Message
-
-Approve message signing requests:
-
-```ts
-await page.click('button:has-text("Sign Message")')
-await polkadotJs.signMessage()
+await polkadotJs.rejectTx()
 ```
 
 ## Complete Example
 
 ```ts title="tests/polkadot-js.spec.ts"
-import { test, expect } from '@avalix/chroma'
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{
+    type: 'polkadot-js'
+  }]
+})
 
 test.describe('Polkadot.js Wallet', () => {
   test.beforeEach(async ({ wallets }) => {
@@ -101,16 +98,6 @@ test.describe('Polkadot.js Wallet', () => {
     await polkadotJs.approveTx()
 
     await expect(page.locator('.success')).toBeVisible()
-  })
-
-  test('reject connection', async ({ page, wallets }) => {
-    const polkadotJs = wallets['polkadot-js']
-
-    await page.goto('http://localhost:3000')
-    await page.click('button:has-text("Connect")')
-    await polkadotJs.authorize({ approve: false })
-
-    await expect(page.locator('.error')).toContainText('Connection rejected')
   })
 })
 ```
