@@ -14,6 +14,8 @@
     "---Guides---",
     "guides/testing-dapps",
     "guides/ci-cd",
-    "guides/docker"
+    "guides/docker",
+    "---Examples---",
+    "examples/privy"
   ]
 }

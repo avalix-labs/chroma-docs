@@ -1,0 +1,156 @@
+---
+title: Privy Login
+description: Test wallet login with Privy authentication
+icon: Lock
+---
+
+This example demonstrates how to test logging into [Privy](https://privy.io) using Talisman wallet with an EVM address.
+
+## Prerequisites
+
+Before starting, make sure you have completed the following steps:
+
+### 1. Initialize Playwright
+
+```bash
+npm init playwright@latest
+```
+
+### 2. Install Chroma
+
+```bash
+npm add -D @avalix/chroma
+```
+
+### 3. Update package.json Scripts
+
+Add the following scripts to your `package.json`:
+
+```json
+{
+  "scripts": {
+    "test": "playwright test",
+    "test:ui": "playwright test --ui",
+    "test:prepare": "chroma prepare"
+  }
+}
+```
+
+### 4. Update .gitignore
+
+Add `.chroma` to your `.gitignore` file:
+
+```txt
+.chroma
+```
+
+### 5. Prepare Wallet Extensions
+
+Run the prepare command to download wallet extensions:
+
+```bash
+npm run test:prepare
+```
+
+### 6. Configure Playwright
+
+Update your `playwright.config.ts`:
+
+```ts
+import { defineConfig, devices } from '@playwright/test';
+
+export default defineConfig({
+  testDir: './tests',
+  fullyParallel: true,
+  forbidOnly: !!process.env.CI,
+  retries: process.env.CI ? 2 : 0,
+  workers: process.env.CI ? 1 : undefined,
+  reporter: 'html',
+  use: {
+    trace: 'on-first-retry',
+  },
+  projects: [
+    {
+      name: 'chromium',
+      use: { ...devices['Desktop Chrome'] },
+    },
+  ],
+});
+```
+
+## Write the Test
+
+Create a test file `tests/privy-login.spec.ts`:
+
+```ts
+import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{
+    type: 'talisman'
+  }]
+})
+
+const ACCOUNT_NAME = 'Test Account'
+const ETH_PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
+const PASSWORD = 'h3llop0lkadot!'
+
+test('login to privy with evm address', async ({ page, wallets }) => {
+  const wallet = wallets.talisman
+
+  // Import an Ethereum account using private key
+  await wallet.importEthPrivateKey({
+    privateKey: ETH_PRIVATE_KEY,
+    name: ACCOUNT_NAME,
+    password: PASSWORD
+  })
+
+  // Navigate to Privy demo
+  await page.goto('https://demo.privy.io')
+
+  // Accept terms
+  await page.getByRole('button', { name: 'AGREE & PROCEED' }).click();
+  await page.waitForTimeout(1000)
+
+  // Connect with wallet
+  await page.getByRole('button', { name: 'Continue with a wallet' }).click();
+  await page.getByPlaceholder('Search wallets').click();
+  await page.getByPlaceholder('Search wallets').fill('talisman');
+  await page.getByRole('button', { name: 'Talisman' }).click();
+  await page.getByRole('button', { name: 'Talisman' }).first().click();
+
+  // Authorize wallet connection
+  await wallet.authorize({ accountName: ACCOUNT_NAME })
+
+  // Verify login success
+  await page.getByText('0x646...E85Active').isVisible()
+})
+```
+
+<Callout type="warn">
+  The private key shown above is a well-known test key. Never use real private keys in tests.
+</Callout>
+
+## Run the Test
+
+```bash
+npm test
+```
+
+Or run with UI mode for debugging:
+
+```bash
+npm run test:ui
+```
+
+## Approving Transactions
+
+If you need to approve a transaction after logging in, use `approveTx()`:
+
+```ts
+// After login, trigger a transaction in the dApp
+await page.getByRole('button', { name: 'Send Transaction' }).click();
+
+// Approve the transaction in Talisman
+await wallet.approveTx()
+```
