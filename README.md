@@ -1,45 +1,57 @@
-# chroma-docs
+# Chroma Documentation
 
-This is a Next.js application generated with
-[Create Fumadocs](https://github.com/fuma-nama/fumadocs).
+Official documentation website for [Chroma](https://github.com/avalix-labs/chroma) - an end-to-end (E2E) testing library for wallet interactions across multiple blockchain ecosystems.
+
+## About Chroma
+
+Chroma enables developers to write automated tests that interact with real wallet extensions, providing a comprehensive testing solution for decentralized applications (dApps).
+
+Initially designed for the Polkadot ecosystem, Chroma is expanding to support EVM (Ethereum Virtual Machine) and SVM (Solana Virtual Machine) chains.
+
+## Development
+
+This documentation site is built with [Next.js](https://nextjs.org) and [Fumadocs](https://fumadocs.dev).
+
+### Prerequisites
+
+- [Bun](https://bun.sh) 1.0+
+
+### Getting Started
+
+Install dependencies:
+
+```bash
+bun install
+```
 
 Run development server:
 
 ```bash
-npm run dev
-# or
-pnpm dev
-# or
-yarn dev
+bun dev
 ```
 
 Open http://localhost:3000 with your browser to see the result.
 
-## Explore
+### Build
 
-In the project, you can see:
+```bash
+bun run build
+```
 
-- `lib/source.ts`: Code for content source adapter, [`loader()`](https://fumadocs.dev/docs/headless/source-api) provides the interface to access your content.
-- `lib/layout.shared.tsx`: Shared options for layouts, optional but preferred to keep.
+## Project Structure
 
-| Route                     | Description                                            |
-| ------------------------- | ------------------------------------------------------ |
-| `app/(home)`              | The route group for your landing page and other pages. |
-| `app/docs`                | The documentation layout and pages.                    |
-| `app/api/search/route.ts` | The Route Handler for search.                          |
+| Path | Description |
+| --- | --- |
+| `content/docs` | Documentation MDX files |
+| `app/(home)` | Landing page |
+| `app/docs` | Documentation layout and pages |
+| `lib/source.ts` | Content source adapter |
 
-### Fumadocs MDX
+## Links
 
-A `source.config.ts` config file has been included, you can customise different options like frontmatter schema.
+- [Chroma Repository](https://github.com/avalix-labs/chroma)
+- [Chroma Examples](https://github.com/avalix-labs/chroma-examples)
 
-Read the [Introduction](https://fumadocs.dev/docs/mdx) for further details.
+## License
 
-## Learn More
-
-To learn more about Next.js and Fumadocs, take a look at the following
-resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js
-  features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-- [Fumadocs](https://fumadocs.dev) - learn about Fumadocs
+MIT
