@@ -13,6 +13,8 @@ Before starting, make sure you have completed the following steps:
 ### 1. Initialize Playwright
 
 ```bash
+mkdir privy-login
+cd privy-login
 npm init playwright@latest
 ```
 
@@ -31,7 +33,7 @@ Add the following scripts to your `package.json`:
   "scripts": {
     "test": "playwright test",
     "test:ui": "playwright test --ui",
-    "test:prepare": "chroma prepare"
+    "test:prepare": "chroma download-extensions"
   }
 }
 ```
