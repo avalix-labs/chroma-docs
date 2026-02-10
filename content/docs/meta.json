@@ -13,6 +13,7 @@
     "wallets/talisman",
     "---Guides---",
     "guides/testing-dapps",
+    "guides/multi-chain",
     "guides/ci-cd",
     "guides/docker",
     "---Examples---",
