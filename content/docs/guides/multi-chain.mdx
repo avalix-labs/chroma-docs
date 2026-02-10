@@ -1,0 +1,118 @@
+---
+title: Multi-Chain Testing
+description: Test chain switching and multi-chain dApps with Chroma
+icon: ArrowLeftRight
+---
+
+This guide shows how to test chain switching in multi-chain EVM dApps using Chroma. When your dApp supports multiple networks (e.g., Polkadot Asset Hub and Moonbeam), you can automate the chain switching flow in your end-to-end tests.
+
+## How It Works
+
+Testing chain switching with Chroma is straightforward. The key steps are:
+
+1. **Click the current chain** in the chain selector to open the dropdown
+2. **Click the target chain** to trigger a switch request
+3. **Approve or reject** the chain switch in the wallet
+4. **Verify** the UI updates to reflect the new chain
+
+<Callout type="info">
+  Chain switching triggers a wallet approval popup, similar to signing a transaction. Use `wallet.approveTx()` to approve or `wallet.rejectTx()` to reject the switch.
+</Callout>
+
+## Switch Chain
+
+Here's how to switch from one chain to another and verify the UI updates:
+
+```ts
+// Click the current chain name to open the chain selector dropdown
+await page.getByRole('button', { name: 'Polkadot Hub TestNet' }).click()
+
+// Select the target chain
+await page.getByRole('button', { name: 'Moonbase Alpha' }).click()
+
+// Approve the chain switch in the wallet
+await wallet.approveTx()
+
+// Verify the chain has switched
+await page.getByRole('paragraph').filter({ hasText: 'Moonbase Alpha' }).waitFor({ state: 'visible' })
+```
+
+## Reject Chain Switch
+
+You can also test the case where the user rejects the chain switch:
+
+```ts
+// Open chain selector and select a different chain
+await page.getByRole('button', { name: 'Polkadot Hub TestNet' }).click()
+await page.getByRole('button', { name: 'Moonbase Alpha' }).click()
+
+// Reject the chain switch
+await wallet.rejectTx()
+
+// Verify the chain remains unchanged
+await page.getByRole('paragraph').filter({ hasText: 'Polkadot Hub TestNet' }).waitFor({ state: 'visible' })
+```
+
+## Full Example
+
+Below is a complete test that connects a wallet, performs a transaction, and then switches the chain:
+
+```ts title="tests/multi-chain.spec.ts"
+import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'talisman' }] as const,
+})
+
+const ACCOUNT_NAME = 'Test Account'
+const ETH_PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
+const PASSWORD = 'h3llop0lkadot!'
+
+test.beforeAll(async ({ wallets }) => {
+  await wallets.talisman.importEthPrivateKey({
+    privateKey: ETH_PRIVATE_KEY,
+    password: PASSWORD,
+    name: ACCOUNT_NAME,
+  })
+})
+
+test('switch chain after connecting', async ({ page, wallets }) => {
+  const wallet = wallets.talisman
+
+  await page.goto('/')
+  await page.waitForLoadState('networkidle')
+
+  // Connect wallet
+  await page.getByRole('button', { name: /Connect Wallet/i }).click()
+  await page.getByRole('button', { name: /CONNECT/i }).nth(1).click()
+  await wallet.authorize({ accountName: ACCOUNT_NAME })
+
+  // Reject chain switch
+  await page.getByRole('button', { name: 'Polkadot Hub TestNet' }).click()
+  await page.getByRole('button', { name: 'Moonbase Alpha' }).click()
+  await wallet.rejectTx()
+  await page
+    .getByRole('paragraph')
+    .filter({ hasText: 'Polkadot Hub TestNet' })
+    .waitFor({ state: 'visible' })
+
+  // Approve chain switch
+  await page.getByRole('button', { name: 'Polkadot Hub TestNet' }).first().click()
+  await page.getByRole('button', { name: 'Moonbase Alpha' }).click()
+  await wallet.approveTx()
+  await page
+    .getByRole('paragraph')
+    .filter({ hasText: 'Moonbase Alpha' })
+    .waitFor({ state: 'visible' })
+})
+```
+
+<Callout type="warn">
+  The private key shown above is a well-known test key. Never use real private keys in tests.
+</Callout>
+
+## Tips
+
+- **Chain names must match the UI**: The button name in `getByRole('button', { name: '...' })` must match exactly what your dApp displays as the chain name.
+- **Wait for state**: Always use `.waitFor({ state: 'visible' })` after switching chains to ensure the UI has updated before continuing.
+- **Multiple switches**: You can chain multiple switches in a single test to verify round-trip behavior (e.g., Chain A -> Chain B -> Chain A).
