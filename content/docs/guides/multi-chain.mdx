@@ -6,6 +6,8 @@ icon: ArrowLeftRight
 
 This guide shows how to test chain switching in multi-chain EVM dApps using Chroma. When your dApp supports multiple networks (e.g., Polkadot Asset Hub and Moonbeam), you can automate the chain switching flow in your end-to-end tests.
 
+It also provides **reusable helper utilities** you can drop into your test suite to reduce boilerplate across multi-chain test scenarios.
+
 ## How It Works
 
 Testing chain switching with Chroma is straightforward. The key steps are:
@@ -53,20 +55,105 @@ await wallet.rejectTx()
 await page.getByRole('paragraph').filter({ hasText: 'Polkadot Hub TestNet' }).waitFor({ state: 'visible' })
 ```
 
-## Full Example
+## Multi-Chain Helper Utilities
 
-Below is a complete test that connects a wallet, performs a transaction, and then switches the chain:
+When your test suite involves many chain-switching scenarios, repeating the same click-approve-verify sequence becomes tedious and error-prone. The helper below wraps the entire chain switching flow into a reusable function and exposes it as a [Playwright fixture](https://playwright.dev/docs/test-fixtures).
 
-```ts title="tests/multi-chain.spec.ts"
+Create a single file that contains the `switchChain` helper and the fixture:
+
+```ts title="tests/helpers/multi-chain.ts"
+import type { Page } from '@playwright/test'
 import { createWalletTest } from '@avalix/chroma'
 
-const test = createWalletTest({
+interface SwitchChainOptions {
+  /** The Chroma wallet instance (e.g., wallets.talisman) */
+  wallet: { approveTx: () => Promise<void>, rejectTx: () => Promise<void> }
+  /** Playwright Page instance */
+  page: Page
+  /** Chain name currently displayed in the UI */
+  fromChain: string
+  /** Target chain name to switch to */
+  toChain: string
+  /** Whether to approve or reject the switch (defaults to 'approve') */
+  action?: 'approve' | 'reject'
+}
+
+/**
+ * Switches from one chain to another by interacting with the chain selector UI
+ * and handling the wallet confirmation popup.
+ *
+ * @example
+ * await switchChain({
+ *   wallet,
+ *   page,
+ *   fromChain: 'Polkadot Hub TestNet',
+ *   toChain: 'Moonbase Alpha',
+ * })
+ */
+export async function switchChain({
+  wallet,
+  page,
+  fromChain,
+  toChain,
+  action = 'approve',
+}: SwitchChainOptions): Promise<void> {
+  // Open chain selector and pick the target chain
+  await page.getByRole('button', { name: fromChain }).first().click()
+  await page.getByRole('button', { name: toChain }).click()
+
+  // Handle wallet confirmation
+  if (action === 'approve') {
+    await wallet.approveTx()
+  }
+  else {
+    await wallet.rejectTx()
+  }
+
+  // Verify the UI reflects the expected chain
+  const expectedChain = action === 'approve' ? toChain : fromChain
+  await page
+    .getByRole('paragraph')
+    .filter({ hasText: expectedChain })
+    .waitFor({ state: 'visible' })
+}
+
+/**
+ * Test extension for chain switching
+ */
+const baseTest = createWalletTest({
   wallets: [{ type: 'talisman' }] as const,
 })
+
+type ChainSwitcher = (opts: {
+  fromChain: string
+  toChain: string
+  action?: 'approve' | 'reject'
+}) => Promise<void>
+
+export const test = baseTest.extend<{
+  switchChain: ChainSwitcher
+}>({
+  switchChain: async ({ page, wallets }, use) => {
+    const wallet = wallets.talisman
+    await use(({ fromChain, toChain, action }) =>
+      switchChain({ wallet, page, fromChain, toChain, action }),
+    )
+  },
+})
+```
+
+## Full Example
+
+Below is a complete test that connects a wallet, performs a transaction, and switches the chain using the `switchChain` fixture:
+
+```ts title="tests/multi-chain.spec.ts"
+import { test } from './helpers/multi-chain'
 
 const ACCOUNT_NAME = 'Test Account'
 const ETH_PRIVATE_KEY = '0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80'
 const PASSWORD = 'h3llop0lkadot!'
+
+test.setTimeout(30_000 * 2)
 
 test.beforeAll(async ({ wallets }) => {
   await wallets.talisman.importEthPrivateKey({
@@ -76,34 +163,35 @@ test.beforeAll(async ({ wallets }) => {
   })
 })
 
-test('switch chain after connecting', async ({ page, wallets }) => {
+test('test with talisman wallet', async ({ page, wallets, switchChain }) => {
   const wallet = wallets.talisman
 
   await page.goto('/')
   await page.waitForLoadState('networkidle')
 
-  // Connect wallet
   await page.getByRole('button', { name: /Connect Wallet/i }).click()
-  await page.getByRole('button', { name: /CONNECT/i }).nth(1).click()
+
+  const modalVisible = await page.locator('h2:has-text("CONNECT WALLET")').isVisible()
+  if (modalVisible) {
+    await page.getByRole('button', { name: /CONNECT/i }).nth(1).click()
+  }
   await wallet.authorize({ accountName: ACCOUNT_NAME })
 
-  // Reject chain switch
-  await page.getByRole('button', { name: 'Polkadot Hub TestNet' }).click()
-  await page.getByRole('button', { name: 'Moonbase Alpha' }).click()
-  await wallet.rejectTx()
-  await page
-    .getByRole('paragraph')
-    .filter({ hasText: 'Polkadot Hub TestNet' })
-    .waitFor({ state: 'visible' })
+  const insertNumber = Math.floor(Math.random() * 10000)
+  await page.getByPlaceholder('Enter a number').fill(insertNumber.toString())
 
-  // Approve chain switch
-  await page.getByRole('button', { name: 'Polkadot Hub TestNet' }).first().click()
-  await page.getByRole('button', { name: 'Moonbase Alpha' }).click()
+  await page.getByRole('button', { name: 'Store' }).click()
+  await wallet.rejectTx()
+  await page.getByText('User rejected the request.').waitFor({ state: 'visible' })
+
+  await page.getByRole('button', { name: 'Store' }).click()
   await wallet.approveTx()
-  await page
-    .getByRole('paragraph')
-    .filter({ hasText: 'Moonbase Alpha' })
-    .waitFor({ state: 'visible' })
+
+  // Switch to Moonbase Alpha (reject)
+  await switchChain({ fromChain: 'Polkadot Hub TestNet', toChain: 'Moonbase Alpha', action: 'reject' })
+
+  // Switch to Moonbase Alpha (approve)
+  await switchChain({ fromChain: 'Polkadot Hub TestNet', toChain: 'Moonbase Alpha', action: 'approve' })
 })
 ```
 
@@ -111,8 +199,27 @@ test('switch chain after connecting', async ({ page, wallets }) => {
   The private key shown above is a well-known test key. Never use real private keys in tests.
 </Callout>
 
+## Why App-Level Helpers Instead of Built-In Library Utilities?
+
+You might wonder why Chroma doesn't ship a built-in `switchChain()` method. There are deliberate reasons for this:
+
+<Callout type="info">
+  Chroma provides **wallet-level primitives** (`approveTx`, `rejectTx`, `authorize`) rather than opinionated UI-flow helpers. This is by design.
+</Callout>
+
+1. **Chain selectors differ across dApps.** Every dApp renders its chain selector differently - dropdowns, modals, sidebars, command palettes. A library-level `switchChain()` would need to know your specific UI structure, which couples the testing library to your frontend implementation.
+
+2. **Chroma focuses on the wallet boundary.** Chroma's responsibility is automating the wallet extension (approving transactions, authorizing connections, importing accounts). The UI interactions before and after the wallet popup are standard Playwright operations specific to your app.
+
+3. **Composability over abstraction.** By keeping the primitives small (`approveTx`, `rejectTx`), you can compose them into whatever helper fits your dApp. The `switchChain` helper shown above is one pattern - your app might need a completely different flow.
+
+4. **App-level helpers are easy to build.** As demonstrated in the [Multi-Chain Helper Utilities](#multi-chain-helper-utilities) section, building a reusable `switchChain` helper takes only a few lines and can be customized to match your exact UI. Wrapping this into a Playwright fixture makes it available to all tests automatically.
+
+This approach follows the same philosophy as Playwright itself: provide powerful low-level APIs and let users compose higher-level abstractions that fit their specific application.
+
 ## Tips
 
 - **Chain names must match the UI**: The button name in `getByRole('button', { name: '...' })` must match exactly what your dApp displays as the chain name.
 - **Wait for state**: Always use `.waitFor({ state: 'visible' })` after switching chains to ensure the UI has updated before continuing.
 - **Multiple switches**: You can chain multiple switches in a single test to verify round-trip behavior (e.g., Chain A -> Chain B -> Chain A).
+- **Use the helpers**: For test suites with many chain-switching scenarios, use the [helper utilities](#multi-chain-helper-utilities) to keep your tests DRY and readable.
