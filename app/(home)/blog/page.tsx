@@ -15,12 +15,14 @@ export default function BlogPage() {
             className="block bg-fd-secondary rounded-lg shadow-md overflow-hidden p-6 hover:bg-fd-secondary/80 transition-colors"
           >
             <h2 className="text-xl font-semibold mb-2">{post.data.title}</h2>
-            <p className="text-fd-muted-foreground mb-4 line-clamp-2">
-              {post.data.description}
-            </p>
+            {post.data.description && (
+              <p className="text-fd-muted-foreground mb-4 line-clamp-2">
+                {post.data.description}
+              </p>
+            )}
             <span className="text-sm text-fd-muted-foreground">
               {new Date(post.data.date).toLocaleDateString()}
-              {post.data.author && ` · ${post.data.author}`}
+              {` · ${post.data.author}`}
             </span>
           </Link>
         ))}
