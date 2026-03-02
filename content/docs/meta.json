@@ -11,6 +11,7 @@
     "---Wallets---",
     "wallets/polkadot-js",
     "wallets/talisman",
+    "wallets/metamask",
     "---Guides---",
     "guides/testing-dapps",
     "guides/multi-chain",

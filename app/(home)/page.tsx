@@ -94,7 +94,7 @@ export default function HomePage() {
             <FeatureCard
               icon={<FlaskConical className="w-6 h-6" />}
               title="Real Wallet Testing"
-              description="Test with actual wallet extensions like Polkadot.js and Talisman. No mocks, no stubs."
+              description="Test with actual wallet extensions like Polkadot.js, Talisman, and MetaMask. No mocks, no stubs."
             />
             <FeatureCard
               icon={<Zap className="w-6 h-6" />}
@@ -104,7 +104,7 @@ export default function HomePage() {
             <FeatureCard
               icon={<Blocks className="w-6 h-6" />}
               title="Multi-Chain Ready"
-              description="Support for Polkadot ecosystem with EVM and SVM chains coming soon."
+              description="Support for Polkadot ecosystem, EVM (including MetaMask), and SVM chains coming soon."
             />
           </div>
         </div>
