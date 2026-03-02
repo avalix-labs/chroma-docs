@@ -160,6 +160,9 @@ export default function HomePage() {
             <Link href="/docs" className="text-fd-muted-foreground hover:text-fd-foreground transition-colors">
               Documentation
             </Link>
+            <Link href="/blog" className="text-fd-muted-foreground hover:text-fd-foreground transition-colors">
+              Blog
+            </Link>
             <Link href="https://github.com/avalix-labs/chroma" target="_blank" rel="noopener noreferrer" className="text-fd-muted-foreground hover:text-fd-foreground transition-colors">
               GitHub
             </Link>

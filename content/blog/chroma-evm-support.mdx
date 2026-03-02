@@ -1,0 +1,42 @@
+---
+title: Chroma Now Supports EVM Chains
+description: Test your dApps with MetaMask and other EVM wallets
+date: 2025-02-15
+author: Chroma Team
+---
+
+We're thrilled to announce that Chroma now supports EVM (Ethereum Virtual Machine) chains, including MetaMask wallet testing.
+
+## Why EVM Support Matters
+
+The Ethereum ecosystem hosts thousands of dApps. With EVM support, you can now:
+
+- **Test MetaMask flows** — Connect, sign, and approve transactions
+- **Run multi-wallet tests** — Use Polkadot.js and MetaMask in the same test suite
+- **Cover real user scenarios** — No mocks, no stubs, just real wallet extensions
+
+## Getting Started
+
+Install Chroma and add the MetaMask wallet to your test configuration:
+
+```ts
+import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [
+    { type: 'polkadot-js' },
+    { type: 'metamask' },
+  ],
+})
+```
+
+Check out our [MetaMask guide](/docs/wallets/metamask) for the full setup.
+
+## What's Supported
+
+- Wallet connection and authorization
+- Transaction signing and approval
+- Network switching
+- Multiple accounts
+
+We're just getting started with EVM. More features and wallet support are on the way!
