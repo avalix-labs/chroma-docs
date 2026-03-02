@@ -1,0 +1,142 @@
+---
+title: MetaMask
+description: Testing with MetaMask wallet extension (EVM)
+icon: Wallet
+---
+
+MetaMask is the leading wallet for EVM (Ethereum Virtual Machine) chains. Chroma provides full support for automating MetaMask wallet interactions using **MetaMask Flask** (v13.17.0). Download the extension via `npx chroma download-extensions` before running tests.
+
+## Setup
+
+Create a test with MetaMask wallet using `createWalletTest`:
+
+```ts
+import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{
+    type: 'metamask'
+  }]
+})
+
+test('metamask test', async ({ wallets }) => {
+  const metamask = wallets.metamask
+})
+```
+
+## Import Account
+
+Import an account using a Secret Recovery Phrase (SRP). This runs MetaMask's onboarding flow (import wallet, set password, complete setup):
+
+```ts
+await metamask.importSeedPhrase({
+  seedPhrase: 'test test test test test test test test test test test junk',
+})
+```
+
+<Callout type="warn">
+  Never use real seed phrases in tests. Always use test accounts with no real funds.
+</Callout>
+
+## Authorize Connection
+
+When your dApp requests wallet access:
+
+```ts
+// Your dApp triggers a connection request
+await page.click('button:has-text("Connect Wallet")')
+
+// Approve the request
+await metamask.authorize()
+```
+
+## Confirm or Reject Transaction
+
+When your dApp requests transaction signing or message signing:
+
+```ts
+// Your dApp triggers a transaction
+await page.click('button:has-text("Submit")')
+
+// Confirm the transaction
+await metamask.confirm()
+```
+
+To reject a transaction or connection request:
+
+```ts
+await metamask.reject()
+```
+
+<Callout type="info">
+  MetaMask uses `confirm()` and `reject()` instead of `approveTx()` and `rejectTx()` used by other Chroma wallets.
+</Callout>
+
+## Complete Example
+
+```ts title="tests/metamask.spec.ts"
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{
+    type: 'metamask'
+  }]
+})
+
+test.describe('MetaMask Wallet', () => {
+  test.beforeEach(async ({ wallets }) => {
+    const metamask = wallets.metamask
+    await metamask.importSeedPhrase({
+      seedPhrase: 'test test test test test test test test test test test junk',
+    })
+  })
+
+  test('connect and send transaction', async ({ page, wallets }) => {
+    const metamask = wallets.metamask
+
+    await page.goto('http://localhost:3000')
+    await page.click('button:has-text("Connect")')
+    await metamask.authorize()
+
+    await expect(page.locator('.connected')).toBeVisible()
+
+    await page.fill('input[name="amount"]', '0.01')
+    await page.click('button:has-text("Send")')
+    await metamask.confirm()
+
+    await expect(page.locator('.success')).toBeVisible()
+  })
+})
+```
+
+## Troubleshooting
+
+### Extension not loading
+
+Make sure you've downloaded the extensions:
+
+```bash
+npx chroma download-extensions
+```
+
+Chroma uses MetaMask Flask. The extension is installed under `.chroma/metamask-extension-13.17.0`.
+
+### Popup not appearing
+
+Increase the timeout in your test:
+
+```ts
+test.setTimeout(60000)
+```
+
+### Account not found
+
+Ensure the seed phrase is imported before interacting with the dApp:
+
+```ts
+// Import FIRST
+await metamask.importSeedPhrase({ seedPhrase: '...' })
+
+// THEN navigate to dApp
+await page.goto('http://localhost:3000')
+```

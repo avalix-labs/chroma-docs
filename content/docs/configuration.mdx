@@ -61,14 +61,16 @@ import { createWalletTest } from '@avalix/chroma'
 const test = createWalletTest({
   wallets: [
     { type: 'polkadot-js' },
-    { type: 'talisman' }
+    { type: 'talisman' },
+    { type: 'metamask' }
   ]
 })
 
 test('use multiple wallets', async ({ wallets }) => {
   const polkadotJs = wallets['polkadot-js']
   const talisman = wallets.talisman
-  
+  const metamask = wallets.metamask
+
   // Use different wallets in the same test
 })
 ```
