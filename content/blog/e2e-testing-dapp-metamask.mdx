@@ -1,21 +1,23 @@
 ---
 title: "E2E Testing Your EVM dApp with MetaMask: No Mocks, Just Real Clicks"
-description: "Automate real MetaMask wallet flows in end-to-end tests using Chroma and Playwright. Connect, sign, and assert with confidence."
+description: "Run Playwright tests against a real MetaMask extension. Connect, sign, and reject flows covered in CI. No mocks, no manual clicks."
 author: Chroma Team
 date: 2025-03-04
 ---
 
-Testing a dApp that talks to MetaMask is tricky. Mocking the wallet leaves real connection and signing flows untested. Manual clicks are slow and brittle. What you want is **automated end-to-end tests that drive a real MetaMask extension** (same as your users), so connect, sign, and reject flows are covered before release.
+Mock the wallet and you leave connection prompts, chain switching, and signing dialogs untested. Rely on manual clicks and tests become slow and brittle. **Automated E2E tests that drive a real MetaMask extension** (the same one your users have) give you connect, sign, and reject coverage before you ship.
 
-This post shows how to do that with [Chroma](https://github.com/avalix-labs/chroma): run Playwright tests that control MetaMask Flask, import an account, authorize connections, and confirm or reject transactions, all in code.
+Here’s how to get that with [Chroma](https://github.com/avalix-labs/chroma): Playwright tests that control MetaMask Flask, import an account, authorize connections, and confirm or reject transactions, all in code.
 
 ## Why test with a real MetaMask?
 
-- **Catch integration bugs:** Connection prompts, chain switching, and signing dialogs behave differently than mocks.
-- **Reproduce user flows:** Same extension and UI your users see.
-- **Regression safety:** Wallet or dApp UI changes are caught by failing tests.
+Real-wallet tests catch what mocks miss:
 
-Chroma uses **MetaMask Flask** (v13.17.0) so you get a stable, test-friendly build. Download it once via the CLI; your tests then drive it like a real user would.
+- **Integration bugs:** Connection prompts, chain switching, and signing dialogs behave differently than mocks.
+- **Real user flows:** Same extension and UI your users see.
+- **Regression safety:** Wallet or dApp UI changes show up as failing tests.
+
+Chroma uses **MetaMask Flask** (v13.17.0), a stable, test-friendly build. Download it once via the CLI; your tests drive it like a real user.
 
 ## Setup
 
@@ -67,7 +69,7 @@ Import the account **before** navigating to your dApp so the wallet is ready whe
 
 ## Authorize the connection
 
-When the dApp triggers “Connect wallet” (e.g. “Connect Wallet” or “Continue with a wallet”), MetaMask shows a connection popup. In the test, trigger the click, then approve in MetaMask:
+When the dApp triggers “Connect wallet” (e.g. “Connect Wallet” or “Continue with a wallet”), MetaMask shows a connection popup. In your test: click the button, then approve in MetaMask:
 
 ```ts
 await page.goto('https://your-dapp.example.com')
@@ -144,7 +146,7 @@ Flow in short:
 4. `authorize()` to accept the connection; `confirm()` to accept the subsequent signing step.
 5. Assert that the UI shows the connected address (or another success state).
 
-For your own dApp, replace the URL and button/placeholder text with your real selectors.
+Swap the URL and selectors for your dApp and run the same flow.
 
 ## Troubleshooting
 
@@ -160,11 +162,11 @@ If you run into issues when using MetaMask with Chroma, please report them on th
 
 ## What’s next
 
-- **Docs:** [MetaMask wallet guide](/docs/wallets/metamask): API reference and more examples.
-- **Testing patterns:** [Testing dApps](/docs/guides/testing-dapps): Page Object Model, test data, and waiting for blockchain state.
-- **Multi-chain:** [Multi-chain guide](/docs/guides/multi-chain): Use MetaMask alongside other Chroma-supported wallets in the same project.
+- **[MetaMask wallet guide](/docs/wallets/metamask)**: API reference and more examples.
+- **[Testing dApps](/docs/guides/testing-dapps)**: Page Object Model, test data, and waiting for blockchain state.
+- **[Multi-chain guide](/docs/guides/multi-chain)**: Run MetaMask alongside other Chroma-supported wallets in the same project.
 
-Automating MetaMask in E2E tests with Chroma gives you real wallet behavior in CI and locally. No mocks, just real clicks and real confidence before you ship.
+With Chroma, your E2E tests run against a real MetaMask in CI and locally. No mocks, just real clicks and coverage you can ship on.
 
 ---
 
