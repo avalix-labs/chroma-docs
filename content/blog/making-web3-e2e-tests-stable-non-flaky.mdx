@@ -1,0 +1,165 @@
+---
+title: "Why Your Web3 E2E Tests Are Flaky and How to Fix Them"
+description: "A hands-on guide to diagnosing and eliminating flaky end-to-end tests in dApps, with proven patterns for stable wallet automation using Playwright."
+author: Chroma Team
+date: 2026-03-13
+---
+
+# Why Your Web3 E2E Tests Are Flaky and How to Fix Them
+
+*Practical patterns for turning unreliable dApp test suites into stable, repeatable pipelines.*
+
+## Introduction
+
+Flaky tests erode trust. When your CI pipeline alternates between green and red on the same commit, developers stop paying attention to failures. They re-run the suite, cross their fingers, and eventually start merging without confidence.
+
+In Web3 applications, the flakiness problem is amplified. Your end-to-end tests need to coordinate between your frontend, one or more wallet extensions, popup windows, network requests to RPC endpoints, and on-chain state that may change between runs. Each of those boundaries is a potential source of non-determinism.
+
+The result is a familiar frustration: tests pass locally but break in CI. Tests pass on Monday but fail on Thursday. A test that worked for months suddenly starts timing out after a wallet extension update. This article walks through the most common sources of flakiness in Web3 E2E tests and shows concrete strategies to fix them.
+
+## What is @avalix/chroma
+
+[@avalix/chroma](https://github.com/avalix-labs/chroma) is a developer toolkit for end-to-end testing of Web3 applications. It lets you automate real wallet extensions inside Playwright tests, replacing mocked providers with actual browser-based wallet interactions.
+
+- **Real wallet automation** - drives actual wallet extensions (MetaMask, Talisman, Polkadot.js) instead of injecting fake providers
+- **Built for Playwright** - integrates directly with the Playwright test runner and browser contexts
+- **Deterministic wallet state** - provides helpers to set up wallets with known accounts, networks, and balances before each test
+- **CI-ready** - designed to run headless in containerized environments without display servers
+- **Stable by default** - uses built-in retry logic and smart waiting strategies to handle the asynchronous nature of wallet popups
+
+## Key Features
+
+**Wallet lifecycle management.** Chroma handles extension installation, account import, and network configuration as part of your test setup. Each test starts with a known wallet state, removing a major source of flakiness.
+
+**Popup coordination.** Wallet extensions open popups for connection approvals, signatures, and transaction confirmations. Chroma detects and interacts with these popups reliably, even when their timing varies between runs.
+
+**Network control.** Tests can target specific chains or local development nodes, ensuring that on-chain state is predictable. No more tests failing because mainnet gas prices spiked.
+
+**Parallel execution.** Each test runs in an isolated browser context with its own wallet instance, so tests do not interfere with each other when running in parallel.
+
+## Quick Start
+
+Install the package using your preferred package manager:
+
+```bash
+npm i -D @avalix/chroma
+```
+
+```bash
+pnpm add -D @avalix/chroma
+```
+
+Here is a realistic example that connects a wallet, navigates to a dApp, and signs a message, all with built-in stability patterns:
+
+```typescript
+import { test, expect } from "@playwright/test";
+import { chromaFixture, MetaMask } from "@avalix/chroma";
+
+const { withWallet } = chromaFixture({
+  wallet: MetaMask,
+  seed: "test test test test test test test test test test test junk",
+  network: {
+    name: "Hardhat Local",
+    rpcUrl: "http://127.0.0.1:8545",
+    chainId: 31337,
+    symbol: "ETH",
+  },
+});
+
+test.describe("Message signing flow", () => {
+  withWallet(test);
+
+  test("user connects wallet and signs a message", async ({ page, wallet }) => {
+    await page.goto("http://localhost:3000");
+
+    // Trigger the wallet connection from the dApp UI
+    await page.getByRole("button", { name: "Connect Wallet" }).click();
+
+    // Chroma handles the MetaMask popup automatically
+    await wallet.approve();
+
+    // Verify the connected state in the dApp
+    await expect(page.getByTestId("wallet-status")).toHaveText("Connected");
+
+    // Request a signature from the dApp
+    await page.getByRole("button", { name: "Sign Message" }).click();
+
+    // Approve the signature request in MetaMask
+    await wallet.sign();
+
+    // Verify the signature was captured
+    await expect(page.getByTestId("signature-result")).toBeVisible();
+    await expect(page.getByTestId("signature-result")).not.toBeEmpty();
+  });
+});
+```
+
+## Architecture: How Chroma Keeps Tests Stable
+
+```
+┌──────────────┐     ┌──────────────┐     ┌──────────────────┐
+│   Playwright  │────▶│   dApp Page   │────▶│  Wallet Extension │
+│   Test Runner │     │  (your app)   │     │   (real browser)   │
+└──────┬───────┘     └──────────────┘     └────────┬─────────┘
+       │                                            │
+       │         ┌──────────────────┐               │
+       └────────▶│  Chroma Bridge    │◀─────────────┘
+                 │  - popup detection│
+                 │  - action queuing │
+                 │  - retry logic    │
+                 └──────────────────┘
+```
+
+Chroma sits between Playwright and the wallet extension, acting as a bridge that absorbs timing variance. When your dApp triggers a wallet popup, Chroma detects it, waits for it to become interactive, performs the requested action, and confirms the result before returning control to your test.
+
+## Best Practices for Stable Web3 E2E Tests
+
+- **Isolate wallet state per test.** Never share wallet instances across tests. Chroma's fixture creates a fresh wallet context for each test, so leftover approvals or connected sites from a previous test cannot cause interference.
+
+- **Use local blockchain nodes.** Run Hardhat or Anvil as your test backend. This eliminates network latency, gas variability, and dependency on external RPC providers. Your tests become fully deterministic.
+
+- **Prefer explicit waits over arbitrary timeouts.** Instead of `page.waitForTimeout(3000)`, use Playwright's built-in assertions like `expect(locator).toBeVisible()`. These poll until the condition is met or a reasonable timeout expires, making tests both faster and more reliable.
+
+- **Pin wallet extension versions.** Wallet extensions ship updates frequently. A new MetaMask version might change button labels or popup structure. Pin the extension version in your test configuration so updates are intentional and tested.
+
+- **Run tests in containers.** Use Docker or CI runners with a consistent OS, browser version, and display configuration. Chroma works headless out of the box, so you do not need Xvfb or other display server workarounds.
+
+## Common Pitfalls
+
+**Relying on mocked providers for critical flows.** Mocking `window.ethereum` lets you skip wallet setup, but it also skips the exact interactions where bugs hide. Connection handshakes, popup timing, and user rejection paths all behave differently with real extensions. Use mocks for unit tests, but run your critical paths against real wallets.
+
+**Hardcoding sleep timers.** Wallet popups do not open on a predictable schedule. A `sleep(2000)` might work on your machine but fail in CI where resources are more constrained. Chroma's built-in waiting handles this, but if you add custom waits, always use condition-based polling.
+
+**Ignoring test parallelism conflicts.** If two tests share the same wallet state or the same local chain without isolation, they will produce intermittent failures. Ensure each parallel worker gets its own blockchain instance or uses separate accounts with pre-funded balances.
+
+**Skipping rejection and error paths.** Many teams only test the happy path: connect, sign, done. But users deny transactions, close popups, and switch networks mid-flow. These paths are where the worst UX bugs live and where flakiness often hides.
+
+**Not resetting chain state between tests.** If test A deploys a contract and test B depends on a clean chain, running them in a different order will break things. Use Hardhat's `evm_snapshot` and `evm_revert` or Chroma's state management to reset between tests.
+
+## When to Use @avalix/chroma
+
+Chroma is the right tool when your test needs to interact with a real wallet extension in a real browser. This includes:
+
+- Wallet connection and disconnection flows
+- Transaction signing and confirmation
+- Message signing (EIP-712, personal_sign)
+- Multi-step approval flows (token approvals followed by swaps)
+- Network switching and chain-specific behavior
+
+For logic that does not involve wallet interaction, simpler approaches work well. Unit tests for smart contract logic, integration tests for API endpoints, and component tests for UI rendering do not need full wallet automation. Use Chroma where the browser-wallet boundary is the thing you need to verify.
+
+## Call to Action
+
+**Short version:** Install `@avalix/chroma` and run your first real wallet test today.
+
+**Longer version:** If flaky wallet tests are slowing down your team, give Chroma a try. Install the package, set up a single test for your most important wallet flow, and see how it holds up across 10 consecutive runs. Stable tests change how teams ship.
+
+```bash
+npm i -D @avalix/chroma
+```
+
+Check out the [repository](https://github.com/avalix-labs/chroma) for documentation, or browse the [example projects](https://github.com/avalix-labs/chroma-examples) for working setups with MetaMask, Hardhat, and popular dApp frameworks.
+
+---
+
+**Keywords:** Web3 E2E testing, flaky tests, Playwright wallet automation, dApp testing, CI pipeline Web3
