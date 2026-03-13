@@ -1,0 +1,179 @@
+---
+title: "E2E Testing for Web3 UX: Catching the Bugs Your Users Will Find First"
+description: "Unit tests alone cannot cover wallet popups, transaction signing, and chain switching. Learn why end-to-end testing is critical for Web3 user experience and how to implement it with Playwright."
+author: Chroma Team
+date: 2026-03-13
+---
+
+_Your dApp works in unit tests. It breaks the moment a real user clicks "Connect Wallet."_
+
+## Introduction
+
+Web3 applications ask users to do things that traditional web apps never do. Approve a wallet connection in a browser extension popup. Sign a message to prove account ownership. Confirm a transaction and wait for on-chain finality. Each of these steps involves coordination between your frontend, a third-party browser extension, and a blockchain network.
+
+Unit tests and component tests cover your application logic, but they stop at the boundary where the wallet begins. They cannot verify that a MetaMask popup actually appears, that the user can approve it, or that your UI updates correctly after a transaction confirms. The result is a testing gap right where your users are most likely to encounter friction.
+
+This gap has real consequences. A broken "Connect Wallet" button means zero users can access your app. A signing flow that hangs after approval means users think their transaction failed. These are not edge cases. They are the primary user journey, and they deserve automated test coverage.
+
+## What is @avalix/chroma
+
+[Chroma](https://github.com/avalix-labs/chroma) is a testing library that brings real wallet interactions into your Playwright E2E tests. Instead of mocking wallet providers or skipping wallet flows entirely, Chroma loads actual browser extensions into the test browser and provides a programmatic API to control them.
+
+- **Real wallet interactions** - Tests drive actual wallet extension UIs, covering connection prompts, signing dialogs, and transaction confirmations.
+- **Playwright integration** - Extends Playwright's test API with a `wallets` fixture so you can use existing selectors, assertions, and debugging tools.
+- **Stable CI workflows** - Wallet extensions are pinned to specific versions and cached, making tests reproducible across local and CI environments.
+- **Developer-friendly setup** - Install the package, download extensions with one command, and start writing tests. No browser patching required.
+
+## Key Features
+
+**Automated wallet onboarding** - Import seed phrases and complete wallet setup programmatically. No need to write brittle automation code for each onboarding screen.
+
+**Popup control API** - Call `authorize()`, `confirm()`, or `reject()` to interact with wallet popups from test code instead of manually locating buttons inside extension windows.
+
+**Extension version pinning** - Wallet extension versions are locked so a wallet UI update does not silently break your test suite.
+
+**Playwright-native test structure** - `createWalletTest` returns a Playwright `test` object. Use `test.describe`, `test.beforeEach`, hooks, and reporters exactly as you would in any Playwright project.
+
+**Multi-wallet support** - Test MetaMask, Phantom, and other wallets within the same suite to verify cross-wallet compatibility.
+
+## Quick Start
+
+Install the package:
+
+```bash
+npm i -D @avalix/chroma
+```
+
+Or with pnpm:
+
+```bash
+pnpm add -D @avalix/chroma
+```
+
+Then download the wallet extensions Chroma needs:
+
+```bash
+npx chroma download-extensions
+```
+
+Here is a realistic test that covers the full wallet UX flow: connecting a wallet, verifying the connected state, initiating a transaction, and confirming it through the wallet popup.
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const SEED_PHRASE =
+  'test test test test test test test test test test test junk'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test.setTimeout(60_000)
+
+test('full wallet UX flow: connect, transact, verify', async ({
+  page,
+  wallets,
+}) => {
+  const metamask = wallets.metamask
+
+  // Set up a test account before navigating to the dApp
+  await metamask.importSeedPhrase({ seedPhrase: SEED_PHRASE })
+
+  await page.goto('https://your-dapp.example.com')
+  await page.waitForLoadState('networkidle')
+
+  // Step 1: Connect the wallet
+  await page.getByRole('button', { name: 'Connect Wallet' }).click()
+  await metamask.authorize()
+
+  // Verify the UI reflects a connected state
+  await expect(
+    page.getByText(/0x[a-fA-F0-9]{4}/)
+  ).toBeVisible({ timeout: 10_000 })
+
+  // Step 2: Initiate and confirm a transaction
+  await page.getByRole('button', { name: 'Send Token' }).click()
+  await metamask.confirm()
+
+  // Verify the transaction result in the UI
+  await expect(
+    page.getByText('Transaction submitted')
+  ).toBeVisible({ timeout: 30_000 })
+})
+```
+
+This test verifies the same flow your users experience. If any step breaks, the test fails with a clear indication of where the UX broke down.
+
+## Architecture: Test Flow
+
+```
+┌──────────────┐     ┌────────────────┐     ┌──────────────────┐
+│  Playwright  │ --> │  dApp (page)   │ --> │  Wallet Extension │
+│  Test Runner │     │                │     │  (MetaMask Flask) │
+└──────┬───────┘     └───────┬────────┘     └────────┬─────────┘
+       │                     │                       │
+       │  page.click()       │  window.ethereum      │
+       │────────────────────>│──────────────────────>│
+       │                     │                       │
+       │  metamask.authorize()                       │
+       │────────────────────────────────────────────>│
+       │                     │                       │
+       │                     │  account connected    │
+       │                     │<──────────────────────│
+       │                     │                       │
+       │  expect(address)    │                       │
+       │<────────────────────│                       │
+```
+
+Your test orchestrates both sides of the interaction: the dApp page and the wallet extension. Chroma bridges the gap that mocks leave open.
+
+## Best Practices
+
+- **Test the critical wallet path first.** Start with connect, sign, and confirm flows before covering edge cases. These are the interactions where UX failures have the highest user impact.
+- **Use deterministic blockchain state.** Run tests against a local fork using Hardhat or Anvil with pre-funded accounts. Public testnets introduce variable block times and rate limits that cause flaky results.
+- **Isolate wallet state per test.** Each test should start with a fresh wallet instance. Chroma's `createWalletTest` provides isolated browser contexts by default, so leftover state from a previous test does not interfere.
+- **Set appropriate timeouts.** Blockchain operations are slower than typical web requests. Use `test.setTimeout(60_000)` for test-level timeouts and per-assertion timeouts like `toBeVisible({ timeout: 30_000 })` for on-chain confirmations.
+- **Use stable selectors.** Rely on `data-testid` attributes or ARIA roles rather than CSS classes. Wallet extension UIs and dApp styling change frequently, but test IDs remain stable.
+
+## Common Pitfalls
+
+**Mocking the wallet provider and calling it "tested."** Mocking `window.ethereum` lets you test your application logic, but it skips the popup flow, the extension UI, and the actual signing process. Real users interact with all of these. Mocks give false confidence that the UX works.
+
+**Skipping the rejection path.** Most teams test the happy path (connect and confirm) but never test what happens when a user rejects a connection or declines a transaction. These are common user actions, and your UI needs to handle them gracefully.
+
+**Testing against live testnets in CI.** Testnets have downtime, variable gas prices, and rate limits. A test that passes locally might time out in CI because the network is congested. Prefer local blockchain forks for consistent results.
+
+**Ignoring wallet onboarding in test setup.** If the wallet is not fully onboarded before the dApp loads, connection requests will fail or behave unexpectedly. Always complete wallet setup (seed phrase import, password creation) before navigating to the dApp URL.
+
+**Sharing wallet state between tests.** When tests share a single wallet instance, earlier tests can leave the wallet in an unexpected state (wrong network, pending transactions, revoked permissions). Isolated contexts prevent this entirely.
+
+## When to Use @avalix/chroma
+
+Chroma is the right tool when wallet interactions are part of your critical user path. If users must connect a wallet, sign messages, or approve transactions to use your application, those flows need E2E coverage.
+
+For smart contract logic with no frontend, unit tests against a local node (Hardhat, Foundry) are sufficient. For read-only dashboards that display on-chain data without wallet interaction, standard Playwright tests work fine.
+
+The decision point is simple: if a broken wallet flow would block your users from completing their goal, it should be covered by an E2E test with a real wallet.
+
+## Call to Action
+
+**Try it in five minutes:**
+
+```bash
+npm i -D @avalix/chroma && npx chroma download-extensions
+```
+
+Write your first wallet test, run it locally, and see the wallet popup open, connect, and confirm automatically. Then move it to CI and stop worrying about wallet UX regressions.
+
+**Ready to go deeper?** Browse the [example repository](https://github.com/avalix-labs/chroma-examples) for production patterns including multi-wallet setups, chain switching, and transaction error handling. If Chroma helps your team ship with more confidence, [star the repository](https://github.com/avalix-labs/chroma) so other developers can find it.
+
+---
+
+**Links**
+
+- Repository: [https://github.com/avalix-labs/chroma](https://github.com/avalix-labs/chroma)
+- Examples: [https://github.com/avalix-labs/chroma-examples](https://github.com/avalix-labs/chroma-examples)
+
+---
+
+**Keywords:** Web3 E2E testing, wallet UX testing, Playwright wallet automation, dApp end-to-end tests, Web3 user experience
