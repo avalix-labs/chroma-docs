@@ -1,0 +1,175 @@
+---
+title: "Beyond Green Checks: Testing the Wallet Moments That Break dApps"
+description: "Why many Web3 test suites pass while real users still fail, and how to design end-to-end tests around wallet behavior, rejection paths, and async chain state."
+author: Chroma Team
+date: 2026-03-14
+---
+
+## Introduction
+
+Most dApp teams have experienced this at least once: CI is green, contracts are audited, frontend tests pass, and yet users still report "it doesn't work" after release.
+
+What failed was not always business logic. Often, it was the user journey around wallets: a popup that appeared late, a rejected signature that left the UI stuck, a chain switch that did not recover, or a transaction state that never updated clearly.
+
+This is where Web3 quality is different from traditional web apps. A meaningful part of your product lives in systems you do not own: wallet extensions, browser security boundaries, RPC latency, and confirmation timing. If you only test your own code in isolation, you may miss exactly the moments users care about most.
+
+In this post, we will break down why this happens, how to think about testing layers in dApps, and a practical way to test real user flows without turning your suite into a flaky mess.
+
+## Why dApp reliability fails at the edges
+
+In Web2 apps, many critical interactions happen in one page context. In dApps, high-value actions jump across contexts:
+
+- your app UI
+- wallet UI (extension/popup)
+- blockchain state updates
+
+Each context has separate timing, permissions, and failure modes. A transaction can be approved in the wallet, pending on-chain, and still look "done" in your UI if your frontend assumptions are too optimistic.
+
+That gap creates confusing user outcomes:
+
+- The "Connect Wallet" button does nothing after an extension update.
+- The user rejects once, and now every action silently fails.
+- The app shows success before chain confirmation, then reverts later.
+- Account or network mismatches produce unclear error states.
+
+None of these are rare edge cases. They are normal user behavior in production.
+
+## Unit, integration, and E2E: what each layer actually protects
+
+Developers sometimes frame this as "unit tests vs E2E," but that is the wrong tradeoff. You need all layers, with clearer expectations:
+
+- **Unit tests** protect deterministic logic: formatters, reducers, hooks, utility functions.
+- **Integration tests** validate boundaries in your app: data fetching, state transitions, provider wiring.
+- **E2E tests** validate whether a real user can complete a goal with real wallet interactions.
+
+For dApps, the third layer carries unusual product risk. If users cannot connect, sign, or recover from rejection, it does not matter that your internal logic is perfect.
+
+A useful question for every critical flow is simple:
+
+> "Could a real person finish this in a real browser, with a real wallet, on a real chain environment?"
+
+If your tests cannot answer that, release confidence is incomplete.
+
+## The wallet reality: one journey, three systems
+
+### 1) App page state
+
+Your app controls buttons, loaders, validation, and error handling. Good tests here assert user-visible outcomes, not just internal events.
+
+### 2) Wallet prompts and decisions
+
+Users can approve, reject, close the popup, switch account, or leave midway. These are first-class product paths, not exceptions.
+
+### 3) Chain confirmation timing
+
+Even after wallet confirmation, final UI state depends on mempool and block timing. Assertions must account for asynchronous confirmation and eventual consistency.
+
+When teams treat this as one atomic "click and done" operation, flakiness and blind spots increase. When they model each step explicitly, reliability improves quickly.
+
+## A practical model for testing real user flows
+
+You do not need a huge framework rewrite to make progress. Start with one critical path (for example: connect -> sign -> submit transaction -> see confirmed state) and design tests around user intent.
+
+### Step 1: Make environment state predictable
+
+- Pin wallet extension versions.
+- Use dedicated test accounts.
+- Prefer deterministic environments (local forks or controlled test infra) for core checks.
+- Seed balances and prerequisites before each test run.
+
+Determinism reduces noise so failing tests usually mean real regressions.
+
+### Step 2: Treat wallet actions as explicit test primitives
+
+Rather than brittle selectors deep in popup DOM trees, use abstractions that map to user decisions: authorize, confirm, reject, switch network.
+
+For teams using Playwright, tools such as [@avalix/chroma](https://github.com/avalix-labs/chroma) can help by driving real wallet extensions while exposing wallet-specific actions directly in test code.
+
+### Step 3: Always include rejection and recovery paths
+
+Testing only the "happy approve" path gives a false sense of confidence. Add at least one rejection test for each high-value journey:
+
+- reject connection request
+- reject signing request
+- reject transaction confirmation
+
+Then assert clear recovery:
+
+- actionable UI feedback
+- no corrupted local state
+- users can retry without refresh
+
+### Step 4: Assert the outcome users experience
+
+A successful click is not success. A wallet confirmation popup is not success. Success is what the user sees next: updated balance, status message, activity entry, or clear pending state.
+
+## Minimal example: intent-focused wallet E2E
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test('user can connect and complete transfer', async ({ page, wallets }) => {
+  const wallet = wallets.metamask
+
+  await wallet.importSeedPhrase({
+    seedPhrase: process.env.TEST_SEED_PHRASE!,
+  })
+
+  await page.goto(process.env.DAPP_URL!)
+  await page.getByRole('button', { name: 'Connect Wallet' }).click()
+  await wallet.authorize()
+
+  await page.getByRole('button', { name: 'Send' }).click()
+  await wallet.confirm()
+
+  await expect(page.getByText('Transaction confirmed')).toBeVisible({
+    timeout: 30_000,
+  })
+})
+```
+
+The structure matters more than the exact library:
+
+1. prepare wallet state
+2. trigger real UI
+3. make explicit wallet decision
+4. assert user-visible completion
+
+That sequence is often enough to catch failures mocks never see.
+
+## Common mistakes that quietly increase risk
+
+- **Mocking provider behavior for critical journeys** and assuming production will match.
+- **Skipping rejection tests** because they are "rare."
+- **Over-parallelizing wallet E2E in CI** on undersized runners.
+- **Hardcoding test secrets** instead of using CI-managed environment variables.
+- **Celebrating pass rate without tracking flake rate** and failure categories.
+
+Reliable teams treat flaky tests as a product delivery problem to fix, not noise to ignore.
+
+## What to watch next in Web3 testing
+
+The testing surface is getting broader, not simpler. Account abstraction, smart wallets, session keys, and multi-wallet ecosystems create more user path variance.
+
+Expect strong dApp teams to invest in:
+
+- better parity between local and CI wallet environments
+- clearer abstractions for cross-wallet flow testing
+- more observability around wallet drop-off and prompt failures
+
+In other words, quality strategy is moving from "did a function return true?" to "did a human complete the goal with confidence?"
+
+## Conclusion
+
+If your suite mostly proves internal correctness, that is a good foundation, but not the finish line for dApps. Real trust is earned at wallet moments: connection, signature, confirmation, rejection, and recovery.
+
+A practical next step is to pick one revenue-critical flow and test it end to end with real browser and wallet behavior. You can do that with your existing stack and add tools like @avalix/chroma where they simplify wallet automation.
+
+Green checks are useful. Green checks that represent real user behavior are what keep support tickets down and user confidence up.
+
+---
+*This article was written with the assistance of AI.*
