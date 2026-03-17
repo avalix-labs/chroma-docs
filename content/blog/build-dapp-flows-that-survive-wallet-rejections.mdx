@@ -1,0 +1,192 @@
+---
+title: "Build dApp Flows That Survive Wallet Rejections"
+description: "Most blockchain apps test the happy path and miss what users do in real life: cancel prompts, switch accounts, and retry. Learn a practical approach to resilient wallet E2E testing."
+author: Chroma Team
+date: 2026-03-13
+---
+
+## Introduction
+
+Many dApp teams have a familiar release pattern: contracts are tested, frontend checks are green, staging looks fine, and production still gets support messages like:
+
+- "I clicked Connect and nothing happened."
+- "I rejected the signature once and now the app is stuck."
+- "It works after refresh, but my transaction state is weird."
+
+These are not edge cases. They are normal user behavior.
+
+In Web2 apps, a failed action usually stays inside your own UI. In Web3 apps, critical steps move through wallet extensions, popup windows, chain confirmations, and user decisions you do not control. That means reliability is not only about whether your code is correct. It is about whether your flow can recover when real humans do real-human things.
+
+This post explains why wallet rejection testing should be part of your core quality strategy, what teams commonly miss, and how to build E2E coverage that matches real user interaction patterns.
+
+## The reliability gap in Web3 testing
+
+Most teams already use a layered strategy:
+
+- **Unit tests** for business logic
+- **Integration tests** for app + API behavior
+- **E2E tests** for complete user journeys
+
+The issue is not the model. The issue is what "end to end" often means in practice.
+
+For many dApps, E2E coverage still avoids real wallet interaction details. Teams might mock providers, stub transaction responses, or skip cancellation paths because they are hard to automate. Those shortcuts are understandable, but they remove exactly the moments where many production failures happen.
+
+A useful way to think about it:
+
+- Unit tests ask: "Is this function correct?"
+- Integration tests ask: "Do these systems connect correctly?"
+- Wallet-aware E2E tests ask: "Can a real user finish this task and recover from mistakes?"
+
+That third question is where trust is won or lost.
+
+## Why rejection paths matter as much as approval paths
+
+Developers often optimize for successful completion:
+
+1. User connects wallet
+2. User signs
+3. User confirms transaction
+4. UI shows success
+
+But real users do this instead:
+
+1. Click connect
+2. Read prompt and hesitate
+3. Reject once
+4. Try again with a different account
+5. Confirm
+6. Switch network halfway through
+
+If your app assumes linear behavior, it can enter broken states:
+
+- stale loading spinners after cancellation
+- disabled action buttons that never re-enable
+- cached account data after account switch
+- success banners displayed before on-chain confirmation
+
+A rejection is not a bug. It is expected input. Reliable dApps treat rejection handling as first-class product behavior, and test it accordingly.
+
+## A practical test design pattern for wallet flows
+
+You do not need a huge framework migration to improve coverage. Start with one critical user journey and design tests around user intent rather than DOM implementation details.
+
+### 1) Model wallet decisions explicitly
+
+Express actions like **authorize**, **confirm**, and **reject** in test code. This keeps test intent readable and prevents brittle popup selector logic spread across many files.
+
+Tooling such as [@avalix/chroma](https://github.com/avalix-labs/chroma) can help here by exposing wallet-focused actions while still using standard Playwright workflows.
+
+### 2) Separate "interaction completed" from "user outcome achieved"
+
+Clicking Confirm in a wallet does not mean the user journey is done. Assert on the final user-visible outcome:
+
+- balance updated
+- status moved to confirmed
+- retry UI available on failure
+
+This shift catches many false positives where tests pass but user experience still breaks.
+
+### 3) Test one unhappy path per happy path
+
+For each critical flow (connect, sign, transact), add at least one cancellation/rejection case and verify recovery:
+
+- message is clear
+- UI remains usable
+- user can retry without refreshing
+
+### 4) Control your environment
+
+Flaky test environments create fake uncertainty. Pin wallet versions, use deterministic accounts, and avoid uncontrolled testnet drift for core CI journeys.
+
+## Example: resilient connect-and-submit test
+
+Below is a simplified pattern that validates both approval and rejection handling in one scenario family:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test('user can recover after rejecting first signature', async ({ page, wallets }) => {
+  const wallet = wallets.metamask
+
+  await wallet.importSeedPhrase({
+    seedPhrase: process.env.TEST_SEED_PHRASE!,
+  })
+
+  await page.goto(process.env.DAPP_URL!)
+  await page.getByRole('button', { name: 'Connect Wallet' }).click()
+  await wallet.authorize()
+
+  await page.getByRole('button', { name: 'Submit Order' }).click()
+  await wallet.reject()
+
+  await expect(page.getByText('Signature request cancelled')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Try Again' })).toBeEnabled()
+
+  await page.getByRole('button', { name: 'Try Again' }).click()
+  await wallet.confirm()
+
+  await expect(page.getByText('Order submitted')).toBeVisible({
+    timeout: 30_000,
+  })
+})
+```
+
+The important part is not the exact syntax. It is the sequence:
+
+1. Trigger real UI behavior.
+2. Simulate a realistic user decision (reject).
+3. Assert recovery UX.
+4. Retry and confirm final success.
+
+That sequence maps to what users actually do under uncertainty.
+
+## Common mistakes teams make
+
+### Over-indexing on provider mocks
+
+Mocks are useful for fast feedback, but wallet-critical flows need real interaction coverage. Otherwise, you certify an environment users never see.
+
+### Treating chain latency as test noise
+
+Blockchain confirmation delays are user reality. Tests should reflect expected waiting states and timeout behavior instead of masking delays with static sleeps.
+
+### Ignoring account and network switching
+
+Users frequently switch both. If your dApp has assumptions about active chain/account, add explicit scenarios that verify state invalidation and refresh behavior.
+
+### Measuring quality by "green CI only"
+
+A passing run is not the full signal. Track:
+
+- flake rate over time
+- failure type distribution (infra vs product bug)
+- median test duration for wallet-critical flows
+
+These metrics reveal whether quality is improving or just moving around.
+
+## What changes over the next year
+
+Wallet UX is getting more complex: embedded wallets, account abstraction patterns, session keys, multi-chain defaults, and delegated permissions all add state transitions. Testing strategy needs to evolve with that complexity.
+
+Three trends are worth watching:
+
+1. **Intent-level test APIs** that describe user goals rather than popup mechanics
+2. **Better local/CI parity** for extension-heavy browser automation
+3. **Quality telemetry for wallet interactions**, so teams can correlate test failures with real user drop-off
+
+The teams that adapt fastest will not be the ones with the most tests. They will be the ones whose tests reflect actual behavior under real conditions.
+
+## Conclusion
+
+Reliable dApp experience is not just contract correctness or frontend polish. It is whether users can complete critical flows when they hesitate, cancel, retry, and change their mind.
+
+If you want to improve reliability this quarter, start with one high-value wallet journey and add rejection-and-recovery coverage. Keep unit and integration tests strong, but elevate wallet E2E testing to the same level of product importance.
+
+Whether you use [@avalix/chroma](https://github.com/avalix-labs/chroma) or another approach, the principle is the same: test the behavior users actually produce, not the behavior you wish they produced.
+
+---
+*This article was written with the assistance of AI.*
