@@ -1,0 +1,200 @@
+---
+title: "Testing the Human Layer in dApps: From Green Pipelines to Real User Trust"
+description: "Why many Web3 teams still ship broken flows despite passing tests, and how to design end-to-end coverage around real wallet behavior."
+author: Chroma Team
+date: 2026-03-15
+---
+
+## Introduction
+
+Most Web3 teams do not have a testing problem. They have a **confidence problem**.
+
+The pipeline is green. Unit tests pass. Contract checks pass. Integration tests pass. But after release, users still report issues:
+
+- "Connect Wallet button does nothing"
+- "I signed, but the app is stuck loading"
+- "I rejected one prompt and now everything is broken"
+
+This is not unusual. In dApps, the most fragile part of the product is often the part that lives between your frontend and your contracts: wallet popups, approvals, chain switching, and asynchronous transaction state.
+
+If you want higher reliability, test the human layer of your app, not just the code layer.
+
+## Why traditional coverage still misses real failures
+
+The testing pyramid still matters in Web3:
+
+- **Unit tests** verify logic in isolation.
+- **Integration tests** verify component and service boundaries.
+- **E2E tests** verify complete user journeys.
+
+The gap appears when teams treat wallet interactions as an implementation detail instead of a core product surface.
+
+For users, "send transaction" is one action. Under the hood, it is a sequence of uncertain events:
+
+1. User initiates from your UI.
+2. Wallet prompt opens (or fails to).
+3. User approves, rejects, or closes the popup.
+4. Transaction is broadcast.
+5. Chain confirms later.
+6. UI transitions from pending to final state.
+
+Each step can break independently. Your lower-level tests can all pass while this end-to-end journey fails in production.
+
+## The hidden complexity of wallet UX
+
+Wallet UX is a distributed interface. Part of your app runs in your own UI, and part runs in browser extensions and windows you do not control.
+
+That introduces common failure modes:
+
+### 1) Approval-only testing
+
+Many teams automate "happy path approve" and stop there. In reality, users frequently reject prompts, switch networks unexpectedly, or retry after a timeout. If rejection paths are untested, they usually fail at the worst time.
+
+### 2) Async blind spots
+
+It is easy to assert immediate UI feedback and call the test done. But blockchain finality is delayed and variable. Reliable tests must assert eventual user-visible outcomes, not only first-frame UI updates.
+
+### 3) State drift between page and wallet
+
+The app thinks account A is active. Wallet switched to account B. The app assumes chain X. Wallet is on chain Y. These mismatches cause flaky behavior that unit tests rarely detect.
+
+### 4) Environment inconsistency
+
+A different wallet extension version, seed setup, RPC latency profile, or chain state can turn stable local tests into noisy CI runs.
+
+## A practical model: test user intent, not just UI clicks
+
+A useful shift is to organize E2E cases around **intent checkpoints**:
+
+- Can the user connect?
+- Can the user recover from rejection?
+- Can the user complete a transaction?
+- Can the user understand pending or failed states?
+- Can the user retry without refreshing the page?
+
+When tests are written this way, they map directly to business risk and support-team pain.
+
+Here is a compact example with Playwright-style structure:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test('user rejects once, then retries successfully', async ({ page, wallets }) => {
+  const wallet = wallets.metamask
+
+  await wallet.importSeedPhrase({
+    seedPhrase: process.env.TEST_SEED_PHRASE!,
+  })
+
+  await page.goto(process.env.DAPP_URL!)
+  await page.getByRole('button', { name: 'Connect Wallet' }).click()
+  await wallet.authorize()
+
+  await page.getByRole('button', { name: 'Submit Order' }).click()
+  await wallet.reject()
+
+  await expect(page.getByText('Transaction cancelled')).toBeVisible()
+  await page.getByRole('button', { name: 'Try Again' }).click()
+
+  await wallet.confirm()
+  await expect(page.getByText('Order confirmed')).toBeVisible({
+    timeout: 30_000,
+  })
+})
+```
+
+The important point is not the specific API. It is the test design:
+
+1. Trigger the same UI entry points users see.
+2. Model wallet decisions explicitly (authorize, reject, confirm).
+3. Assert user-visible recovery and completion states.
+
+Tools like `@avalix/chroma` make this style easier because wallet actions are expressed directly in test code instead of brittle popup selectors. But the principle applies regardless of framework: your E2E suite should mirror user decision paths.
+
+## Common mistakes that reduce confidence
+
+### Over-indexing on unit success metrics
+
+A high unit pass rate can hide a weak product journey. If wallet interactions are central to your app, E2E reliability deserves first-class status.
+
+### Treating flaky tests as "normal"
+
+Flakiness is usually a systems signal, not background noise. It often points to nondeterministic environment setup, timing assumptions, or unstable external dependencies.
+
+### Ignoring cancellation and timeout UX
+
+Reject/cancel behavior is not an edge case in Web3. It is normal behavior. Apps that handle it clearly feel trustworthy; apps that fail it feel risky.
+
+### Missing observability in test runs
+
+Without traces, screenshots, and categorized failures, teams repeatedly debug the same class of issue from scratch.
+
+## Building a more reliable Web3 testing workflow
+
+You do not need to rewrite everything. Start with these habits:
+
+### Make test environments deterministic
+
+- Pin wallet extension versions.
+- Use fixed test accounts and known balances.
+- Prefer controlled chains or local forks for critical paths.
+
+### Capture both outcome and timing expectations
+
+For transaction flows, assert:
+
+- immediate feedback (pending state)
+- eventual feedback (confirmed/failed state)
+- clear user action for retries
+
+### Keep one "golden flow" per core job to be done
+
+At minimum, automate one complete path for each key user job:
+
+- connect wallet
+- sign message
+- submit transaction
+- recover from rejection
+
+Then expand depth over time.
+
+### Track test quality like product quality
+
+Measure:
+
+- flake rate
+- median runtime
+- top failure categories
+- mean time to diagnose failures
+
+This reframes E2E from "QA checkbox" to "release health system."
+
+## Where blockchain testing is headed
+
+Wallet surfaces are becoming more complex: smart accounts, session keys, gas abstraction, and cross-chain interactions all increase state combinations.
+
+That means future-ready teams will invest in:
+
+- reusable wallet interaction primitives
+- scenario coverage for non-happy paths
+- better local-to-CI parity
+- richer debugging artifacts for E2E failures
+
+In short, Web3 testing is moving from "does this code execute?" to "can a human consistently complete this journey?"
+
+## Conclusion
+
+The fastest way to improve dApp reliability is not adding more mocks. It is validating real user flows where trust is won or lost.
+
+If your current suite is mostly unit and integration coverage, choose one wallet-critical journey this week and automate it end to end, including a reject-and-retry path. That single test often reveals more product risk than a dozen isolated checks.
+
+Whether you use `@avalix/chroma` or another stack, the strategic point is the same: test what users actually do, in the conditions they actually encounter.
+
+That is how green pipelines start to mean real confidence.
+
+---
+*This article was written with the assistance of AI.*
