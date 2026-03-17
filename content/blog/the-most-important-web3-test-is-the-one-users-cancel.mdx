@@ -1,0 +1,171 @@
+---
+title: "The Most Important Web3 Test Is the One Users Cancel"
+description: "A practical guide to testing wallet rejection and recovery flows in dApps, and why these paths often matter more than happy-path automation."
+author: Chroma Team
+date: 2026-03-17
+---
+
+## Introduction
+
+Most dApp teams spend significant effort testing what happens when everything goes right. A user connects their wallet, signs a message, confirms a transaction, and lands on a success state.
+
+That path is important. It is also not the path that breaks trust first.
+
+In production, users reject signatures. They close wallet popups. They switch accounts mid-flow. They hesitate, retry, and come back later. If your product only works when people behave like ideal test actors, your app can still pass CI and feel unreliable to real users.
+
+This article explains why rejection and interruption flows should be first-class end-to-end tests in Web3, how to structure them without exploding scope, and where they fit alongside unit and integration coverage.
+
+## Why Web3 reliability fails in surprising places
+
+In a traditional web app, many critical interactions happen within one UI and one state model. In a dApp, each key action crosses system boundaries:
+
+- dApp frontend state
+- Wallet extension UI
+- User intent and consent decisions
+- On-chain state progression
+
+Those boundaries create asynchronous behavior and ambiguity. Did the user reject? Did the popup fail to open? Did the transaction remain pending? Did the app show the wrong state after a cancellation?
+
+Teams often mock these boundaries for speed. That is fine for many test layers, but it can hide the exact moments where users lose confidence.
+
+The result is familiar: green tests internally, confused users externally.
+
+## A better framing: test decisions, not only transactions
+
+A useful model for dApp E2E strategy is:
+
+1. **Intent**: what the user is trying to do  
+2. **Decision**: what the user chooses in wallet UX  
+3. **Recovery**: what the app enables after that choice
+
+Most suites cover intent and success outcome. Fewer explicitly cover decision variance and recovery quality.
+
+For example, "swap token" is not one test. It is a family of user decisions:
+
+- User confirms immediately
+- User rejects and retries
+- User rejects and changes token amount
+- User closes wallet popup and returns
+
+If you only automate the first case, you are testing your best-case funnel, not your real funnel.
+
+## Where this fits in the testing pyramid
+
+This is not an argument against unit or integration tests. It is an argument for clear responsibilities:
+
+- **Unit tests** validate pure logic and edge-case calculations.
+- **Integration tests** validate component and API cooperation.
+- **E2E wallet tests** validate real user journeys across app + wallet boundaries.
+
+In Web3 products, the third layer often carries disproportionate business risk because it represents actual trust moments: connection, signing, approval, and confirmation feedback.
+
+A practical rule: if a broken flow can make users think funds or permissions are unsafe, it deserves real E2E coverage with a real wallet UI.
+
+## A compact test matrix that catches high-impact failures
+
+You do not need dozens of scenarios to improve confidence quickly. Start with a small matrix for each critical journey:
+
+### 1) Happy path (confirm)
+- User completes flow normally.
+- Assert final user-visible success state.
+
+### 2) Rejection path (explicit deny)
+- User rejects signing or transaction.
+- Assert clear error or canceled state.
+- Assert no misleading success UI appears.
+
+### 3) Recovery path (retry)
+- After rejection, user retries from the same screen.
+- Assert flow can complete successfully without full page reload.
+
+### 4) Interruption path (popup closed)
+- User dismisses or closes wallet context.
+- Assert the app exposes a clear next action.
+
+This four-case matrix catches many reliability issues without creating unmanageable suite size.
+
+## Practical example: testing cancellation as a product feature
+
+Cancellation is not just an exception. It is a normal user action that your UX should handle intentionally.
+
+A minimal test pattern might look like this:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test('user can reject tx and safely retry', async ({ page, wallets }) => {
+  const wallet = wallets.metamask
+
+  await page.goto(process.env.DAPP_URL!)
+  await page.getByRole('button', { name: 'Connect Wallet' }).click()
+  await wallet.authorize()
+
+  await page.getByRole('button', { name: 'Submit Transaction' }).click()
+  await wallet.reject()
+
+  await expect(page.getByText('Transaction canceled')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Try Again' })).toBeVisible()
+
+  await page.getByRole('button', { name: 'Try Again' }).click()
+  await wallet.confirm()
+  await expect(page.getByText('Transaction confirmed')).toBeVisible()
+})
+```
+
+The point is not the exact API. The point is that cancellation behavior is treated as a primary product flow.
+
+Tooling such as [@avalix/chroma](https://github.com/avalix-labs/chroma) helps here because tests can drive real browser + wallet interactions, not mocked events. That keeps assertions grounded in user-visible behavior.
+
+## Common mistakes teams make
+
+### Mistake 1: Treating rejection as an edge case
+
+Rejection is routine. Users reject when gas looks high, when they are uncertain, or when they clicked too quickly. If you do not test this, your reliability model is incomplete.
+
+### Mistake 2: Asserting too early
+
+After wallet actions, app state may lag due to async updates and chain confirmations. Over-eager assertions create false negatives and flakiness.
+
+### Mistake 3: Validating clicks, not outcomes
+
+A test that confirms "button clicked" or "popup opened" does not prove task completion. Always assert the final state the user understands.
+
+### Mistake 4: Ignoring wallet UX copy and affordances
+
+If cancellation messaging is vague ("Something went wrong"), users cannot recover. E2E tests should verify actionable copy and next steps.
+
+## Developer workflow: how to add this without slowing down delivery
+
+A lightweight implementation plan:
+
+1. Pick one trust-critical journey (connect + first transaction is common).
+2. Add the four-case matrix (confirm, reject, retry, interrupt).
+3. Run it in CI on every merge.
+4. Track both failure rate and flake rate separately.
+5. Expand to the next journey only after current tests stay stable.
+
+This approach keeps iteration speed high while improving user-facing reliability where it matters most.
+
+## What changes next in blockchain testing
+
+Two trends are becoming clearer:
+
+- **Intent-driven testing:** teams define coverage around user goals, not just UI routes.
+- **Cross-wallet confidence:** teams verify the same journey across multiple wallet experiences because behavior and UX details differ.
+
+As account abstraction and multi-chain flows become more common, this gets more important. The complexity does not disappear; it shifts into user interaction layers that must be tested end to end.
+
+## Conclusion
+
+The highest-value Web3 test is often not "can the user complete the perfect path?" It is "what happens when the user says no, changes their mind, or tries again?"
+
+If your dApp handles those moments well, users experience your product as trustworthy. If it does not, no amount of green happy-path checks will compensate.
+
+This week, choose one core flow and add cancellation plus recovery coverage with real wallet interactions. It is one of the fastest ways to convert test confidence into user confidence.
+
+---
+*This article was written with the assistance of AI.*
