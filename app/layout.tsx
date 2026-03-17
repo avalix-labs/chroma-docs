@@ -10,10 +10,22 @@ const inter = Inter({
 export const metadata: Metadata = {
   metadataBase: new URL('https://chroma.avalix.dev'),
   title: {
-    default: 'Chroma',
-    template: '%s | Chroma',
+    default: '@avalix/chroma',
+    template: '%s | @avalix/chroma',
   },
   description: 'End-to-end testing library for wallet interactions across multiple blockchain ecosystems',
+  openGraph: {
+    title: '@avalix/chroma',
+    description: 'End-to-end testing library for wallet interactions across multiple blockchain ecosystems',
+    url: '/',
+    siteName: '@avalix/chroma',
+    type: 'website',
+  },
+  twitter: {
+    card: 'summary_large_image',
+    title: '@avalix/chroma',
+    description: 'End-to-end testing library for wallet interactions across multiple blockchain ecosystems',
+  },
 };
 
 export default function Layout({ children }: LayoutProps<'/'>) {

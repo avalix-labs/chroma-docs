@@ -82,8 +82,21 @@ export async function generateMetadata(props: {
 
   if (!page) notFound();
 
+  const title = page.data.title;
+  const description = (page.data as { description?: string }).description;
+
   return {
-    title: page.data.title,
-    description: (page.data as { description?: string }).description,
+    title,
+    description,
+    openGraph: {
+      title,
+      description,
+      type: 'article',
+    },
+    twitter: {
+      card: 'summary_large_image',
+      title,
+      description,
+    },
   };
 }

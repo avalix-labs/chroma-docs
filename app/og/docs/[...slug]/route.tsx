@@ -5,13 +5,19 @@ import { generate as DefaultImage } from 'fumadocs-ui/og';
 
 export const revalidate = false;
 
-export async function GET(_req: Request, { params }: RouteContext<'/og/docs/[...slug]'>) {
+export async function GET(_req: Request, { params }: { params: Promise<{ slug: string[] }> }) {
   const { slug } = await params;
   const page = source.getPage(slug.slice(0, -1));
   if (!page) notFound();
 
   return new ImageResponse(
-    <DefaultImage title={page.data.title} description={page.data.description} site="My App" />,
+    <DefaultImage
+      title={page.data.title}
+      description={page.data.description}
+      site="@avalix/chroma"
+      primaryColor="rgba(255,255,255,0.12)"
+      primaryTextColor="rgb(230,230,230)"
+    />,
     {
       width: 1200,
       height: 630,
@@ -21,7 +27,6 @@ export async function GET(_req: Request, { params }: RouteContext<'/og/docs/[...
 
 export function generateStaticParams() {
   return source.getPages().map((page) => ({
-    lang: page.locale,
     slug: getPageImage(page).segments,
   }));
 }
