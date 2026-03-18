@@ -1,0 +1,176 @@
+---
+title: "The Hidden Cost of Mocked Wallets: A Practical E2E Strategy for dApps"
+description: "Learn a pragmatic approach to dApp testing that combines unit, integration, and real wallet E2E coverage so teams can ship with confidence."
+author: Chroma Team
+date: 2026-03-18
+---
+
+## Introduction
+
+There is a familiar Web3 release story: smart contract tests pass, frontend tests pass, staging demos look clean, and then production users report the same problem within hours: "I connected my wallet, but nothing happened."
+
+The issue is often not a single bug. It is a confidence gap created by test design.
+
+Many dApp teams rely heavily on mocked wallet providers because mocks are fast, deterministic, and easy to run in CI. That is a reasonable choice for many layers of testing. But the most expensive failures usually happen at the seam between your app and real wallet behavior: connection prompts, chain switching, signature approval, transaction confirmation, and user cancellation.
+
+This article explains why that gap happens and offers a practical strategy to close it without turning your test suite into a slow, brittle machine.
+
+## Why mocked wallet tests still miss critical failures
+
+Mocks are not bad. They are essential. The problem is using them for questions they cannot answer.
+
+A mocked provider can tell you whether your code *calls* `eth_requestAccounts`. It cannot reliably tell you whether a real user can finish the full flow in a real browser with a real extension popup and real asynchronous chain state.
+
+In practice, wallet-critical journeys involve multiple systems:
+
+- Your dApp UI
+- A wallet extension UI that your team does not fully control
+- Network and RPC behavior
+- User decisions (approve, reject, switch chain, close popup)
+
+Every boundary adds opportunities for mismatch. If your highest-risk flows are only tested with abstractions, your release confidence may look high on paper while user confidence drops in production.
+
+## A useful model: three layers of confidence
+
+For Web3 teams, a healthy testing model usually has three explicit layers:
+
+### 1) Unit tests: protect fast-moving logic
+
+Use unit tests to validate formatting, validation, utility functions, reducer transitions, and contract helper logic. Keep these fast and broad.
+
+### 2) Integration tests: protect app contracts
+
+Use integration tests to validate component collaboration and application behavior around APIs, state stores, and rendering conditions.
+
+### 3) Wallet E2E tests: protect user trust moments
+
+Use E2E tests with real browser + real wallet to validate that a user can actually complete intent:
+
+- Connect
+- Sign
+- Submit
+- Confirm
+- Recover from rejection
+
+That third layer is smaller than most teams think. You do not need hundreds of scenarios to gain value. You need a focused set of flows tied to trust and revenue.
+
+## The flow teams underestimate: chain mismatch and recovery
+
+A common production incident is not "connection failed." It is "connection worked, then chain mismatch made the next action fail in confusing ways."
+
+Typical sequence:
+
+1. User connects wallet on the wrong network.
+2. App prompts a chain switch.
+3. User delays or rejects.
+4. App UI enters an ambiguous state.
+5. User retries with stale assumptions.
+
+This is exactly where tests built on idealized mocks fall short.
+
+A practical E2E scenario should verify:
+
+- The app detects wrong chain clearly.
+- The wallet switch prompt appears and is handled.
+- Rejection shows an actionable UI state.
+- Retry path works without a full page refresh.
+- Final success state appears only after confirmed chain + transaction outcome.
+
+## Practical example: test intent, not only clicks
+
+Below is a simplified pattern that keeps test code aligned with user behavior:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test('user recovers from chain mismatch and completes swap', async ({ page, wallets }) => {
+  const wallet = wallets.metamask
+
+  await wallet.importSeedPhrase({
+    seedPhrase: process.env.TEST_SEED_PHRASE!,
+  })
+
+  await page.goto(process.env.DAPP_URL!)
+  await page.getByRole('button', { name: 'Connect Wallet' }).click()
+  await wallet.authorize()
+
+  await page.getByRole('button', { name: 'Swap' }).click()
+  await expect(page.getByText('Wrong network')).toBeVisible()
+
+  await page.getByRole('button', { name: 'Switch Network' }).click()
+  await wallet.reject() // user declines first attempt
+  await expect(page.getByText('Network switch required')).toBeVisible()
+
+  await page.getByRole('button', { name: 'Try Again' }).click()
+  await wallet.confirm() // user accepts second attempt
+
+  await page.getByRole('button', { name: 'Confirm Swap' }).click()
+  await wallet.confirm()
+
+  await expect(page.getByText('Swap confirmed')).toBeVisible({
+    timeout: 30_000,
+  })
+})
+```
+
+The point is not a specific API call. The key is the shape of the test:
+
+- Include real decision points.
+- Validate recovery behavior, not only success behavior.
+- Assert outcomes users can see.
+
+Tools such as [@avalix/chroma](https://github.com/avalix-labs/chroma) are helpful because they let teams automate real wallet interactions while keeping tests readable and intent-oriented.
+
+## Common mistakes that quietly erode reliability
+
+### Treating rejection as an edge case
+
+In real usage, rejection is normal behavior. If reject paths are untested, your app may appear stable in CI but fragile in production.
+
+### Asserting too early
+
+A "submitted" toast is not finality. Good tests account for pending, confirmed, and failed states with appropriate time windows.
+
+### Ignoring environment determinism
+
+Unpinned wallet versions, drifting RPC responses, and unstable account state create flaky failures. Flakiness trains teams to ignore red builds, which is worse than having fewer tests.
+
+### Measuring only pass rate
+
+A suite that passes 95% of the time with frequent reruns is not healthy. Track flake rate and failure categories separately.
+
+## A lightweight rollout plan for teams
+
+If your current suite is mostly unit/integration coverage, a gradual path works best:
+
+1. Pick one trust-critical user journey (for example, first connect + first transaction).
+2. Add one happy path and one rejection path.
+3. Run both in CI on deterministic infrastructure.
+4. Add diagnostics for wallet and chain failure points.
+5. Expand coverage by user impact, not by page count.
+
+This approach avoids the common trap of trying to "E2E everything" and ending up with a slow, noisy suite nobody trusts.
+
+## Where Web3 testing is heading
+
+Two trends are making realistic testing even more important:
+
+- **More wallet diversity:** extension wallets, embedded wallets, and account abstraction flows increase interaction variability.
+- **More cross-chain behavior:** one user action may involve switching context across chains and protocols.
+
+As that complexity grows, competitive teams will be the ones that validate user intent end to end, not only internal code paths.
+
+## Conclusion
+
+Mocked wallet tests are still valuable. They keep development fast and focused. But they are not enough to protect the moments where users decide whether your dApp is trustworthy.
+
+A strong Web3 testing strategy pairs fast lower-level tests with a small, high-value set of real wallet E2E scenarios that include both approval and rejection behavior. That is where release confidence becomes user confidence.
+
+If you are looking for a practical next step, start with one wallet-critical flow this week and automate it in a real browser with real wallet interactions. The insights you gain are usually immediate, and often surprising.
+
+---
+*This article was written with the assistance of AI.*
