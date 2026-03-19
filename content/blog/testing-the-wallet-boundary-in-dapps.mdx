@@ -1,0 +1,164 @@
+---
+title: "Testing the Wallet Boundary: A Practical Reliability Guide for dApps"
+description: "Learn how to combine unit, integration, and wallet E2E testing to catch real user failures in blockchain applications before they reach production."
+author: Chroma Team
+date: 2026-03-19
+---
+
+## Introduction
+
+Most blockchain teams are not short on tests. They are short on confidence that matters to users.
+
+You can have strong smart contract coverage, clean frontend unit tests, and stable integration checks, then still ship a release where users get stuck after clicking **Connect Wallet**. This is not because testing failed as a discipline. It is because the wrong layer was asked to answer a real-user question.
+
+The question users care about is simple: *Can I complete my task safely, clearly, and without confusion?*
+
+In dApps, that answer depends on interactions across multiple systems: your UI, wallet extension UI, chain state, and human decisions. This article explains how to test that boundary in a practical way, without turning your CI pipeline into a slow, fragile bottleneck.
+
+## Why dApp reliability breaks at the wallet boundary
+
+In a typical Web2 product, many core interactions stay inside one app surface. In Web3, trust-critical actions cross boundaries:
+
+- App asks for wallet connection
+- Wallet requests approval
+- User accepts, rejects, or closes the popup
+- App reconciles on-chain or signing outcomes
+- UI communicates the next safe step
+
+Each step can fail in different ways, and failures are often asynchronous. A user can reject a signature, switch accounts, approve the wrong chain, or return to a stale tab. If your suite only validates idealized success paths, production will expose the rest.
+
+That is why dApp reliability often feels unpredictable: teams test code paths, while users experience state transitions.
+
+## The right job for each test layer
+
+A useful testing strategy is not "E2E everything." It is clear role separation.
+
+### Unit tests: protect fast-moving logic
+
+Use unit tests for deterministic logic:
+
+- Input validation
+- Formatting and parsing
+- Fee and amount calculations
+- Reducers and state transitions
+- Error classification utilities
+
+These tests should be fast and broad. They catch regressions early and help refactors move safely.
+
+### Integration tests: protect app contracts
+
+Use integration tests to confirm collaboration between components, stores, and APIs:
+
+- Correct loading and fallback states
+- Data handling between hooks and views
+- Retry logic around backend responses
+
+Integration tests are excellent for "does our app architecture behave as expected?" They are less effective for "can a real user complete a wallet flow end to end?"
+
+### Wallet E2E tests: protect trust moments
+
+Use E2E tests with a real browser and real wallet interactions for high-impact journeys:
+
+- Connect wallet
+- Sign message
+- Approve or reject transaction
+- Switch network and recover
+- Confirm final, user-visible outcome
+
+Tooling such as [@avalix/chroma](https://github.com/avalix-labs/chroma) is useful here because it focuses on real wallet and browser behavior rather than mocked providers. This closes the gap between "test passed" and "user succeeded."
+
+## A practical model: test decisions, not just confirmations
+
+A common mistake is defining one test per feature ("test swap", "test bridge", "test stake"). In practice, each feature includes multiple user decisions. A better matrix for critical journeys is:
+
+1. **Confirm path** — user approves immediately
+2. **Reject path** — user explicitly declines
+3. **Recovery path** — user retries and succeeds
+4. **Interruption path** — popup closed or timing disrupted
+
+This compact matrix catches most trust-damaging issues without exploding suite size.
+
+Another key principle: assert outcomes the user can understand, not just implementation events.  
+For example, "wallet popup opened" is not enough. A stronger assertion is "after rejection, user sees clear cancellation state and can retry safely."
+
+## Example: a first-time stake flow that tests real behavior
+
+Imagine a staking dApp where users connect, approve token spend, and submit stake. A realistic test should include a declined approval first, then a successful retry:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test('user can recover from approval rejection during staking', async ({ page, wallets }) => {
+  const wallet = wallets.metamask
+
+  await page.goto(process.env.DAPP_URL!)
+  await page.getByRole('button', { name: 'Connect Wallet' }).click()
+  await wallet.authorize()
+
+  await page.getByRole('button', { name: 'Stake' }).click()
+  await page.getByRole('button', { name: 'Approve Token' }).click()
+  await wallet.reject()
+
+  await expect(page.getByText('Approval canceled')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Try Again' })).toBeVisible()
+
+  await page.getByRole('button', { name: 'Try Again' }).click()
+  await wallet.confirm()
+  await page.getByRole('button', { name: 'Confirm Stake' }).click()
+  await wallet.confirm()
+
+  await expect(page.getByText('Stake confirmed')).toBeVisible({ timeout: 30_000 })
+})
+```
+
+This single scenario validates more than success. It validates resilience and user recovery, which is where trust is often won or lost.
+
+## Common mistakes that create false confidence
+
+### Treating rejection as an edge case
+
+Rejection is routine behavior, not rare behavior. Users reject because of uncertainty, gas spikes, or simple caution. If you do not test reject flows, you are skipping normal product use.
+
+### Asserting too early after wallet actions
+
+Wallet approvals and chain updates are asynchronous. Tests that assert immediately after click events become flaky and noisy. Prefer assertions tied to stable, user-visible states.
+
+### Measuring only pass rate
+
+A 97% pass rate can hide serious instability if the suite needs frequent reruns. Track flake rate separately from failure rate, and classify failures by cause (wallet UI timing, RPC behavior, app state bugs).
+
+### Over-scaling E2E too soon
+
+Teams sometimes add dozens of wallet tests before stabilizing infrastructure. Start with a small set of trust-critical flows, harden determinism, then expand.
+
+## What will matter next in blockchain testing
+
+Web3 interaction complexity is increasing:
+
+- More wallet types and UX patterns
+- Account abstraction and delegated actions
+- Cross-chain transactions inside single user journeys
+
+As this grows, testing strategy will shift from route-based coverage ("did page X work?") to intent-based coverage ("did user goal Y complete safely under realistic decisions?").
+
+The teams that ship reliably will not be the teams with the longest test lists. They will be the teams that continuously validate real user intent at the wallet boundary.
+
+## Conclusion
+
+Strong unit and integration suites remain essential for development speed. But for dApps, user trust is usually decided in wallet-driven moments: connect, sign, approve, reject, retry, confirm.
+
+A practical path forward is straightforward:
+
+1. Pick one trust-critical flow.
+2. Add confirm, reject, recovery, and interruption coverage.
+3. Run it consistently in CI with deterministic setup.
+4. Expand only after stability is proven.
+
+If you do this well, your tests stop being a checkbox and start becoming a product quality signal your users can feel.
+
+---
+*This article was written with the assistance of AI.*
