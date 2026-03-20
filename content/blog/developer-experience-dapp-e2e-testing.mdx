@@ -1,0 +1,197 @@
+---
+title: "The DX Problem Nobody Talks About: Writing E2E Tests for dApps"
+description: "Why developer experience is the biggest bottleneck in Web3 E2E testing, and how better tooling turns wallet test automation from a chore into a workflow you actually maintain."
+author: Chroma Team
+date: 2026-03-20
+---
+
+_Better developer experience is the difference between a test suite teams maintain and one they quietly abandon._
+
+## Introduction
+
+Most conversations about Web3 testing focus on coverage, flakiness, or CI infrastructure. Those are real problems. But there is a quieter problem that comes before all of them: writing and maintaining dApp E2E tests is a painful developer experience.
+
+Setting up a browser extension inside a test runner, scripting clicks through wallet popups, managing extension lifecycles, and debugging failures across two browser contexts is not just difficult. It is tedious enough that many teams give up early. The tests that never get written are the biggest coverage gap in Web3.
+
+Developer experience is not about making things easy for its own sake. When testing workflows are fast to set up, straightforward to write, and simple to debug, teams write more tests, maintain them longer, and trust the results. When the DX is poor, even disciplined teams gradually stop investing in their E2E suites.
+
+## The hidden friction in Web3 E2E testing
+
+Traditional E2E testing with Playwright or Cypress is already well-understood. You navigate to a page, interact with elements, and assert results. The developer loop is tight: write, run, see output, fix, repeat.
+
+Web3 testing breaks that loop in several places.
+
+**Setup overhead.** Before writing a single test, you need to figure out how to load a wallet extension into the browser, automate the onboarding wizard, import a seed phrase, and configure a network. Each wallet handles this differently. MetaMask alone has changed its onboarding flow multiple times across versions.
+
+**Two-context debugging.** Your dApp runs in one browser context. The wallet extension runs in another. When a test fails, you may not know which context caused the failure, and Playwright's built-in tracing does not capture extension popup interactions by default.
+
+**Brittle selectors.** Wallet extension UIs are not designed for test automation. Class names change between versions. There are no `data-testid` attributes. Teams end up writing fragile selectors that break on every extension update.
+
+**Slow feedback loops.** A simple wallet connection test can take 10 to 15 seconds even when everything works. When something breaks, the debug cycle involves restarting the browser, re-importing the seed phrase, and navigating back to the right state. Multiply that by 20 test iterations and a morning disappears.
+
+These friction points compound. Each one is manageable in isolation, but together they push wallet E2E testing out of the "things we do consistently" category and into "things we tried once."
+
+## What is @avalix/chroma
+
+[Chroma](https://github.com/avalix-labs/chroma) is a testing library designed to eliminate the DX friction in Web3 E2E testing. It extends Playwright with wallet automation primitives so teams can write readable, maintainable tests against real wallet extensions.
+
+- **Real wallet interactions** with actual browser extensions, not mocked providers or injected stubs.
+- **Playwright-native API** that works with existing test fixtures, assertions, and configuration.
+- **Managed extension lifecycle** so you do not need to script wallet downloads, onboarding, or version pinning yourself.
+- **Clean abstractions** like `authorize()`, `confirm()`, and `reject()` that replace fragile popup selectors with intent-level commands.
+- **Developer-friendly setup** that takes two commands, not a weekend of configuration.
+
+## Key Features
+
+**Wallet onboarding in one call.** Instead of scripting 8 to 12 clicks through a wallet setup wizard, call `importSeedPhrase()` and the library handles the rest. When the extension updates its UI, the library absorbs the change instead of your tests breaking.
+
+**Intent-level wallet control.** When your dApp triggers a wallet popup, call `wallet.confirm()` or `wallet.reject()` from your test. No need to locate buttons inside extension windows or wait for specific popup states.
+
+**Extension version pinning.** Run `npx chroma download-extensions` once, and the library caches a known-stable extension version. Your tests behave the same locally and in CI regardless of what version the wallet team shipped last week.
+
+**Isolated browser contexts.** Each test gets its own browser context with a fresh wallet state. No leftover connections, no residual network configuration, no cross-test pollution.
+
+**Playwright compatibility.** `createWalletTest` returns a standard Playwright `test` function. You can use `test.describe`, `test.beforeEach`, `expect`, and every other Playwright feature without adapters or wrappers.
+
+## Quick Start
+
+Install the package:
+
+```bash
+npm i -D @avalix/chroma
+```
+
+Or with pnpm:
+
+```bash
+pnpm add -D @avalix/chroma
+```
+
+Download wallet extensions:
+
+```bash
+npx chroma download-extensions
+```
+
+Here is a complete test file that demonstrates the setup, wallet connection, message signing, and transaction confirmation:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test.setTimeout(60_000)
+
+test.describe('token transfer flow', () => {
+  test.beforeEach(async ({ wallets }) => {
+    const metamask = wallets.metamask
+    await metamask.importSeedPhrase({
+      seedPhrase: process.env.TEST_SEED_PHRASE!,
+    })
+  })
+
+  test('connects wallet and completes transfer', async ({ page, wallets }) => {
+    const metamask = wallets.metamask
+
+    await page.goto(process.env.DAPP_URL!)
+    await page.waitForLoadState('networkidle')
+
+    // Connect wallet
+    await page.getByRole('button', { name: 'Connect Wallet' }).click()
+    await metamask.authorize()
+    await expect(page.getByText(/0x[a-fA-F0-9]{4}/)).toBeVisible()
+
+    // Initiate transfer
+    await page.getByRole('textbox', { name: 'Recipient' }).fill('0x1234...abcd')
+    await page.getByRole('textbox', { name: 'Amount' }).fill('0.01')
+    await page.getByRole('button', { name: 'Send' }).click()
+
+    // Confirm in wallet
+    await metamask.confirm()
+
+    // Verify outcome
+    await expect(
+      page.getByText('Transfer submitted')
+    ).toBeVisible({ timeout: 15_000 })
+
+    await expect(
+      page.getByText('Transfer confirmed')
+    ).toBeVisible({ timeout: 30_000 })
+  })
+})
+```
+
+Notice the shape of this test. It reads like a description of what a user does, not like a script for navigating extension internals. That readability is the DX goal.
+
+## Architecture: Test Execution Flow
+
+```
+┌──────────────────────────────────────────────────┐
+│              Playwright Test Runner               │
+│                                                   │
+│  ┌──────────┐    ┌───────────┐    ┌───────────┐  │
+│  │ Test file │ -> │  Chroma   │ -> │ Browser   │  │
+│  │ (your    │    │ (wallet   │    │ Context + │  │
+│  │  code)   │    │  fixture) │    │ Extension │  │
+│  └──────────┘    └───────────┘    └───────────┘  │
+│                       │                  │        │
+│                  importSeedPhrase   ┌─────────┐   │
+│                  authorize()       │  dApp   │   │
+│                  confirm()         │  under  │   │
+│                  reject()          │  test   │   │
+│                                    └─────────┘   │
+└──────────────────────────────────────────────────┘
+```
+
+Chroma sits between your test code and the browser. Your tests express intent. Chroma translates that into reliable extension interactions. The dApp runs in the same browser context, so all navigation, assertions, and Playwright utilities work as expected.
+
+## Best Practices
+
+- **Use environment variables for secrets.** Keep seed phrases and RPC endpoints out of source code. Even test-only credentials belong in `.env` files or CI secret stores.
+- **Run against a local blockchain fork.** Use Hardhat or Anvil with pre-funded accounts. Public testnets introduce network variability that creates flaky results unrelated to your code.
+- **Keep tests focused on one user journey.** A test that connects, swaps, bridges, and stakes is hard to debug when it fails. Smaller, focused tests produce clearer signals.
+- **Set explicit timeouts for blockchain assertions.** On-chain confirmations take longer than typical UI interactions. Use per-assertion timeouts like `toBeVisible({ timeout: 30_000 })` rather than inflating the global timeout.
+- **Cache wallet extensions in CI.** Run `npx chroma download-extensions` once and cache the `.chroma` directory between builds. This keeps your pipeline fast and network-independent.
+
+## Common Pitfalls
+
+**Writing wallet automation from scratch.** Teams sometimes try to automate wallet popups using raw Playwright selectors against the extension UI. This works until the next extension update, and then every test breaks at once. Using a library that abstracts the extension UI saves significant maintenance time.
+
+**Skipping rejection paths.** Happy path tests are easier to write, but users reject wallet prompts regularly. If your rejection UI is untested, it is probably broken. Include at least one rejection scenario for each critical flow.
+
+**Sharing wallet state between tests.** When tests reuse the same browser context or wallet instance, earlier tests leave behind connections, permissions, and network state that make later tests unpredictable. Isolated contexts per test eliminate this category of flakiness entirely.
+
+**Ignoring test output on failure.** Playwright captures screenshots and traces on failure, but wallet popup state is often missing from those artifacts. Use Chroma's built-in logging to understand what the wallet was doing when the test failed.
+
+**Testing against mainnet or live testnets in CI.** Network congestion, gas spikes, and RPC rate limits create random failures. Deterministic local forks remove these variables completely.
+
+## When to Use @avalix/chroma
+
+Chroma is the right tool when your application has wallet-driven user flows that need end-to-end verification: connecting, signing, approving transactions, switching chains, or handling rejections.
+
+If your project is a smart contract library with no frontend, unit tests against a local node are the better fit. If your dApp has wallet interactions but they are not on the critical user path (for example, an optional "connect to save preferences" feature), standard Playwright tests may be sufficient.
+
+The general rule: if a broken wallet interaction would block your users from completing their primary task, that interaction belongs in an automated E2E suite with real wallet testing.
+
+## Call to Action
+
+**Short version:** Install `@avalix/chroma`, write one wallet test, and see how it changes your confidence in your next deploy.
+
+```bash
+npm i -D @avalix/chroma && npx chroma download-extensions
+```
+
+**Longer version:** Start with the flow your users care about most. Connect a wallet, trigger the primary action, confirm in the wallet, and assert the outcome. Once that test is green locally, move it into CI. Then add a rejection path. That small investment will catch more real-world issues than a hundred mocked provider tests. Explore the [example repository](https://github.com/avalix-labs/chroma-examples) for patterns you can adapt, and [star the project on GitHub](https://github.com/avalix-labs/chroma) if it saves you time.
+
+---
+
+**Links**
+
+- Repository: [https://github.com/avalix-labs/chroma](https://github.com/avalix-labs/chroma)
+- Examples: [https://github.com/avalix-labs/chroma-examples](https://github.com/avalix-labs/chroma-examples)
+
+---
+
+**Keywords:** Web3 E2E testing, dApp developer experience, Playwright wallet automation, wallet testing DX, CI wallet tests
