@@ -1,0 +1,184 @@
+---
+title: "Ship dApps for Interruptions, Not Ideal Flows"
+description: "A practical guide to testing wallet-driven dApp journeys the way real users behave: with interruptions, reversals, and uncertain network timing."
+author: Chroma Team
+date: 2026-03-20
+---
+
+## Introduction
+
+Most teams do not lose user trust because their happy path is broken. They lose trust because their flow breaks when reality appears.
+
+In Web3, reality is messy:
+
+- A user starts connecting a wallet, then gets distracted.
+- They reject a signature because the message looks unfamiliar.
+- They switch networks midway and forget to switch back.
+- Their transaction lingers in pending state longer than expected.
+
+If your tests only model smooth, linear success, they can all pass while real users still feel your app is unreliable.
+
+This article introduces a practical idea: design and test dApp flows for **interruptions**, not just ideal outcomes. That shift can dramatically improve reliability, user confidence, and release quality.
+
+## Why interruption-driven testing matters in Web3
+
+Traditional web testing often assumes one interface, one state machine, and one source of truth. dApps are different because critical steps cross boundaries:
+
+1. App UI in your tab
+2. Wallet extension UI in a separate context
+3. Chain and RPC state that resolves asynchronously
+4. Human decisions that are non-deterministic
+
+Every boundary is an interruption point.
+
+When teams mock most of this, they often verify that code paths execute, but not that users can recover from real-world friction. The result is a familiar production symptom: low error rates in monitoring, but high abandonment in wallet-critical journeys.
+
+## The interruption model: Pause, Reverse, Resume
+
+A useful way to think about dApp E2E coverage is with three behavior classes.
+
+### 1) Pause
+
+The user delays an action:
+
+- Wallet prompt stays open for 20 seconds.
+- Transaction remains pending.
+- User switches browser tabs before returning.
+
+**What to test:** Does the app remain coherent while waiting? Are loading states explicit? Can users continue without refreshing?
+
+### 2) Reverse
+
+The user says no:
+
+- Reject wallet connection
+- Reject signature
+- Cancel transaction confirmation
+
+**What to test:** Does the app communicate what happened clearly? Are controls still usable? Is the next best step obvious?
+
+### 3) Resume
+
+The user tries again:
+
+- Click connect after rejection
+- Retry sign after understanding context
+- Re-submit after chain correction
+
+**What to test:** Can users recover without hidden stale state? Do retries behave as first-class flows, not awkward edge cases?
+
+This model keeps tests grounded in actual behavior instead of idealized scripts.
+
+## Practical example: testing a resilient claim flow
+
+Below is a simplified pattern that captures interruption behavior while staying readable:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test('user recovers from signature rejection and completes claim', async ({ page, wallets }) => {
+  const wallet = wallets.metamask
+
+  await wallet.importSeedPhrase({
+    seedPhrase: process.env.TEST_SEED_PHRASE!,
+  })
+
+  await page.goto(process.env.DAPP_URL!)
+  await page.getByRole('button', { name: 'Connect Wallet' }).click()
+  await wallet.authorize()
+
+  await page.getByRole('button', { name: 'Claim Rewards' }).click()
+  await wallet.reject() // reverse
+
+  await expect(page.getByText('Signature request was canceled')).toBeVisible()
+  await page.getByRole('button', { name: 'Try Again' }).click() // resume
+  await wallet.confirm()
+
+  await expect(page.getByText('Rewards claimed')).toBeVisible({
+    timeout: 30_000,
+  })
+})
+```
+
+The exact tool is less important than the structure:
+
+- Trigger a real user goal
+- Introduce one meaningful interruption
+- Verify recovery and final user-visible outcome
+
+Libraries such as [@avalix/chroma](https://github.com/avalix-labs/chroma) help here because they let teams automate real browser + real wallet interactions, making interruption scenarios testable in a realistic way.
+
+## Common mistakes teams make
+
+### Mistake 1: Treating unhappy paths as optional
+
+Many teams write ten happy-path tests and zero rejection tests. In production, rejection is not rare behavior. It is normal behavior.
+
+### Mistake 2: Asserting technical steps, not user outcomes
+
+"Clicked confirm" is not success. "Popup closed" is not success. Success means the user sees a trustworthy final state (or clear actionable error).
+
+### Mistake 3: Hiding ambiguity behind generic toasts
+
+Messages like "Something went wrong" are costly in Web3 because users are already navigating unfamiliar mental models. Tests should enforce specific, useful error language for common wallet interruptions.
+
+### Mistake 4: Ignoring deterministic test setup
+
+If wallet versions drift or account state is inconsistent, teams often confuse environmental flakiness with product regressions. Pin versions, seed known state, and track flake rate separately from pass rate.
+
+## A lightweight coverage strategy for smaller teams
+
+You do not need a massive framework migration to apply interruption-driven testing. Start with a minimal system:
+
+1. **Choose one high-impact journey**  
+   Example: first connect + first transaction, or claim flow.
+
+2. **Define one interruption per journey**  
+   Example: reject signature on first attempt.
+
+3. **Assert both communication and recovery**  
+   - Is the error understandable?  
+   - Can the user continue without refresh?
+
+4. **Keep these tests in CI**  
+   Even a small set of realistic wallet E2E tests can prevent high-impact regressions.
+
+5. **Expand by risk concentration**  
+   Add coverage where abandonment or support load is highest.
+
+This approach keeps maintenance practical while increasing the reliability users actually feel.
+
+## Developer insight: reliability is a UX property
+
+In Web3, testing is often framed as engineering quality control. That is true, but incomplete. Reliability is also a UX property because users form trust from interaction outcomes, not architectural elegance.
+
+A dApp can have excellent contract audits and polished frontend code, yet still feel unreliable if wallet interruptions produce confusing dead ends. Teams that recognize this early tend to build stronger product intuition:
+
+- They write tests around user intent.
+- They treat cancellation and retry as first-class experiences.
+- They evaluate release readiness by confidence in real flows, not just green checks.
+
+## Where blockchain testing is heading
+
+Several trends are pushing this further:
+
+- **More wallet diversity:** extension wallets, embedded wallets, and account abstraction patterns all change interaction details.
+- **Cross-chain workflows:** single user actions increasingly span multiple confirmations and contexts.
+- **Higher UX expectations:** mainstream users expect clear recovery behavior by default.
+
+This means interruption-aware testing will move from "advanced practice" to baseline engineering hygiene.
+
+## Conclusion
+
+If you want more reliable dApps, stop thinking of failures as rare exceptions and start treating interruptions as the default environment.
+
+The most useful next step is simple: pick one core wallet journey, add a rejection-or-delay scenario, and verify the user can recover cleanly. That one test often exposes quality gaps you cannot see with idealized paths alone.
+
+Whether you implement this with @avalix/chroma or your existing stack, the principle is durable: test how people actually behave, and your product will be more trustworthy when it matters most.
+
+---
+*This article was written with the assistance of AI.*
