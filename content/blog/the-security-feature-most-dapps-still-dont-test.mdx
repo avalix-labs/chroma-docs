@@ -1,0 +1,189 @@
+---
+title: "The Security Feature Most dApps Still Don’t Test: Human Decision Flow"
+description: "A practical guide to testing wallet decision points in Web3, so teams can improve both security outcomes and user trust."
+author: Chroma Team
+date: 2026-03-21
+---
+
+## Introduction
+
+When developers discuss dApp security, the conversation usually starts with smart contracts: audits, formal verification, static analysis, and bug bounties. Those are essential. But many real incidents that hurt users do not begin with a contract exploit. They begin with a confusing wallet prompt, a rushed signature, or a transaction users did not fully understand.
+
+In other words, part of your security model lives in user interaction.
+
+That is why testing dApps only at the code and API level is no longer enough. If a user cannot safely complete a flow in a real browser with a real wallet, the system is not truly secure in practice.
+
+This article explains why human decision flow is a security feature, how to test it systematically, and where end-to-end wallet testing fits into a realistic Web3 quality strategy.
+
+## Security in Web3 is also a UX problem
+
+In Web2, security and UX are often treated as separate tracks. In Web3, they are tightly connected. Users routinely approve actions with financial consequences, and that approval happens through wallet interfaces your team does not fully control.
+
+A typical high-stakes flow might include:
+
+1. Connect wallet
+2. Approve account access
+3. Review a signature request
+4. Confirm an on-chain transaction
+5. Wait for pending and final states
+
+Every step introduces user decisions, timing uncertainty, and cross-context state changes. If any step is unclear, delayed, or misrepresented, users can make mistakes even when contracts are technically correct.
+
+So a practical question for teams is not only "Can this function be exploited?" It is also "Can normal users make safe decisions under realistic conditions?"
+
+## The human decision surface: what to test explicitly
+
+Most test suites over-focus on happy-path approvals. Real users do much more than click "Confirm."
+
+### 1) Consent clarity
+
+When a wallet asks for permissions, does your app clearly explain why the prompt appeared and what happens next? If users reject, do they get a recoverable path or a dead end?
+
+### 2) Signature comprehension
+
+Signature requests can look opaque, especially on mobile or unfamiliar wallets. Your test strategy should verify that the app provides context before and after signing, including clear warnings when signatures are required for non-obvious actions.
+
+### 3) Transaction trust signals
+
+Submitting a transaction is not a binary event. Users need understandable status transitions:
+
+- Pending
+- Confirmed
+- Failed or replaced
+
+If your UI reports success too early, users may take unsafe follow-up actions.
+
+### 4) Rejection and cancellation safety
+
+Rejection is not an edge case. It is normal behavior. A resilient dApp treats cancellation as a first-class path with consistent UI state, clear messaging, and retry options.
+
+## Why unit and integration tests miss these failures
+
+Unit and integration tests remain critical, but they answer different questions:
+
+- **Unit tests:** Is local logic correct?
+- **Integration tests:** Do components cooperate correctly?
+- **Wallet E2E tests:** Can a user safely complete intent in reality?
+
+The biggest failures in wallet-heavy flows happen at system boundaries:
+
+- Main page and extension popup timing
+- Wallet version differences
+- Chain state delays
+- User decisions that interrupt ideal flow
+
+Mocked providers are useful for speed, but they abstract away exactly the uncertainty users experience. That creates a dangerous situation: green builds that hide interaction risk.
+
+## A practical coverage model for small teams
+
+You do not need to test every screen end to end. Start with the moments where user trust can break.
+
+### Step 1: Identify trust-critical journeys
+
+Pick 3 to 5 flows tied to value and risk, such as:
+
+- First wallet connection
+- First asset transfer or swap
+- Permission upgrade flow
+- Network switch recovery
+
+### Step 2: Define three outcomes per journey
+
+For each flow, include:
+
+- **Approve path** (expected success)
+- **Reject path** (expected safe fallback)
+- **Recover path** (retry or alternate route)
+
+### Step 3: Assert user-visible outcomes, not internal events
+
+Avoid stopping at "button clicked" or "wallet confirmed." Assert what users must see to act confidently:
+
+- Clear status labels
+- Accurate balances or positions
+- Actionable error state
+- No stale success indicators
+
+### Step 4: Keep environment deterministic
+
+Pin wallet and browser versions, seed accounts with known state, and run on controlled RPC environments for core flows. Determinism turns failures into useful diagnostics instead of noise.
+
+## Example: testing a rejection-recovery flow
+
+The exact framework can vary, but the pattern below is what matters: model user decisions directly and verify end-user safety outcomes.
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test('user rejects once, retries, and completes transfer safely', async ({ page, wallets }) => {
+  const wallet = wallets.metamask
+
+  await wallet.importSeedPhrase({
+    seedPhrase: process.env.TEST_SEED_PHRASE!,
+  })
+
+  await page.goto(process.env.DAPP_URL!)
+  await page.getByRole('button', { name: 'Connect Wallet' }).click()
+  await wallet.authorize()
+
+  await page.getByRole('button', { name: 'Send' }).click()
+  await wallet.reject()
+
+  await expect(page.getByText('Transaction canceled')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Try Again' })).toBeVisible()
+
+  await page.getByRole('button', { name: 'Try Again' }).click()
+  await wallet.confirm()
+
+  await expect(page.getByText('Transfer confirmed')).toBeVisible({
+    timeout: 30_000,
+  })
+})
+```
+
+Tools like [@avalix/chroma](https://github.com/avalix-labs/chroma) are useful here because they let teams automate real wallet behavior in real browsers, while keeping tests readable enough for product and QA collaboration.
+
+## Common mistakes that create false confidence
+
+### Mistake 1: Treating "user canceled" as low priority
+
+In production, cancellation happens constantly. If cancel paths are fragile, users interpret the app as unreliable.
+
+### Mistake 2: Declaring success before chain confirmation
+
+Optimistic UI can improve feel, but your messaging must distinguish pending from final. Tests should verify that distinction.
+
+### Mistake 3: Chasing broad coverage instead of high-impact coverage
+
+A focused suite of trust-critical E2E flows is usually more valuable than many shallow tests.
+
+### Mistake 4: Ignoring flake diagnostics
+
+A flaky suite erodes team behavior. Track flake rate and root causes separately from pass rate so reliability work stays visible.
+
+## Where this is heading
+
+As wallets diversify and account abstraction patterns spread, user decision surfaces will grow, not shrink. Teams will need better ways to validate intent completion across multiple wallet types and chains.
+
+Expect three trends:
+
+- More intent-based test design around user goals
+- Better wallet observability in CI and local environments
+- Increased emphasis on rejection and recovery parity across wallets
+
+The teams that adapt early will ship faster with fewer trust-breaking incidents.
+
+## Conclusion
+
+Smart contract correctness is necessary, but it is not the full security story of a dApp. Security is also whether users can make safe decisions at wallet moments, recover from mistakes, and understand what happened after each action.
+
+If you want one immediate improvement, pick a single trust-critical journey and add rejection plus recovery coverage in a real wallet E2E test. That one change often surfaces hidden product risk faster than another batch of mocked happy-path tests.
+
+Whether you use @avalix/chroma or similar tooling, the principle is the same: test the human decision flow, because that is where Web3 reliability becomes real.
+
+---
+*This article was written with the assistance of AI.*
