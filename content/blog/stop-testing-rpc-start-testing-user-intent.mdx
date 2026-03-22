@@ -1,0 +1,182 @@
+---
+title: "Stop Testing RPC Calls, Start Testing User Intent in dApps"
+description: "A practical guide to designing blockchain E2E tests around real user behavior, wallet decisions, and trust-critical flows."
+author: Chroma Team
+date: 2026-03-22
+---
+
+## Introduction
+
+Many Web3 bugs do not come from broken smart contracts. They come from broken journeys.
+
+You can have strong unit coverage, clean integration tests, and healthy CI status, then still ship a dApp where users get stuck between "Connect Wallet" and "Done." It happens because most test suites validate code paths, while real users experience decision paths:
+
+- "Approve" or "Reject"
+- "Switch network now" or "Later"
+- "Wait" or "close the popup"
+
+In other words, users do not interact with your abstractions. They interact with wallets, timing, and uncertainty.
+
+This article explains a practical approach to E2E testing that maps to what users actually do. The goal is not to replace unit or integration testing. The goal is to cover the trust-critical moments where dApps usually fail in production.
+
+## The reliability gap that keeps surprising teams
+
+Most teams already understand the testing pyramid:
+
+- Unit tests for logic
+- Integration tests for component and service boundaries
+- E2E tests for complete flows
+
+The issue in blockchain apps is not a missing layer. It is a missing focus.
+
+In many codebases, E2E tests are still written like traditional web app scripts: click this, assert that, move on. But wallet-driven applications have extra state transitions outside your DOM:
+
+1. Wallet extension opens (or fails to)
+2. User approves, rejects, or dismisses
+3. Transaction enters pending state
+4. Chain confirms at an unpredictable time
+5. UI must reflect the final state clearly
+
+If your tests do not actively model those decisions, your test suite can be "correct" while your product experience is unreliable.
+
+## A better mental model: intent -> decision -> finality
+
+A useful shift is to write scenarios around user intent, then force the real decisions that can interrupt that intent.
+
+### 1) Intent
+
+Start with the job the user is trying to complete:
+
+- Connect for the first time
+- Sign a message to authenticate
+- Submit a transaction
+- Retry after cancellation
+
+This keeps test priorities tied to business and support impact, not just UI coverage.
+
+### 2) Decision
+
+For each intent, model at least one non-happy path:
+
+- User rejects signature
+- User is on wrong chain
+- Wallet prompt appears late
+- User retries from an error state
+
+In Web3, these are not edge cases. They are normal behavior.
+
+### 3) Finality
+
+Assert user-visible outcomes at both stages:
+
+- Immediate feedback ("Pending transaction...")
+- Eventual feedback ("Confirmed", "Failed", or "Cancelled")
+
+Without this, teams often test "button clicked" rather than "user actually succeeded."
+
+## A practical blueprint for small teams
+
+You do not need 200 wallet E2E tests to get value. Start with a compact suite that targets trust moments.
+
+### Step 1: Pick three high-value flows
+
+For most dApps, these are enough to expose major gaps:
+
+1. First wallet connect
+2. First signature
+3. First value-carrying transaction
+
+For each flow, add:
+
+- One success path
+- One rejection or mismatch path
+
+That gives six scenarios with high signal.
+
+### Step 2: Keep setup deterministic
+
+Flaky setup kills confidence quickly. Pin what you can:
+
+- Wallet extension version
+- Test account seed/state
+- Expected network and balances
+- RPC endpoint behavior
+
+When teams skip this, they start rerunning failures until green. At that point, CI stops being a quality gate.
+
+### Step 3: Use readable wallet actions
+
+Many E2E scripts become fragile because they target wallet popup selectors directly. A better approach is to express wallet decisions as test actions. For example:
+
+```ts
+await wallet.authorize()
+await wallet.reject()
+await wallet.confirm()
+```
+
+That style is easier to review and maintain, especially when new contributors join.
+
+This is one place where tools like [@avalix/chroma](https://github.com/avalix-labs/chroma) are useful. Chroma is designed for real browser automation with real wallet extensions, so test code can focus on intent and outcomes rather than brittle UI internals.
+
+### Step 4: Assert recovery, not only failure
+
+A surprising number of apps correctly show an error message after rejection, but provide no reliable recovery path. Your test should verify that users can continue without a full page refresh:
+
+- Reject action
+- Clear error copy
+- Retry control visible
+- Successful completion after retry
+
+If your app can recover gracefully, users perceive it as stable even when things go wrong.
+
+## Common mistakes that quietly reduce trust
+
+### Mistake 1: Treating rejection as rare
+
+Users reject prompts all the time, often just to double-check details. If rejection handling is untested, incidents appear as "random UX bugs" after release.
+
+### Mistake 2: Asserting too early
+
+"Transaction submitted" is not success. Reliable tests distinguish submitted, pending, confirmed, and failed states.
+
+### Mistake 3: Measuring only pass rate
+
+A suite that passes after three reruns is not healthy. Track flake rate and failure categories, not just final green/red status.
+
+### Mistake 4: Testing pages, not journeys
+
+Coverage organized by route or component can look complete but still miss the one flow that matters: user intent across app + wallet + chain.
+
+## Why this improves developer experience too
+
+Testing real interaction flows is not just about user safety. It improves team velocity:
+
+- Fewer late-stage regressions from wallet changes
+- Faster triage because failures map to user moments
+- Clearer ownership between frontend, protocol, and QA
+- Better release confidence for high-impact features
+
+It also creates better conversations in planning. Instead of debating abstract "test coverage," teams discuss concrete questions: "What happens if the user rejects this prompt?" That usually leads to better product design, not just better tests.
+
+## Looking ahead: blockchain testing is becoming more human-centric
+
+As wallet ecosystems evolve, journey complexity is increasing:
+
+- More wallet types and providers
+- Account abstraction and delegated signing flows
+- Cross-chain interactions with more failure points
+
+The teams that win on reliability will not be the ones with the biggest raw test count. They will be the ones that consistently validate human decision paths end to end.
+
+## Conclusion
+
+A strong Web3 testing strategy is not anti-unit and not anti-mock. Lower-level tests remain essential for speed and coverage.
+
+But if you want fewer production surprises, add a thin layer of wallet-aware E2E tests that model real choices and real outcomes. Start small, focus on trust-critical flows, and prioritize recovery behavior as much as success behavior.
+
+Whether you implement this with `@avalix/chroma` or a different stack, the principle is the same: test what users are trying to do, in the conditions they actually encounter.
+
+That is when green pipelines start to mean real confidence.
+
+---
+*This article was written with the assistance of AI.*
