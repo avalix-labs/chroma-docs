@@ -1,0 +1,190 @@
+---
+title: "How to Test Wallet UX Without Slowing Down Your CI"
+description: "A practical guide to balancing speed and realism in Web3 testing, with a lightweight strategy for covering real wallet user flows."
+author: Chroma Team
+date: 2026-03-23
+---
+
+## Introduction
+
+Most dApp teams do not struggle because they forgot to write tests. They struggle because they wrote the wrong *mix* of tests.
+
+The pattern is common: unit tests are fast and green, integration tests are stable, release checks pass, and yet users still hit friction in production around wallet connection, signature prompts, chain switching, or transaction confirmation. Teams then respond by adding more E2E tests everywhere, CI time explodes, and developers stop trusting feedback loops.
+
+There is a better path. You can test real wallet UX, catch high-impact regressions, and still keep CI practical if you design for intent instead of volume.
+
+This article walks through a lightweight strategy that many Web3 teams can adopt quickly.
+
+## Why wallet UX breaks otherwise healthy test suites
+
+Web2 testing intuition says most critical paths stay inside your app. Web3 critical paths often cross boundaries your app does not own:
+
+- Your frontend UI and state management
+- Wallet extension UI and permissions
+- Chain and RPC behavior
+- Human decisions (approve, reject, close popup, switch account)
+
+A mocked provider can verify that your code made a call. It cannot prove the user journey completed across those boundaries in a real browser session.
+
+That is why teams with strong lower-level coverage still ship wallet regressions. The missing piece is usually a small set of realistic end-to-end tests focused on user trust moments.
+
+## The 80/20 model: fast suite + trust suite
+
+If you want both speed and confidence, split your testing strategy into two explicit layers:
+
+### Layer 1: Fast suite (runs on every PR)
+
+This suite is your iteration engine.
+
+- Unit tests for pure logic and utilities
+- Integration tests for component/data interactions
+- Lightweight smoke checks for routing and rendering
+
+Goal: keep it fast enough that developers run it often and trust it.
+
+### Layer 2: Trust suite (runs on merge and schedule)
+
+This suite is your release safety net.
+
+- Real browser
+- Real wallet extension
+- Real user decisions in wallet prompts
+- User-visible outcome assertions
+
+Goal: validate that high-risk product journeys actually work for humans.
+
+The key idea is not "test everything end to end." It is "test what breaks trust end to end."
+
+## How to choose the right wallet E2E scenarios
+
+A good scenario is not "page X loads." A good scenario maps to a user intent with meaningful failure cost.
+
+Use this quick filter:
+
+1. **Would failure block activation or revenue?**  
+   Example: first wallet connect, first swap, first mint, first bridge action.
+2. **Does it involve wallet decisions?**  
+   Example: approve vs reject, chain switch confirm vs cancel.
+3. **Is the outcome visible and measurable?**  
+   Example: connected state rendered, confirmed transaction shown, actionable error displayed.
+
+If a scenario scores high on these, it belongs in your trust suite.
+
+## A practical test matrix for wallet moments
+
+Many teams only cover the happy path. That is exactly where false confidence comes from. For each critical journey, you usually need three variants:
+
+### 1) Approval path
+
+User accepts wallet prompts and completes the action.
+
+### 2) Rejection path
+
+User rejects at least one prompt and the app responds clearly.
+
+### 3) Recovery path
+
+User retries after rejection and succeeds without manually resetting the app.
+
+This matrix stays small but catches a surprising percentage of production incidents.
+
+## Example: intent-first test shape
+
+The exact tooling matters less than the structure. A readable flow often looks like this:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test('user recovers from rejection and completes deposit', async ({ page, wallets }) => {
+  const wallet = wallets.metamask
+
+  await wallet.importSeedPhrase({
+    seedPhrase: process.env.TEST_SEED_PHRASE!,
+  })
+
+  await page.goto(process.env.DAPP_URL!)
+  await page.getByRole('button', { name: 'Connect Wallet' }).click()
+  await wallet.authorize()
+
+  await page.getByRole('button', { name: 'Deposit' }).click()
+  await wallet.reject()
+  await expect(page.getByText('Transaction was cancelled')).toBeVisible()
+
+  await page.getByRole('button', { name: 'Try Again' }).click()
+  await wallet.confirm()
+
+  await expect(page.getByText('Deposit confirmed')).toBeVisible({
+    timeout: 30_000,
+  })
+})
+```
+
+The important pattern is:
+
+- simulate real wallet state,
+- model real user decisions,
+- assert real user outcomes.
+
+Libraries like [@avalix/chroma](https://github.com/avalix-labs/chroma) are useful here because they let teams automate real wallet interactions while keeping tests focused on behavior, not brittle UI plumbing.
+
+## Common mistakes that slow teams down
+
+### Mistake 1: Treating E2E as a coverage race
+
+When teams attempt to convert every route into E2E tests, suites become expensive and noisy. Keep E2E concentrated on trust-critical journeys.
+
+### Mistake 2: Asserting implementation details instead of outcomes
+
+Checking whether a method was called is less useful than checking whether the user saw "Transaction confirmed" or a clear rejection state.
+
+### Mistake 3: Ignoring deterministic environments
+
+Unpinned wallet versions, drifting account balances, and unstable test RPC endpoints create flaky failures. Flake is not just annoying; it damages engineering trust in testing itself.
+
+### Mistake 4: Measuring pass rate only
+
+A 98% pass rate with frequent reruns can hide a fragile system. Track:
+
+- flake rate,
+- median runtime,
+- top failure categories,
+- number of manual reruns per week.
+
+Those metrics reveal whether the suite is genuinely healthy.
+
+## Workflow tip: make failures easier to debug than to ignore
+
+One reason teams abandon wallet E2E is poor debugging signal. If failure reports only say "timeout," developers learn to rerun instead of fix.
+
+A better workflow includes:
+
+- wallet-step logging (authorize, reject, confirm),
+- screenshots around wallet prompts and post-action UI,
+- clear naming for rejection vs approval tests,
+- failure tagging by category (network, wallet, selector, app state).
+
+When diagnostics are strong, one failing trust test can be fixed in minutes instead of debated for hours.
+
+## What this means for developer experience
+
+Developers want fast feedback and confidence before merge. Product teams want fewer trust-breaking incidents after release. A layered strategy satisfies both:
+
+- Fast suite supports daily iteration.
+- Trust suite protects real user journeys.
+
+This is also a better onboarding model. New contributors can understand which tests protect logic and which protect user trust, instead of inheriting one giant suite with unclear purpose.
+
+## Conclusion
+
+Reliable dApps do not come from choosing between speed and realism. They come from assigning each test layer a clear job.
+
+Use unit and integration tests to move quickly. Use a focused wallet E2E trust suite to validate real user behavior where it matters most. Start with one activation-critical journey, add approval/rejection/recovery paths, and improve determinism and diagnostics over time.
+
+If your current pipeline feels like "all green, still risky," this shift is often the highest-leverage improvement you can make.
+
+---
+*This article was written with the assistance of AI.*
