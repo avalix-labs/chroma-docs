@@ -1,0 +1,191 @@
+---
+title: "The Wallet Rejection Path: Why Web3 Teams Should Test the User Saying No"
+description: "A practical guide to designing dApp end-to-end tests around real wallet decisions, especially rejection and recovery flows that impact trust."
+author: Chroma Team
+date: 2026-03-24
+---
+
+## Introduction
+
+Most dApp teams are good at testing the "yes" path.
+
+User clicks **Connect Wallet**.  
+Wallet opens.  
+User approves.  
+Flow continues.
+
+That path matters, but it is not the only path users take. In production, people reject prompts, close extension popups, switch accounts mid-flow, or change their minds after reading transaction details. Those moments are normal behavior, not edge cases.
+
+When teams ignore them, they ship apps that look stable in CI and feel fragile to real users.
+
+This article explains why rejection-focused end-to-end testing is one of the highest-leverage improvements Web3 teams can make, and how to add it without building a huge, slow test suite.
+
+## The hidden assumption in many dApp test suites
+
+A lot of automated coverage is built around a simple assumption: if the app did the right thing, the user will do the expected thing next.
+
+That assumption breaks quickly in wallet-driven UX.
+
+In Web2 products, a single browser tab often controls most of the interaction. In Web3, important decisions happen across boundaries:
+
+- dApp UI state
+- wallet extension UI state
+- network and chain state
+- user decision state (approve, reject, cancel, retry)
+
+Every boundary can diverge. If your tests only validate the approval journey, your confidence is conditional on perfect user behavior, and that is not how real products are used.
+
+## Rejection is a product event, not a technical error
+
+A helpful way to think about this: rejection is not "the test failed." Rejection is "the user made a decision."
+
+Your app still has a job to do after that decision:
+
+1. Explain clearly what happened
+2. Keep the interface recoverable
+3. Offer an obvious next step
+4. Avoid stale or contradictory state
+
+If those four things fail, users experience confusion and distrust, even when your contracts and infrastructure are healthy.
+
+This is why rejection-path tests are not only QA tasks. They are product-quality and trust-quality tests.
+
+## A practical test design model: Trigger -> Decision -> Recovery -> Outcome
+
+When building E2E scenarios for wallet-heavy flows, use this sequence.
+
+### 1) Trigger
+
+Start with a real user intent, not a technical action.
+
+Good trigger: "User attempts first swap"  
+Weak trigger: "Call connect function and click third button"
+
+Intent-level triggers keep tests resilient when UI details change but user goals stay the same.
+
+### 2) Decision
+
+Express wallet choice explicitly: approve or reject.
+
+Do not treat rejection as an optional extension to a happy-path test. Make it a first-class scenario with clear assertions.
+
+### 3) Recovery
+
+Define what "healthy recovery" means:
+
+- A clear message appears
+- Retry action is present
+- Disabled controls are re-enabled correctly
+- User can continue without reloading
+
+This is where many dApps quietly break.
+
+### 4) Outcome
+
+Assert what the user sees at the end, not just which function was called.
+
+Examples:
+
+- "Wallet not connected" banner resolved
+- Correct account shown after reconnect
+- Final transaction state displayed
+- No stale pending toast after cancellation
+
+## Example scenario: first transaction with an initial rejection
+
+You can model this with any E2E stack that supports real wallets. The important part is the structure:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test('user rejects first confirmation, then retries successfully', async ({ page, wallets }) => {
+  const wallet = wallets.metamask
+
+  await wallet.importSeedPhrase({
+    seedPhrase: process.env.TEST_SEED_PHRASE!,
+  })
+
+  await page.goto(process.env.DAPP_URL!)
+  await page.getByRole('button', { name: 'Connect Wallet' }).click()
+  await wallet.authorize()
+
+  await page.getByRole('button', { name: 'Submit Transaction' }).click()
+  await wallet.reject()
+  await expect(page.getByText('Transaction was cancelled')).toBeVisible()
+
+  await page.getByRole('button', { name: 'Try Again' }).click()
+  await wallet.confirm()
+  await expect(page.getByText('Transaction confirmed')).toBeVisible({ timeout: 30_000 })
+})
+```
+
+In this kind of scenario, tooling such as [@avalix/chroma](https://github.com/avalix-labs/chroma) is useful because it keeps browser and wallet behavior close to real usage instead of relying only on provider mocks.
+
+## Common mistakes teams make when adding rejection tests
+
+### Mistake 1: Asserting only that an error exists
+
+"Error visible" is too weak. Assert the next user action is possible and sensible.
+
+### Mistake 2: Forgetting state reset rules
+
+After rejection, many apps leave a disabled button, stale spinner, or outdated status badge. Tests should verify cleanup behavior explicitly.
+
+### Mistake 3: Treating retries as separate, unrelated flows
+
+Recovery is part of the original user journey. If retry requires reloading the app or manually reconnecting for no reason, UX reliability is low.
+
+### Mistake 4: Overbuilding the first version
+
+You do not need 60 wallet E2E tests to start. A small set of critical rejection and recovery scenarios catches a surprising amount of real risk.
+
+## A lightweight rollout plan for engineering teams
+
+If your team already has unit and integration coverage, add rejection-focused E2E incrementally:
+
+1. Pick one trust-critical flow  
+   Example: connect wallet + first on-chain action.
+
+2. Add two tests only  
+   - Approve path  
+   - Reject then recover path
+
+3. Stabilize environment inputs  
+   Pin wallet extension version, seed account state, and chain conditions.
+
+4. Track two metrics  
+   - Pass/fail  
+   - Flake rate
+
+5. Expand by user impact  
+   Prioritize flows where failure causes abandonment or support tickets.
+
+This sequence improves confidence quickly without slowing development to a crawl.
+
+## Where this is heading: intent-first Web3 testing
+
+Web3 UX is becoming more complex, not less: more wallet types, account abstraction behavior, and cross-chain interactions. As complexity grows, teams that test only idealized paths will miss production reality more often.
+
+A strong long-term direction is intent-first testing:
+
+- Start from user goals
+- Include meaningful alternate decisions
+- Validate recovery quality
+- Assert business-relevant outcomes
+
+That mindset helps teams ship faster with fewer trust-breaking regressions.
+
+## Conclusion
+
+If you remember one thing, remember this: in Web3, "user rejected" is not an exception to ignore. It is a core interaction to design and test.
+
+The wallet rejection path often determines whether users feel your app is reliable. By treating rejection and recovery as first-class E2E scenarios, teams close the gap between green builds and real-world trust.
+
+Whether you use @avalix/chroma or another stack, the principle is the same: test what people actually do, including when they say no.
+
+---
+*This article was written with the assistance of AI.*
