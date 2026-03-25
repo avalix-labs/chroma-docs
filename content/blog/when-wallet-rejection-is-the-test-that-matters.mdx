@@ -1,0 +1,184 @@
+---
+title: "When Wallet Rejection Is the Test That Matters Most"
+description: "A practical guide to designing dApp end-to-end tests around real user decisions, including rejection, retries, and trust-critical wallet flows."
+author: Chroma Team
+date: 2026-03-25
+---
+
+## Introduction
+
+Many dApp teams already have tests. They test reducers, contract helpers, API clients, UI states, and transaction builders. In production, the support inbox still tells a different story.
+
+Users report things like:
+
+- "I clicked Connect Wallet and nothing happened."
+- "I rejected one popup and now the app is stuck."
+- "It said pending forever, then suddenly failed."
+
+This disconnect is common in Web3 because the highest-risk moments are not purely in your codebase. They live in the interaction between your UI, a wallet extension, network conditions, and a human making decisions in real time.
+
+If you want more reliable releases, you need more than passing unit and integration checks. You need confidence that real users can complete real journeys.
+
+## Why "all tests passing" can still hide product risk
+
+The standard testing pyramid still applies to dApps:
+
+- **Unit tests** protect fast logic.
+- **Integration tests** protect component and service boundaries.
+- **E2E tests** protect complete user behavior.
+
+The problem is not the pyramid. The problem is where teams stop.
+
+In many Web3 projects, wallet behavior is treated like an external detail. A mocked provider returns expected values, the app reacts, and the test passes. That is useful for lower-level correctness, but it does not answer the question users care about:
+
+**Can I actually complete my goal from click to confirmation?**
+
+For that, you need to include the full sequence:
+
+1. User initiates an action in your UI.
+2. Wallet prompt appears.
+3. User approves, rejects, delays, or closes.
+4. Transaction broadcasts.
+5. Chain confirms or fails later.
+6. UI reflects final outcome clearly.
+
+Any one of these steps can break while lower-level tests remain green.
+
+## Rejection is not an edge case; it is normal behavior
+
+One of the most expensive assumptions in dApp testing is that "happy path approval" represents typical user behavior.
+
+In reality, users reject prompts all the time:
+
+- They want to re-read the amount.
+- They are on the wrong chain.
+- They do not trust the request.
+- They clicked too fast and changed their mind.
+- Their wallet UI timed out and they retried.
+
+When rejection paths are missing, teams ship flows that look stable in staging but fail in exactly the moments that define user trust.
+
+### What good rejection handling looks like
+
+A reliable dApp should make rejection feel recoverable, not catastrophic:
+
+- Show a clear message ("Transaction canceled") instead of generic errors.
+- Preserve user intent so they can retry without rebuilding form state.
+- Distinguish canceled vs failed vs pending states.
+- Keep CTA labels actionable ("Try Again", "Switch Network", "Review Request").
+
+These are product decisions, but they are also test design targets.
+
+## A practical E2E pattern: test intent checkpoints
+
+Rather than writing long click scripts, organize E2E coverage around intent checkpoints:
+
+- Can the user connect a wallet?
+- Can they recover after a rejected signature?
+- Can they detect and fix wrong-network state?
+- Can they verify final success or failure with confidence?
+
+This keeps tests focused on user outcomes instead of implementation details.
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test('user rejects first signing attempt, then retries successfully', async ({ page, wallets }) => {
+  const wallet = wallets.metamask
+
+  await wallet.importSeedPhrase({
+    seedPhrase: process.env.TEST_SEED_PHRASE!,
+  })
+
+  await page.goto(process.env.DAPP_URL!)
+  await page.getByRole('button', { name: 'Connect Wallet' }).click()
+  await wallet.authorize()
+
+  await page.getByRole('button', { name: 'Sign Message' }).click()
+  await wallet.reject()
+
+  await expect(page.getByText('Signature request was canceled')).toBeVisible()
+
+  await page.getByRole('button', { name: 'Try Again' }).click()
+  await wallet.confirm()
+
+  await expect(page.getByText('Signature complete')).toBeVisible()
+})
+```
+
+The exact framework is less important than the shape of the scenario: include user decisions, include recovery, and assert user-visible outcomes. Toolkits like [@avalix/chroma](https://github.com/avalix-labs/chroma) help teams automate real browser and wallet interactions without reducing everything to brittle popup selectors.
+
+## Common mistakes that quietly undermine dApp reliability
+
+### 1) Treating wallet UI as "someone else’s problem"
+
+Your team may not own the wallet extension UI, but users experience the flow as one product. If your test strategy excludes wallet interaction, your reliability model is incomplete.
+
+### 2) Asserting only immediate feedback
+
+A toast saying "Submitted" is not user success. Test both near-term and eventual states:
+
+- immediate pending feedback
+- final confirmed or failed status
+- clear next action when confirmation does not arrive quickly
+
+### 3) Ignoring chain mismatch recovery
+
+Many incidents are not "transaction failed." They are "transaction never became valid because chain context was wrong and recovery was confusing." This deserves explicit E2E coverage.
+
+### 4) Accepting flaky tests as normal
+
+Flaky E2E suites train teams to mistrust CI. Usually the fix is not "retry more." It is better environment discipline: pinned wallet versions, deterministic test accounts, and clearer synchronization points.
+
+## Building a workflow developers actually trust
+
+You do not need hundreds of E2E cases to get meaningful confidence. A smaller, high-value suite often performs better:
+
+1. Pick one trust-critical journey (connect + first meaningful action).
+2. Add one happy path and one rejection path.
+3. Add a wrong-network scenario if your app is chain-specific.
+4. Run these tests in CI with deterministic setup.
+5. Track flake categories and fix the top source first.
+
+This approach scales because it prioritizes impact over volume.
+
+### Developer insight: what usually changes after teams add real-wallet E2E
+
+Teams often discover that the biggest wins are not in test code. They are in product clarity:
+
+- clearer status copy during pending transactions
+- better retry paths after rejection
+- stronger separation of canceled vs failed outcomes
+- fewer "mystery states" between wallet and app
+
+Better tests drive better UX.
+
+## The next phase of blockchain testing
+
+Web3 interaction models are becoming more varied: multiple wallets, embedded wallets, smart accounts, session-based permissions, and cross-chain actions. That means more state combinations and more opportunities for mismatch.
+
+The teams that ship confidently will likely share a few habits:
+
+- They model user decisions explicitly in automated tests.
+- They treat rejection and recovery as first-class flows.
+- They validate final user outcomes, not just intermediate events.
+- They keep a tight loop between test failures and UX improvements.
+
+This is where developer tooling matters. The right tools reduce the cost of testing realistic behavior, which makes high-quality coverage practical instead of aspirational.
+
+## Conclusion
+
+Reliable dApps are not built by choosing between unit tests and E2E tests. They are built by matching each test layer to the right risk.
+
+Use fast lower-level tests for logic and integration confidence. Then protect trust-critical moments with a focused set of real interaction flows: wallet prompts, rejection paths, retries, and final transaction outcomes.
+
+If your team wants one immediate step, start with a single reject-and-recover journey in a real browser with a real wallet. Whether you implement it with [@avalix/chroma](https://github.com/avalix-labs/chroma) or another stack, that scenario often reveals the gap between "code works" and "users succeed."
+
+That gap is where most dApp reliability work begins.
+
+---
+*This article was written with the assistance of AI.*
