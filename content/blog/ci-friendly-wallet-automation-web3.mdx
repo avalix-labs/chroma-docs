@@ -1,0 +1,206 @@
+---
+title: "CI-Friendly Wallet Automation: Running Real Web3 E2E Tests in Every Pipeline"
+description: "How to automate real wallet interactions in headless CI environments using Playwright and @avalix/chroma, without fighting browser extensions or flaky popups."
+author: Chroma Team
+date: 2026-03-27
+---
+
+_Real wallet tests belong in your CI pipeline, not just on your laptop._
+
+## Introduction
+
+Browser wallet extensions are the front door of almost every Web3 application. Users click "Connect Wallet," approve a signature, and confirm a transaction. These interactions drive the core experience, yet most teams skip testing them in CI.
+
+The reason is practical, not philosophical. Wallet extensions rely on browser popups, extension-specific UI, and real-time blockchain state. Running these in a headless container, where there is no display server and no human to click "Approve," seems like a problem without a clean solution. Teams fall back to mocking the wallet provider, which verifies application logic but never exercises the actual extension behavior.
+
+The result is predictable: tests pass in the pipeline while users hit wallet bugs in production. Bridging this gap requires tooling that makes wallet automation work reliably in CI, not just on a developer's machine.
+
+## What is @avalix/chroma
+
+[@avalix/chroma](https://github.com/avalix-labs/chroma) is a testing library that automates real wallet extensions inside Playwright tests. Instead of stubbing `window.ethereum` or simulating RPC responses, Chroma loads actual wallet extensions into the browser context and provides a programmatic API to control them.
+
+- **Real wallet interactions** - Connect, sign, confirm, and reject through the actual extension UI, not a mock layer.
+- **Playwright integration** - Extends Playwright's `test` fixture with a `wallets` object, keeping your test code idiomatic.
+- **Built for CI** - Designed to run in headless containers and CI runners without a display server or manual intervention.
+- **Deterministic extension management** - Download and pin wallet extension versions so tests are reproducible across environments.
+- **Simple setup** - Install one package, download extensions, and write tests.
+
+## Key Features
+
+**Programmatic wallet control** - Methods like `authorize()`, `confirm()`, and `reject()` replace manual button clicks inside extension popups. Your test code drives wallet behavior directly instead of hunting for UI elements in a separate window.
+
+**Extension lifecycle management** - `npx chroma download-extensions` fetches and caches wallet binaries. Pinned versions mean a wallet update will not silently break your pipeline.
+
+**Isolated browser contexts** - Each test gets its own browser context with a fresh wallet state. No leftover accounts, no residual chain configurations, no cross-test contamination.
+
+**Multi-wallet support** - Test MetaMask, Phantom, and other wallets in the same suite. Different tests can target different wallets without changing infrastructure.
+
+**Headless compatibility** - Chroma loads extensions into Playwright's Chromium context, which supports extensions in both headed and headless modes. No Xvfb or virtual framebuffer setup required.
+
+## Quick Start
+
+Install the package and download wallet extensions:
+
+```bash
+npm i -D @avalix/chroma
+npx chroma download-extensions
+```
+
+Or with pnpm:
+
+```bash
+pnpm add -D @avalix/chroma
+npx chroma download-extensions
+```
+
+Here is a test that connects a wallet and signs a message, structured to run in any CI environment:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test.setTimeout(60_000)
+
+test('signs a message through MetaMask', async ({ page, wallets }) => {
+  const metamask = wallets.metamask
+
+  await metamask.importSeedPhrase({
+    seedPhrase: process.env.TEST_SEED_PHRASE!,
+  })
+
+  await page.goto(process.env.DAPP_URL!)
+  await page.waitForLoadState('networkidle')
+
+  // Connect the wallet
+  await page.getByRole('button', { name: 'Connect Wallet' }).click()
+  await metamask.authorize()
+
+  await expect(page.getByText(/0x[a-fA-F0-9]{4}/)).toBeVisible()
+
+  // Request a signature
+  await page.getByRole('button', { name: 'Sign Message' }).click()
+  await metamask.confirm()
+
+  await expect(
+    page.getByText('Signature verified')
+  ).toBeVisible({ timeout: 15_000 })
+})
+```
+
+This test reads sensitive values from environment variables, making it safe to run in CI where secrets are injected by the pipeline.
+
+## Architecture: CI Wallet Automation Flow
+
+```
+┌──────────────────────────────────────────────────┐
+│                 CI Runner (Headless)              │
+│                                                   │
+│  ┌────────────┐   ┌──────────────┐               │
+│  │ Playwright  │──>│ Chromium +   │               │
+│  │ Test Runner │   │ Wallet Ext.  │               │
+│  └────────────┘   └──────┬───────┘               │
+│                          │                        │
+│              ┌───────────┼──────────┐             │
+│              v           v          v             │
+│         authorize()  confirm()  reject()          │
+│              │           │          │             │
+│              v           v          v             │
+│         ┌──────────────────────────────┐          │
+│         │   dApp under test (browser)  │          │
+│         └──────────┬───────────────────┘          │
+│                    │                              │
+│                    v                              │
+│         ┌──────────────────────┐                  │
+│         │ Local chain (Anvil)  │                  │
+│         └──────────────────────┘                  │
+└──────────────────────────────────────────────────┘
+```
+
+The wallet extension runs inside the same Chromium instance as your dApp. Chroma intercepts and automates extension popups programmatically, so no graphical display is needed.
+
+## GitHub Actions Example
+
+A minimal workflow to run wallet tests on every push:
+
+```yaml
+name: Wallet E2E Tests
+on: [push, pull_request]
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm ci
+      - run: npx playwright install --with-deps chromium
+      - run: npx chroma download-extensions
+
+      - run: npx playwright test
+        env:
+          TEST_SEED_PHRASE: ${{ secrets.TEST_SEED_PHRASE }}
+          DAPP_URL: http://localhost:3000
+
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: test-results
+          path: test-results/
+```
+
+Cache the `.chroma` directory between runs to avoid downloading wallet extensions on every job.
+
+## Best Practices
+
+- **Use environment variables for secrets.** Never hardcode seed phrases or private keys, even for test accounts. CI platforms provide secret storage that injects values at runtime.
+- **Run against a local blockchain fork.** Use Hardhat or Anvil with pre-funded accounts. Public testnets introduce network latency, rate limits, and unpredictable block times that cause flaky tests.
+- **Limit parallel workers.** Each worker spawns a full browser with an extension. Start with one or two workers in CI and scale only after confirming your runner has enough memory.
+- **Pin your extension versions.** Wallet teams ship UI updates frequently. A new button layout or confirmation dialog can break your tests. Chroma pins versions by default, so keep the download cache up to date deliberately.
+- **Upload artifacts on failure.** Configure your CI to save screenshots, traces, and videos when tests fail. Playwright's built-in trace viewer makes debugging headless failures straightforward.
+
+## Common Pitfalls
+
+**Assuming headed mode is required.** Developers often believe wallet extensions only work in headed browsers. Playwright's Chromium supports extensions in headless mode, and Chroma leverages this capability. You do not need a virtual display server in CI.
+
+**Skipping the extension download step.** Without cached extensions, tests fail immediately with an extension-not-found error. Add `npx chroma download-extensions` to your CI workflow explicitly, or cache the `.chroma` directory between runs.
+
+**Testing against live networks.** Public testnets and mainnets introduce variables outside your control: congestion, gas price spikes, and RPC rate limits. These turn passing tests into random failures. Fork a mainnet state locally for reproducible results.
+
+**Ignoring timeout configuration.** Blockchain operations are slower than typical web interactions. Default Playwright timeouts of 5 seconds will fail on transactions that need 10 to 20 seconds to confirm. Set test-level and assertion-level timeouts explicitly.
+
+**Sharing wallet state between tests.** If one test imports a seed phrase and the next test assumes a clean wallet, you get ordering-dependent failures. Use a fresh browser context per test to guarantee isolation.
+
+## When to Use @avalix/chroma
+
+Chroma is designed for teams whose dApp has wallet-driven user flows that need CI coverage: connecting, signing, switching networks, and confirming transactions. If your project is a smart contract library with no frontend, tools like Foundry or Hardhat provide better test ergonomics. If your frontend never touches a wallet, standard Playwright tests are sufficient.
+
+The sweet spot is any application where a wallet interaction sits on the critical path. If users cannot complete their task without a working "Connect Wallet" button or a successful transaction confirmation, that flow belongs in your automated test suite, and it should run on every push.
+
+## Call to Action
+
+**Get started in two commands:**
+
+```bash
+npm i -D @avalix/chroma && npx chroma download-extensions
+```
+
+Write your first wallet test, push it to CI, and stop wondering whether the wallet works after every deploy.
+
+**Ready for production-grade patterns?** Browse the [example repository](https://github.com/avalix-labs/chroma-examples) for complete CI configurations, multi-wallet setups, and transaction error handling. If Chroma helps your team ship with more confidence, [give it a star on GitHub](https://github.com/avalix-labs/chroma) so other developers can find it.
+
+---
+
+**Links**
+
+- Repository: [https://github.com/avalix-labs/chroma](https://github.com/avalix-labs/chroma)
+- Examples: [https://github.com/avalix-labs/chroma-examples](https://github.com/avalix-labs/chroma-examples)
+
+---
+
+**Keywords:** CI wallet automation, Web3 E2E testing, Playwright wallet testing, headless wallet tests, dApp CI pipeline
