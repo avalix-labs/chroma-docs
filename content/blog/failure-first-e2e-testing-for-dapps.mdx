@@ -1,0 +1,161 @@
+---
+title: "Stop Treating Wallet Failures as Edge Cases: A Failure-First E2E Playbook for dApps"
+description: "A practical framework for testing the failure paths users actually hit in Web3, from wallet rejection flows to delayed confirmations and recovery UX."
+author: Chroma Team
+date: 2026-03-28
+---
+
+## Introduction
+
+Most dApp teams can describe this moment: your test suite is green, contracts look correct, QA checks pass, and then real users report they are stuck after clicking "Connect Wallet" or waiting forever after "Confirm."
+
+The painful part is not that one bug slipped through. The painful part is that the bugs users report often come from behavior your test strategy never modeled in the first place.
+
+In Web3, success is rarely just "button click worked." Success is "a real user completed intent across app UI, wallet UI, and chain state without confusion." That is why a failure-first end-to-end strategy is so valuable. Instead of treating rejection, delay, and mismatch as edge cases, you design coverage around them from day one.
+
+This article walks through a practical way to do that without turning your pipeline into a slow, fragile monster.
+
+## Why happy-path confidence breaks down in dApps
+
+Traditional test pyramids still matter. Unit tests and integration tests are essential. But in blockchain applications, your highest-risk moments often live outside pure app logic:
+
+- Wallet extension prompts
+- User decisions (reject, close, switch account)
+- Network and finality delays
+- Chain or account mismatches
+
+If your suite mostly validates "ideal approvals," it may still pass while real users fail. In other words, the suite proves your code can work, not that users can finish the flow.
+
+That distinction matters in Web3 because wallet moments are trust moments. A broken rejection flow is not "minor UX polish." It can look like lost funds, frozen progress, or a compromised session.
+
+## The three failure surfaces to prioritize
+
+Before writing tests, map where user intent commonly breaks. Start with these three surfaces.
+
+### 1) Decision failures
+
+Users decline signatures. They close popups. They pick the wrong account. They change their mind halfway through. All of this is normal behavior, not abnormal behavior.
+
+If you only automate approvals, you are testing an optimistic simulation of user behavior.
+
+### 2) Timing failures
+
+A transaction submission is not the same as user-visible completion. Pending states can be long. Reorgs and RPC variability happen. If tests assert success too early, they create false confidence.
+
+Good E2E checks in Web3 validate transitions over time: pending -> confirmed, or pending -> failed -> recoverable next step.
+
+### 3) Context failures
+
+The app and wallet can disagree about chain, account, permissions, or signature context. These mismatches are common when users multitask across tabs or wallets.
+
+Your product quality depends on how clearly the app detects and explains that mismatch.
+
+## A practical model: Intent x Decision x State
+
+A lightweight way to design reliable coverage is a three-axis matrix:
+
+- **Intent:** what the user is trying to accomplish (connect, sign in, swap, stake, claim)
+- **Decision:** approve, reject, cancel, retry, switch
+- **State:** network/account conditions and chain timing
+
+For each critical intent, define a minimal set of scenarios:
+
+1. One happy path
+2. One rejection or cancellation path
+3. One recovery path
+4. One delayed or mismatched-state path
+
+This gives you high signal without exploding case count.
+
+### Example matrix for a token swap flow
+
+| Intent | Decision | State | Expected UX outcome |
+| --- | --- | --- | --- |
+| Connect wallet and swap | Approve | Correct chain, fast confirmation | Swap success with updated balance |
+| Connect wallet and swap | Reject signature | Correct chain | Clear rejection message and reusable CTA |
+| Connect wallet and swap | Retry after rejection | Correct chain | Flow continues without page refresh |
+| Connect wallet and swap | Approve | Slow confirmation | Pending status shown, no duplicate submit |
+| Connect wallet and swap | Approve | Wrong chain at submit | Chain-switch guidance before signing |
+
+Notice that the goal is not to cover every permutation. The goal is to cover the specific failure modes that break user trust.
+
+## A short implementation pattern
+
+Whether you use Playwright directly or a Web3-focused helper layer, keep test structure centered on user outcomes.
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma';
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+});
+
+test('swap flow: rejection is recoverable', async ({ page, wallets }) => {
+  const wallet = wallets.metamask;
+
+  await page.goto(process.env.DAPP_URL!);
+  await page.getByRole('button', { name: 'Connect Wallet' }).click();
+  await wallet.authorize();
+
+  await page.getByRole('button', { name: 'Swap' }).click();
+  await wallet.reject();
+
+  await expect(page.getByText('Signature request was rejected')).toBeVisible();
+
+  await page.getByRole('button', { name: 'Try Again' }).click();
+  await wallet.confirm();
+
+  await expect(page.getByText('Swap submitted')).toBeVisible();
+});
+```
+
+The test is simple, but its design is the key:
+
+- It models a real user decision (reject)
+- It verifies a meaningful message
+- It verifies recovery, not just error rendering
+
+Tools like [@avalix/chroma](https://github.com/avalix-labs/chroma) are useful here because they automate real wallet interactions in real browser flows instead of replacing those interactions with mocks.
+
+## Common mistakes that keep recurring
+
+### Mistake 1: Treating rejection as low priority
+
+Teams often defer rejection tests because they are "negative paths." But negative paths are where clarity is most important. If users cannot recover quickly, they churn.
+
+### Mistake 2: Asserting implementation details, not outcomes
+
+A test that confirms a function was called or a popup opened is often too low-level for end-to-end reliability. Assert what the user can see and do next.
+
+### Mistake 3: Ignoring deterministic setup
+
+Unpinned wallet versions, drifting account state, and unstable network assumptions turn E2E into noise. Use controlled accounts and predictable environments wherever possible.
+
+### Mistake 4: Mixing all confidence goals into one suite
+
+Do not use wallet E2E for every validation. Keep fast logic checks in unit/integration layers. Reserve wallet E2E for the journeys where real interaction context matters most.
+
+## How to adopt this without slowing delivery
+
+A failure-first approach does not mean "test everything end to end." It means "test the right things realistically."
+
+Start small:
+
+1. Pick one trust-critical journey.
+2. Add one rejection and one recovery test.
+3. Run those tests in CI on every merge.
+4. Track flake rate and stabilize environment inputs.
+5. Expand only to journeys with clear user impact.
+
+This gives your team a tighter loop: fewer surprises after release, fewer emergency patches, and clearer ownership of wallet UX quality.
+
+## Conclusion
+
+Reliable dApps are built by teams that test user intent across system boundaries, not just frontend states in isolation.
+
+If you take one action this week, make it this: pick your most important wallet journey and add failure-first coverage for rejection, recovery, and delayed confirmation. That single change usually reveals issues your current happy-path suite cannot see.
+
+You do not need to become test-heavy overnight. You only need to shift one assumption: wallet failures are not edge cases. They are part of normal user behavior, and your E2E strategy should treat them that way.
+
+---
+*This article was written with the assistance of AI.*
