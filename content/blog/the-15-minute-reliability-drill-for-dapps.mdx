@@ -1,0 +1,198 @@
+---
+title: "The 15-Minute Reliability Drill Every dApp Team Should Run"
+description: "A practical weekly routine for testing real wallet-driven user journeys in Web3 so teams can catch trust-breaking issues before users do."
+author: Chroma Team
+date: 2026-03-29
+---
+
+## Introduction
+
+Most dApp incidents are not dramatic smart contract failures. They are smaller, more common failures that quietly break trust: a wallet prompt does not appear, a signature request gets rejected and the UI never recovers, or a transaction is confirmed on-chain but the app still looks stuck.
+
+These issues are expensive because they happen at the exact moment a user is deciding whether your product feels reliable.
+
+Many teams already have solid unit and integration coverage, yet still hit this gap in production. The reason is simple: you can test your code thoroughly and still miss the cross-system user journey involving browser UI, wallet extension behavior, and chain state transitions.
+
+One way to close that gap without building a huge testing program is to run a small, repeatable reliability drill every week. This post explains a practical drill you can complete in about 15 minutes and why it improves confidence faster than adding random test cases.
+
+## Why this gap keeps showing up
+
+Traditional web testing assumptions break down in Web3 because critical steps happen outside your app runtime.
+
+In one "simple" flow like connecting a wallet and submitting a transaction, you have:
+
+- App UI state
+- Wallet extension popups
+- RPC/network behavior
+- User choices (approve, reject, close, retry)
+- On-chain confirmation timing
+
+A mock can tell you your app called a provider method. It cannot fully tell you whether a real user can complete the same intent in a real browser session.
+
+That is why teams often hear this sentence after a release: "Tests were green, but users still got blocked."
+
+## A practical model: Path, Fork, Proof
+
+The weekly drill is built around three words:
+
+### 1) Path
+
+Pick one high-impact user journey and write the path as real user actions, not internal events.
+
+Example:
+
+1. Open app
+2. Click **Connect Wallet**
+3. Approve wallet connection
+4. Start swap
+5. Confirm transaction
+6. See confirmed state in UI
+
+Keep this grounded in what users click and see.
+
+### 2) Fork
+
+Add at least one realistic user decision fork where things do not go smoothly.
+
+Good forks include:
+
+- User rejects connection
+- User rejects signature
+- User rejects network switch
+- User closes popup before confirming
+
+If your suite only tests approval paths, you are not testing real behavior. Rejections are normal, not edge cases.
+
+### 3) Proof
+
+Define proof as user-visible completion, not automation milestones.
+
+Weak proof:
+
+- "Clicked confirm button"
+- "Provider method resolved"
+
+Strong proof:
+
+- "Connected account is shown in header"
+- "Pending state appears, then success state appears"
+- "After rejection, user sees actionable retry UI"
+
+Proof keeps tests aligned with reliability that users experience.
+
+## The 15-minute drill (step by step)
+
+You can run this as a short weekly ritual in planning, QA, or release readiness.
+
+### Minute 1-3: Choose one trust-critical flow
+
+Pick a single flow that affects trust, revenue, or activation:
+
+- First wallet connection
+- First transaction
+- Claim/redeem flow
+- Bridge initiation
+
+Do not select multiple flows. The drill works because it stays focused.
+
+### Minute 4-7: Define one happy path and one fork
+
+For the chosen flow, document:
+
+- Happy path (approve and continue)
+- Fork path (reject/cancel and recover)
+
+If recovery behavior is not clearly defined in product terms, that is already a useful discovery.
+
+### Minute 8-12: Automate or re-run the scenario in CI conditions
+
+Run the flow in the same environment class you trust for release confidence (or as close as possible):
+
+- Real browser
+- Real wallet extension
+- Controlled account and chain state
+
+Tools such as [@avalix/chroma](https://github.com/avalix-labs/chroma) are useful here because they let teams model wallet actions (authorize, confirm, reject) directly in E2E automation instead of relying on fragile workarounds.
+
+### Minute 13-15: Record one reliability outcome
+
+Write down one of these outcomes:
+
+- **Passed with confidence** (stable behavior, clear assertions)
+- **Passed with risk** (flaky timing, unclear state assumptions)
+- **Failed usefully** (found a user-impacting issue)
+
+The goal is not to "get green." The goal is to learn whether a real user can complete intent reliably.
+
+## Quick implementation example
+
+Here is a minimal intent-first pattern:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({ wallets: [{ type: 'metamask' }] })
+
+test('user recovers from rejected signature and completes action', async ({ page, wallets }) => {
+  const wallet = wallets.metamask
+
+  await page.goto(process.env.DAPP_URL!)
+  await page.getByRole('button', { name: 'Connect Wallet' }).click()
+  await wallet.authorize()
+
+  await page.getByRole('button', { name: 'Sign Message' }).click()
+  await wallet.reject()
+  await expect(page.getByText('Signature required to continue')).toBeVisible()
+
+  await page.getByRole('button', { name: 'Try Again' }).click()
+  await wallet.confirm()
+  await expect(page.getByText('Signature accepted')).toBeVisible()
+})
+```
+
+Notice what matters:
+
+- The flow includes a real rejection fork.
+- Recovery is explicitly validated.
+- Assertions focus on user-visible outcomes.
+
+## Common mistakes this drill prevents
+
+### Mistake 1: Treating E2E as a large migration project
+
+Teams delay meaningful coverage because they think E2E only helps after a full framework overhaul. In practice, one high-value journey adds immediate signal.
+
+### Mistake 2: Measuring only pass rate
+
+A test that passes after reruns may still indicate reliability risk. Track flake patterns, not just final green status.
+
+### Mistake 3: Testing clicks instead of intent
+
+Click-level assertions miss real failures. Always ask: did the user complete their goal?
+
+### Mistake 4: Ignoring wallet version and state drift
+
+Unpinned extension versions and inconsistent account state create noise. Deterministic setup is foundational for trustworthy results.
+
+## Where this fits in your testing strategy
+
+This drill does not replace contract tests or component tests. It complements them.
+
+Use a layered model:
+
+- **Unit tests** for fast logic correctness
+- **Integration tests** for app behavior consistency
+- **Wallet E2E drills** for trust-critical user completion
+
+A small, consistent wallet E2E practice usually delivers more user-facing reliability than broad but shallow automation.
+
+## Conclusion
+
+Reliable dApps are not only about correct internal logic. They are about helping real people complete real actions across app, wallet, and chain boundaries.
+
+If your team wants a practical next step, start with one 15-minute weekly reliability drill: one path, one fork, one proof. Keep it small, keep it real, and use the findings to improve both product UX and test quality over time.
+
+Whether you use @avalix/chroma or a different stack, the core idea is the same: test the moments where user trust is won or lost.
+
+---
+*This article was written with the assistance of AI.*
