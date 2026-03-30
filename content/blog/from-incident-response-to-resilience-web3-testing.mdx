@@ -1,0 +1,178 @@
+---
+title: "From Incident Response to Resilience: A Better E2E Testing Loop for Web3 Teams"
+description: "Learn how to turn real dApp production incidents into high-value end-to-end tests that protect wallet UX, reduce regressions, and improve user trust."
+author: Chroma Team
+date: 2026-03-30
+---
+
+## Introduction
+
+Most dApp teams do not fail because they skip testing entirely. They fail because they test one reality while users experience another.
+
+Inside the codebase, everything looks reasonable: contract tests are green, component tests are green, and staging demos are smooth. Then a production incident appears: users connect a wallet but never complete the flow, signatures are rejected with unclear recovery, or a network mismatch leaves the UI in a half-broken state.
+
+When this happens, teams often treat the incident as "a bug to patch." A stronger approach is to treat it as "a scenario to preserve." That shift turns testing into a resilience loop instead of a release checkbox.
+
+This article walks through a practical model for doing that.
+
+## Why classic bug triage misses dApp risk
+
+Traditional web incident triage usually asks:
+
+- What line of code failed?
+- What API returned an error?
+- Which deploy introduced the regression?
+
+Those are useful questions, but wallet-driven products need one more:
+
+**What did the user try to do, and where did intent break down?**
+
+In Web3, intent often crosses system boundaries:
+
+1. dApp UI state
+2. Wallet extension dialogs
+3. Blockchain confirmation timing
+4. Human decisions (approve, reject, close, retry)
+
+If your test coverage stops at your app boundary, your incident response will keep finding the same class of surprises. The product may be technically correct and still operationally unreliable from the user perspective.
+
+## The resilience loop: Incident -> Scenario -> Guardrail
+
+A simple way to improve reliability is to convert real incidents into durable E2E guardrails.
+
+### 1) Capture the user narrative, not only logs
+
+Incident notes should include:
+
+- What action the user initiated
+- What they saw at each step
+- What decision they made in the wallet
+- Where they got stuck or gave up
+
+This narrative creates testable behavior. Without it, teams end up writing narrow assertions that miss the original failure mode.
+
+### 2) Encode the scenario in a real browser flow
+
+Now implement one E2E test that reproduces the narrative:
+
+- Open the app with realistic wallet/account state
+- Trigger the same action path
+- Recreate the wallet decision point (approve or reject)
+- Assert the final user-visible outcome
+
+The crucial detail is realism at the integration seam. For this layer, mocks are often too optimistic.
+
+### 3) Promote the scenario into CI
+
+A scenario only protects you if it runs continuously. Add it to CI with deterministic inputs:
+
+- Pinned wallet extension version
+- Controlled chain environment (local fork or stable test infra)
+- Seeded account state
+
+At this point, your incident has become a guardrail. The next release that reintroduces the issue is blocked before users find it.
+
+## A concrete example: wallet rejection and stalled UX
+
+Consider a common support ticket:
+
+> "I clicked 'Confirm Purchase,' saw my wallet popup, rejected it, and now the app spinner never stops."
+
+Many teams patch this with a single UI fix. Better teams also create a test that enforces recovery behavior.
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test('user can recover after rejecting a transaction', async ({ page, wallets }) => {
+  const wallet = wallets.metamask
+
+  await wallet.importSeedPhrase({
+    seedPhrase: process.env.TEST_SEED_PHRASE!,
+  })
+
+  await page.goto(process.env.DAPP_URL!)
+  await page.getByRole('button', { name: 'Connect Wallet' }).click()
+  await wallet.authorize()
+
+  await page.getByRole('button', { name: 'Confirm Purchase' }).click()
+  await wallet.reject()
+
+  await expect(page.getByText('Transaction cancelled')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Try Again' })).toBeVisible()
+})
+```
+
+Whether you use [@avalix/chroma](https://github.com/avalix-labs/chroma) or another stack, the principle is the same: test what the user can complete after a real wallet decision, not just whether a function was called.
+
+## Common mistakes when teams start this loop
+
+### Mistake 1: Treating rejection as an edge case
+
+Rejection is normal behavior, not exceptional behavior. Users reject prompts by mistake, to re-check fees, or because the context changed. If rejection paths are untested, incident volume will stay high even when happy paths look stable.
+
+### Mistake 2: Asserting mechanics instead of outcomes
+
+"Button clicked" and "popup opened" are not business outcomes. Better assertions check states users care about: connected status, actionable errors, retriable flows, and confirmed completion.
+
+### Mistake 3: Ignoring chain timing semantics
+
+Many regressions come from timing assumptions:
+
+- UI marks success before confirmation
+- Pending states never resolve during congestion
+- Retry actions are blocked after one failure
+
+Good E2E tests include explicit pending and confirmation expectations so asynchronous chain behavior does not become silent UX debt.
+
+### Mistake 4: Running too many low-value flows
+
+Trying to automate every screen creates brittle suites nobody trusts. Start with high-impact journeys:
+
+- First wallet connect
+- First signature
+- First value transfer or swap
+- Recovery from rejection
+
+Depth on critical paths beats breadth on minor ones.
+
+## A practical scoring model for what to automate next
+
+If your backlog is large, prioritize scenarios with a simple score:
+
+**Impact x Frequency x Recoverability**
+
+- **Impact:** how severe is failure for user trust or revenue?
+- **Frequency:** how often does this path run?
+- **Recoverability:** can users self-heal, or are they blocked?
+
+A high-impact, high-frequency, low-recoverability flow should move to E2E coverage first. This method helps teams avoid politics-driven test planning and focus on product risk.
+
+## Where Web3 testing is heading
+
+Three trends are becoming clear across mature dApp teams:
+
+1. **Intent-centric test design**  
+   Tests are written around user goals ("complete swap") rather than isolated clicks.
+
+2. **Wallet parity as a quality signal**  
+   Teams compare core journeys across wallet types, not just across browsers.
+
+3. **Incident-informed quality programs**  
+   Production failures are converted into regression scenarios quickly, creating cumulative reliability gains over time.
+
+As wallet UX surfaces diversify, this model will matter more, not less.
+
+## Conclusion
+
+Reliable dApps are built by teams that close the gap between shipping code and shipping outcomes. The fastest way to close that gap is to convert real incidents into executable E2E guardrails.
+
+Start small: pick one recent wallet-related support issue, encode it as a real user flow, and run it in CI. Do that consistently, and your suite becomes more than a safety net. It becomes a living memory of what your users need your product to do under real conditions.
+
+If you are evaluating tooling for this approach, libraries like @avalix/chroma can reduce the friction of automating real wallet interactions while keeping tests readable and intent-focused.
+
+---
+*This article was written with the assistance of AI.*
