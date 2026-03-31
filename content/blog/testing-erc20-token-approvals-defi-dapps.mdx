@@ -1,0 +1,144 @@
+---
+title: "Testing ERC-20 Token Approvals in DeFi dApps: A Playwright Walkthrough"
+description: "Learn how to E2E test ERC-20 token approval flows in DeFi dApps using Playwright and real MetaMask interactions — no mocks required."
+date: 2026-03-31
+author: Chroma Team
+---
+
+Every DeFi interaction starts with permission. Before a DEX can swap your tokens, before a lending protocol can take your collateral, the user must sign an `approve()` transaction granting the contract a spending allowance. This is the ERC-20 approval flow — and it's one of the most failure-prone interactions in the EVM dApp ecosystem.
+
+Yet most dApp test suites skip it. Unit tests cover the contract's `allowance` logic. Integration tests mock the wallet response. Nobody writes an EVM dApp testing scenario that actually clicks through the approval popup, waits for confirmation, and verifies the UI re-enables the action button. That gap is where real bugs live in production.
+
+## Why the Approval Flow Breaks in Ways Unit Tests Miss
+
+The ERC-20 approval flow involves at least two sequential wallet interactions:
+
+1. **The `approve` transaction** — the user grants a spender contract permission to move tokens on their behalf.
+2. **The downstream action** — the swap, deposit, staking call, or transfer that consumes that allowance.
+
+Between those two steps, your UI has a lot of work to do:
+
+- Check whether the user already has a sufficient allowance (and skip approval if so)
+- Show the approval button only when needed, with the correct token and amount
+- Disable the action button while the approval transaction is pending
+- Re-enable the action button only after the `approve` tx confirms on-chain
+- Handle rejection gracefully — the user hits "Reject" in MetaMask, your UI shouldn't freeze
+
+This is a multi-step, stateful, asynchronous user flow. It's precisely the kind of scenario where mocked wallet responses give you false confidence. The mock says "approved" immediately — your real user waits 12 seconds for a block, then clicks the action button too early, then wonders why the transaction reverted.
+
+## Setting Up a Local Anvil Node for Approval Tests
+
+The most reliable way to test approval flows is against a local [Anvil](https://book.getfoundry.sh/anvil/) node (Foundry's local EVM) with a forked mainnet state. You get real on-chain balances, a real `approve()` call that changes `allowance()`, and deterministic block timing.
+
+Start Anvil with a fork before your test suite:
+
+```bash
+anvil --fork-url $MAINNET_RPC_URL --fork-block-number 19000000
+```
+
+Your dApp points to `http://localhost:8545`. Your test wallet (seeded from a known mnemonic) holds real token balances inherited from the fork. No faucets, no flaky testnets.
+
+## Writing the Approval E2E Test with @avalix/chroma
+
+Here's a full approval-then-swap test using `@avalix/chroma`:
+
+```ts
+import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test('approves ERC-20 and executes swap', async ({ page, wallets }) => {
+  const metamask = wallets.metamask
+
+  // Load a pre-funded test wallet matching the Anvil fork state
+  await metamask.importSeedPhrase({ seedPhrase: process.env.TEST_SEED! })
+
+  await page.goto('http://localhost:3000/swap')
+
+  // dApp calls wallet_addEthereumChain on load — confirm the network addition
+  await metamask.confirm()
+
+  // Approve the wallet connection request
+  await metamask.authorize()
+
+  // Trigger the token approval from the dApp UI
+  await page.getByRole('button', { name: 'Approve USDC' }).click()
+  await metamask.confirm() // signs the approve() transaction
+
+  // Verify the UI detects the confirmed allowance before proceeding
+  await page.waitForSelector('[data-testid="swap-button"]:not([disabled])')
+
+  // Execute the swap
+  await page.getByTestId('swap-button').click()
+  await metamask.confirm() // signs the actual swap transaction
+
+  await expect(page.getByText('Swap confirmed')).toBeVisible()
+})
+```
+
+What each step does:
+
+- `importSeedPhrase` loads a wallet that already holds token balances on the forked chain
+- The first `metamask.confirm()` approves the `wallet_addEthereumChain` popup — most dApps trigger this automatically when they detect an unknown chain ID
+- `metamask.authorize()` handles the wallet connection approval popup
+- The second `metamask.confirm()` signs the `approve(spender, amount)` call
+- `waitForSelector` confirms your dApp correctly listens for the allowance change before enabling the swap button
+- The third `metamask.confirm()` signs the downstream action
+
+This test will catch the bugs that matter: calling the swap before approval confirms, not showing the approve button when the allowance is zero, or leaving the UI stuck after a rejected approval.
+
+## Testing the "Already Approved" Branch
+
+The approval flow has two paths: the user needs to approve, or they already have sufficient allowance. Both deserve a dedicated test.
+
+```ts
+test('skips approval when allowance is already sufficient', async ({ page, wallets }) => {
+  const metamask = wallets.metamask
+  await metamask.importSeedPhrase({ seedPhrase: process.env.TEST_SEED! })
+
+  // Pre-set allowance directly via a contract write in test setup
+  // (use viem or ethers.js to call approve() before the browser loads)
+
+  await page.goto('http://localhost:3000/swap')
+  await metamask.authorize()
+
+  // The approve button should NOT appear — only the swap button
+  await expect(page.getByRole('button', { name: 'Approve USDC' })).not.toBeVisible()
+
+  await page.getByTestId('swap-button').click()
+  await metamask.confirm()
+
+  await expect(page.getByText('Swap confirmed')).toBeVisible()
+})
+```
+
+This test catches a subtle but costly bug: showing the approval button to users who've already approved, making them pay gas twice and eroding trust in your protocol.
+
+## The Rejection Path Deserves a Test Too
+
+Most DeFi dApps handle approval rejection poorly — either freezing the UI or silently resetting state. A dApp E2E testing suite should include at least one rejection scenario:
+
+```ts
+test('handles approval rejection gracefully', async ({ page, wallets }) => {
+  const metamask = wallets.metamask
+  await metamask.importSeedPhrase({ seedPhrase: process.env.TEST_SEED! })
+
+  await page.goto('http://localhost:3000/swap')
+  await metamask.authorize()
+
+  await page.getByRole('button', { name: 'Approve USDC' }).click()
+  await metamask.reject() // user hits "Reject" in MetaMask
+
+  // UI should recover — show an error, re-enable the approve button
+  await expect(page.getByRole('button', { name: 'Approve USDC' })).toBeVisible()
+  await expect(page.getByText('Transaction rejected')).toBeVisible()
+})
+```
+
+## Closing Thoughts
+
+The ERC-20 approval flow sits at the intersection of contract state, wallet UX, and frontend logic. It's deceptively simple on paper and surprisingly brittle in practice. Writing a real browser test — with a real wallet, against a real local node — forces your UI to prove it handles every branch correctly.
+
+If your dApp includes any DeFi interaction, an E2E test covering the approval path is one of the highest-value tests you can write before your next release.
