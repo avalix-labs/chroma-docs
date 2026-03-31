@@ -55,16 +55,13 @@ test('approves ERC-20 and executes swap', async ({ page, wallets }) => {
   // Load a pre-funded test wallet matching the Anvil fork state
   await metamask.importSeedPhrase({ seedPhrase: process.env.TEST_SEED! })
 
-  // Point MetaMask to the local Anvil node
-  await metamask.addNetwork({
-    name: 'Anvil Local',
-    rpcUrl: 'http://localhost:8545',
-    chainId: 31337,
-    currencySymbol: 'ETH',
-  })
-
   await page.goto('http://localhost:3000/swap')
-  await metamask.authorize() // approve the wallet connection
+
+  // dApp calls wallet_addEthereumChain on load — confirm the network addition
+  await metamask.confirm()
+
+  // Approve the wallet connection request
+  await metamask.authorize()
 
   // Trigger the token approval from the dApp UI
   await page.getByRole('button', { name: 'Approve USDC' }).click()
@@ -84,11 +81,11 @@ test('approves ERC-20 and executes swap', async ({ page, wallets }) => {
 What each step does:
 
 - `importSeedPhrase` loads a wallet that already holds token balances on the forked chain
-- `addNetwork` configures MetaMask to use your Anvil node — no manual browser setup needed
-- `metamask.authorize()` handles the connection approval popup automatically
-- The first `metamask.confirm()` signs the `approve(spender, amount)` call
+- The first `metamask.confirm()` approves the `wallet_addEthereumChain` popup — most dApps trigger this automatically when they detect an unknown chain ID
+- `metamask.authorize()` handles the wallet connection approval popup
+- The second `metamask.confirm()` signs the `approve(spender, amount)` call
 - `waitForSelector` confirms your dApp correctly listens for the allowance change before enabling the swap button
-- The second `metamask.confirm()` signs the downstream action
+- The third `metamask.confirm()` signs the downstream action
 
 This test will catch the bugs that matter: calling the swap before approval confirms, not showing the approve button when the allowance is zero, or leaving the UI stuck after a rejected approval.
 
