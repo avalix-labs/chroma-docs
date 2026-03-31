@@ -23,19 +23,13 @@ Each step is an integration point. A broken connection flow, a missing `await` b
 
 ## Setting Up the Test Environment
 
-You need three things running locally:
-
-- **Anvil** (from [Foundry](https://getfoundry.sh)) — a local EVM node that's fast, deterministic, and free
-- **Your NFT dApp** pointing at `http://127.0.0.1:8545`
-- **MetaMask** loaded with a test account funded on the local network
-
-Start Anvil with the standard test mnemonic so your seed phrase is predictable across runs:
+The fastest local setup is [Anvil](https://getfoundry.sh) (Foundry's local EVM node) with your dApp pointing at `http://127.0.0.1:8545`. Start it with the standard test mnemonic — the same one you'll pass to `importSeedPhrase` — so the funded account is always available:
 
 ```bash
 anvil --mnemonic "test test test test test test test test test test test junk"
 ```
 
-Transactions confirm instantly, there's no gas cost, and the chain state resets when you restart — ideal for isolated test runs.
+If you haven't wired Anvil into your Playwright config before, the [Chroma CI/CD guide](/blog/from-local-testing-to-ci-pipelines-dapps) covers the full setup including how to start and stop the node as part of your test run.
 
 ## Writing the Test with @avalix/chroma
 
@@ -81,27 +75,34 @@ test.describe('NFT mint flow', () => {
 
 The assertions at the end use Playwright's built-in auto-waiting: `toBeVisible()` keeps retrying until the element appears or the timeout hits. If your dApp polls for the transaction receipt before showing the success state, that latency is handled automatically.
 
-## Testing the Rejection Path
+## Testing the NFT-Specific Rejection Problem
 
-The happy path is half the story. When a user closes the MetaMask popup or clicks "Reject," your dApp needs to recover — show an error, re-enable the button, not leave the user stuck on a loading spinner.
+NFT dApps have a rejection bug that's easy to miss: **optimistic UI updates**. Many mint UIs increment the "Total Minted" counter or show a preview of the incoming token the moment the user clicks "Mint" — before the transaction actually confirms. The idea is to feel fast. The problem is that if the user rejects in MetaMask, that premature state update has nowhere to go.
+
+You end up with a counter that reads `1/100` when no token was actually minted, a spinner that never resolves, or a "Success" banner on a rejected transaction. These bugs are nearly impossible to catch with unit tests because they depend on the timing between a UI state change and a wallet popup that a real user just closed.
 
 ```ts
-test('shows error when user rejects the mint', async ({ page, wallets }) => {
+test('reverts optimistic UI when user rejects the mint', async ({ page, wallets }) => {
   const metamask = wallets.metamask
 
   await page.goto('http://localhost:3000')
   await page.click('button:has-text("Connect Wallet")')
   await metamask.authorize()
 
+  // Record the counter before attempting to mint
+  const counterBefore = await page.locator('.mint-counter').textContent()
+
   await page.click('button:has-text("Mint")')
   await metamask.reject()
 
+  // Counter must be back to its original value — not stuck on an optimistic update
+  await expect(page.locator('.mint-counter')).toHaveText(counterBefore!)
   await expect(page.locator('.mint-error')).toBeVisible()
   await expect(page.locator('button:has-text("Mint")')).toBeEnabled()
 })
 ```
 
-This test is 15 lines and covers a class of bugs that only exist after a wallet rejection — UI states developers rarely exercise manually and that break quietly during refactors. Catching that the "Mint" button re-enables after a rejection is exactly the kind of thing that falls through the gap between unit tests and actual user behavior.
+This test goes beyond "does the error show" — it verifies that the UI rolled back any state it changed optimistically. That rollback logic is exactly what breaks silently after a refactor, and exactly what users notice when it goes wrong.
 
 ## What You're Covering
 
@@ -110,9 +111,9 @@ Between these two tests, you're exercising:
 - Your wallet connection logic and the `authorize()` flow
 - The `mint()` contract call and its parameters
 - MetaMask transaction signing with a real browser extension
-- Your UI's response to a confirmed transaction (token ID rendered)
-- Your UI's response to a rejected transaction (error shown, button re-enabled)
+- Your UI's response to a confirmed transaction (token ID rendered, counter incremented)
+- Your UI's rollback logic after a rejected transaction (optimistic updates cleared, button re-enabled)
 
-None of those are reachable by unit tests or mocked wallet libraries. Add these to your CI pipeline — they run headlessly the same way any other Playwright test does — and you've closed the gap between a green test suite and a mint flow that actually works for users.
+That last point is the one most likely to be missing from your current test suite. Optimistic UI rollback only exists as a code path when a user rejects — which means it never gets exercised by your happy-path tests and rarely gets tested manually. It's the kind of thing that silently breaks in production after a state management refactor.
 
-The full Playwright setup, including how to wire Anvil into your test environment and run these in GitHub Actions, is covered in the [@avalix/chroma docs](https://chroma.avalix.dev/docs).
+The full Playwright setup, including how to run these headlessly in GitHub Actions, is covered in the [@avalix/chroma docs](https://chroma.avalix.dev/docs).
