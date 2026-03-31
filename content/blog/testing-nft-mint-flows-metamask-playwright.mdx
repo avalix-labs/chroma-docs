@@ -1,0 +1,118 @@
+---
+title: "Testing NFT Mint Flows End-to-End with MetaMask and Playwright"
+description: "Learn how to test NFT mint flows in EVM dApps using MetaMask and Playwright — connect wallets, confirm transactions, assert results without mocks."
+date: 2026-03-31
+author: Chroma Team
+---
+
+Minting is one of the most critical user flows in any NFT dApp — and one of the hardest to test reliably. The happy path looks simple: user clicks "Mint," MetaMask opens, they confirm, the token appears in their wallet. But between the RPC call, the wallet popup, and the async state update, there are plenty of places for things to go wrong in ways that unit tests won't catch.
+
+Most teams skip real EVM dApp testing here because driving a browser extension from test code feels out of reach. This article shows it isn't — and explains exactly how to cover the full mint flow, including the rejection path.
+
+## The Anatomy of a Mint Flow
+
+Before writing any test, map out what actually happens when a user mints:
+
+1. User connects their wallet (MetaMask opens a connection popup)
+2. User clicks "Mint" (your dApp calls `mint()` on the ERC-721 contract)
+3. MetaMask opens a transaction confirmation popup
+4. User confirms → transaction is submitted to the chain
+5. Your dApp polls for the receipt and updates the UI
+
+Each step is an integration point. A broken connection flow, a missing `await` before the MetaMask popup, or a UI that doesn't re-render after the receipt comes back — none of these show up in unit tests. Only a test that drives a real browser with a real wallet extension can catch them.
+
+## Setting Up the Test Environment
+
+You need three things running locally:
+
+- **Anvil** (from [Foundry](https://getfoundry.sh)) — a local EVM node that's fast, deterministic, and free
+- **Your NFT dApp** pointing at `http://127.0.0.1:8545`
+- **MetaMask** loaded with a test account funded on the local network
+
+Start Anvil with the standard test mnemonic so your seed phrase is predictable across runs:
+
+```bash
+anvil --mnemonic "test test test test test test test test test test test junk"
+```
+
+Transactions confirm instantly, there's no gas cost, and the chain state resets when you restart — ideal for isolated test runs.
+
+## Writing the Test with @avalix/chroma
+
+`@avalix/chroma` handles the MetaMask extension lifecycle — downloading the right version, loading it into the browser, and exposing a clean API for wallet interactions. Your test file stays focused on the flow:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test.describe('NFT mint flow', () => {
+  test.beforeEach(async ({ wallets }) => {
+    await wallets.metamask.importSeedPhrase({
+      seedPhrase: 'test test test test test test test test test test test junk',
+    })
+  })
+
+  test('mints an NFT and shows success state', async ({ page, wallets }) => {
+    const metamask = wallets.metamask
+
+    await page.goto('http://localhost:3000')
+
+    // Step 1: connect wallet
+    await page.click('button:has-text("Connect Wallet")')
+    await metamask.authorize()
+
+    // Step 2: trigger mint
+    await page.click('button:has-text("Mint")')
+
+    // Step 3: confirm the transaction in MetaMask
+    await metamask.confirm()
+
+    // Step 4: assert the dApp updated correctly
+    await expect(page.locator('.mint-success')).toBeVisible()
+    await expect(page.locator('.token-id')).toContainText('#')
+  })
+})
+```
+
+`importSeedPhrase` runs MetaMask's full onboarding flow — wallet import, password setup — before each test, so every test starts from the same clean state. `authorize()` handles the connection popup. `confirm()` handles the transaction popup. You don't need to switch windows or find the extension tab manually.
+
+The assertions at the end use Playwright's built-in auto-waiting: `toBeVisible()` keeps retrying until the element appears or the timeout hits. If your dApp polls for the transaction receipt before showing the success state, that latency is handled automatically.
+
+## Testing the Rejection Path
+
+The happy path is half the story. When a user closes the MetaMask popup or clicks "Reject," your dApp needs to recover — show an error, re-enable the button, not leave the user stuck on a loading spinner.
+
+```ts
+test('shows error when user rejects the mint', async ({ page, wallets }) => {
+  const metamask = wallets.metamask
+
+  await page.goto('http://localhost:3000')
+  await page.click('button:has-text("Connect Wallet")')
+  await metamask.authorize()
+
+  await page.click('button:has-text("Mint")')
+  await metamask.reject()
+
+  await expect(page.locator('.mint-error')).toBeVisible()
+  await expect(page.locator('button:has-text("Mint")')).toBeEnabled()
+})
+```
+
+This test is 15 lines and covers a class of bugs that only exist after a wallet rejection — UI states developers rarely exercise manually and that break quietly during refactors. Catching that the "Mint" button re-enables after a rejection is exactly the kind of thing that falls through the gap between unit tests and actual user behavior.
+
+## What You're Covering
+
+Between these two tests, you're exercising:
+
+- Your wallet connection logic and the `authorize()` flow
+- The `mint()` contract call and its parameters
+- MetaMask transaction signing with a real browser extension
+- Your UI's response to a confirmed transaction (token ID rendered)
+- Your UI's response to a rejected transaction (error shown, button re-enabled)
+
+None of those are reachable by unit tests or mocked wallet libraries. Add these to your CI pipeline — they run headlessly the same way any other Playwright test does — and you've closed the gap between a green test suite and a mint flow that actually works for users.
+
+The full Playwright setup, including how to wire Anvil into your test environment and run these in GitHub Actions, is covered in the [@avalix/chroma docs](https://chroma.avalix.dev/docs).
