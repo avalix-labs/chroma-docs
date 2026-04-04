@@ -1,0 +1,128 @@
+---
+title: "Testing MetaMask Network Switching in EVM dApps with Playwright"
+description: "Learn how to automate MetaMask network switch prompts in EVM dApp testing with Playwright — catch wrong-chain bugs before your users do."
+date: 2026-04-04
+author: Chroma Team
+---
+
+Network switching is one of the most common sources of silent failures in EVM dApp testing. Your app might be deployed on Arbitrum, but MetaMask defaults to Ethereum mainnet — and any user arriving from another protocol could be on Polygon, BSC, or a chain you don't support. If you haven't tested that flow end-to-end, you're shipping a broken experience to a significant portion of your users.
+
+This post walks through writing a Playwright test for the full network-switching flow: detecting the wrong chain, prompting the switch in MetaMask, confirming it, and asserting the dApp recovers correctly.
+
+## Why Network Switching Matters for EVM dApp Testing
+
+Most dApp developers test their app with MetaMask already on the correct network. That's not a realistic assumption.
+
+MetaMask persists the last network a user was on. Someone who just used a mainnet lending protocol, bridged funds on Polygon, or minted an NFT on Base will land on your Arbitrum dApp still connected to the wrong chain. What happens next depends entirely on whether you've built — and tested — that path.
+
+Common failure modes:
+
+- **Transaction submits to the wrong chain**, burning gas and failing at the contract level.
+- **The "Switch Network" button appears but doesn't do anything** — often a regression when wallet connection logic gets refactored.
+- **The UI locks up after the switch** because the app re-fetches balances on the new chain but doesn't re-render the enabled state of action buttons.
+
+Unit tests and mocked wallets won't catch any of these. The only reliable way to verify this flow is end-to-end, with a real MetaMask extension being controlled by your test.
+
+## The Flow You're Testing
+
+Here's the full user journey to automate:
+
+1. MetaMask is set up with a seed phrase on Ethereum mainnet (the default after fresh import).
+2. User navigates to the dApp.
+3. The dApp detects a chainId mismatch and shows a "Switch to Arbitrum" prompt.
+4. User clicks the prompt — MetaMask opens a network switch confirmation popup.
+5. User confirms. MetaMask switches to Arbitrum.
+6. The dApp detects the new chainId, removes the warning banner, and enables transaction buttons.
+
+Each of those six steps is a potential failure point. A test that walks through all of them gives you high-confidence coverage of a flow that directly affects user retention.
+
+## Writing the Test with @avalix/chroma
+
+`@avalix/chroma` handles MetaMask automation — including network switch confirmation popups — through its `confirm()` method. Whether the MetaMask popup is a transaction, a signature request, or a network switch, `confirm()` approves it.
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test.describe('Network switching flow', () => {
+  test.beforeEach(async ({ wallets }) => {
+    // Fresh MetaMask import lands on Ethereum mainnet by default
+    await wallets.metamask.importSeedPhrase({
+      seedPhrase: 'test test test test test test test test test test test junk',
+    })
+  })
+
+  test('prompts and confirms network switch to Arbitrum', async ({ page, wallets }) => {
+    const metamask = wallets.metamask
+
+    await page.goto('http://localhost:3000')
+    await page.click('button:has-text("Connect Wallet")')
+    await metamask.authorize()
+
+    // dApp detects wrong network, renders a warning banner
+    await expect(page.locator('[data-testid="wrong-network-banner"]')).toBeVisible()
+
+    // Clicking this triggers wallet_switchEthereumChain in MetaMask
+    await page.click('button:has-text("Switch to Arbitrum")')
+
+    // Confirm the MetaMask network switch popup
+    await metamask.confirm()
+
+    // dApp should reflect the correct network and unlock the UI
+    await expect(page.locator('[data-testid="wrong-network-banner"]')).not.toBeVisible()
+    await expect(page.locator('[data-testid="network-label"]')).toHaveText('Arbitrum One')
+    await expect(page.locator('button:has-text("Swap")')).toBeEnabled()
+  })
+})
+```
+
+What's happening line by line:
+
+- `importSeedPhrase` sets up the wallet — fresh imports default to Ethereum mainnet, which is exactly the wrong-network state you want.
+- `authorize()` handles the initial connection popup.
+- After connection, the dApp reads `chainId` from the provider, finds a mismatch, and renders a banner. The `expect(...).toBeVisible()` assertion confirms that detection logic is working.
+- `page.click('button:has-text("Switch to Arbitrum")')` triggers the `wallet_switchEthereumChain` RPC call — or `wallet_addEthereumChain` if the network isn't in MetaMask yet — which causes MetaMask to surface a confirmation dialog.
+- `metamask.confirm()` approves it.
+- The final assertions verify the dApp updated its state: the banner is gone, the network label is correct, and the action button is enabled.
+
+## Don't Skip the Rejection Path
+
+Equally important: what happens if the user *doesn't* switch? A rejected network switch is a normal user action — they might dismiss the popup by mistake, or decide to stay on their current network. Your dApp should handle it gracefully.
+
+```ts
+test('handles rejected network switch without crashing', async ({ page, wallets }) => {
+  const metamask = wallets.metamask
+
+  await page.goto('http://localhost:3000')
+  await page.click('button:has-text("Connect Wallet")')
+  await metamask.authorize()
+
+  await page.click('button:has-text("Switch to Arbitrum")')
+  await metamask.reject()
+
+  // App should stay in the wrong-network state — not crash or blank
+  await expect(page.locator('[data-testid="wrong-network-banner"]')).toBeVisible()
+  await expect(page.locator('button:has-text("Swap")')).toBeDisabled()
+})
+```
+
+This catches a class of bug where the rejection throws an unhandled promise rejection, blanks the UI, or leaves the app stuck in a broken intermediate state — all real bugs that surface after refactors.
+
+## Keeping These Tests Stable
+
+A few things help network-switch tests stay green in CI:
+
+**Use a local node.** Running Anvil or Hardhat locally means you control the RPC and the chainId. MetaMask's network configuration will point to `http://localhost:8545` with a chainId you define — no public endpoints, no rate limits, no testnet instability.
+
+**Set a longer timeout.** MetaMask's network switch popup can be slower than transaction confirmations, particularly on the first run after a fresh import. `test.setTimeout(60000)` is a reasonable ceiling.
+
+**Seed the wallet the same way every run.** Using a fixed test seed phrase makes wallet state predictable and eliminates flakiness from state leaking between tests.
+
+## The Takeaway
+
+Network switching is a short flow with significant breakage potential. Most teams don't test it because manually controlling MetaMask state is awkward, and mocked wallets can't simulate it at all. That gap is exactly where real users run into friction — usually right after a deployment to a new chain.
+
+If your dApp targets Arbitrum, Optimism, Base, or any chain other than mainnet, add a network-switch test to your suite. It's a few dozen lines, and it will catch the kind of silent regression that otherwise only surfaces in a production bug report.
