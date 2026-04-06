@@ -1,0 +1,131 @@
+---
+title: "Testing DEX Token Swap Flows End-to-End with MetaMask and Playwright"
+description: "Learn how to E2E test a DEX swap in your EVM dApp — approve tokens, confirm the swap, assert results — using Playwright and @avalix/chroma."
+date: 2026-04-06
+author: Chroma Team
+---
+
+DEX swap flows are one of the most common DeFi interactions and, surprisingly, one of the most under-tested. The usual culprit is sequencing: a swap doesn't require one wallet confirmation — it requires two. The ERC-20 approval comes first, then the swap transaction itself, and between them your dApp has to react to the first receipt before the user can proceed. Most test suites cover only one of these confirmations. This article shows how to cover both, and why the intermediate assertions matter as much as the confirms themselves.
+
+## Why swap tests break differently than single-transaction tests
+
+A standard dApp E2E test has a simple shape: trigger an action, confirm the wallet popup, assert the result. A DEX swap flow introduces a sequencing problem.
+
+Your test has to drive two wallet popups in order:
+
+1. **Approve popup** — the ERC-20 `approve()` call that grants the router a spending allowance
+2. **Swap popup** — the actual trade transaction that the router executes
+
+The second popup only appears after the first transaction is mined and your UI processes the receipt. If you call `confirm()` too early — before MetaMask has opened the second popup — the test hangs and eventually times out. Playwright's `expect()` assertions are what let you pause at the right moment.
+
+This pattern is where a lot of multi-step dApp E2E testing breaks down, and where a properly structured Playwright test earns its keep.
+
+## Setting up the environment
+
+You'll need a local EVM node and a test-friendly version of MetaMask. For the node, both Anvil and Hardhat work. For the wallet, `@avalix/chroma` ships with MetaMask Flask pre-packaged:
+
+```bash
+npm install @avalix/chroma
+npx chroma download-extensions
+```
+
+The `download-extensions` command fetches MetaMask Flask into `.chroma/`. Your Playwright config picks it up automatically when you use `createWalletTest`.
+
+## Writing the two-confirm swap test
+
+Here is the full test for an approve-then-swap flow using `@avalix/chroma`:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test.describe('DEX swap flow', () => {
+  test.beforeEach(async ({ wallets }) => {
+    await wallets.metamask.importSeedPhrase({
+      seedPhrase: 'test test test test test test test test test test test junk',
+    })
+  })
+
+  test('approve token and complete swap', async ({ page, wallets }) => {
+    const metamask = wallets.metamask
+
+    // Navigate to the dApp and connect the wallet
+    await page.goto('http://localhost:3000')
+    await page.click('button:has-text("Connect Wallet")')
+    await metamask.authorize()
+
+    // Confirm the wallet address appears — connection worked
+    await expect(page.locator('[data-testid="wallet-address"]')).toBeVisible()
+
+    // Enter the swap amount and trigger the approval
+    await page.fill('input[name="amountIn"]', '100')
+    await page.click('button:has-text("Approve Token")')
+
+    // First confirmation: the ERC-20 approve() transaction
+    await metamask.confirm()
+
+    // Wait for the UI to react to the approval receipt
+    await expect(page.locator('button:has-text("Swap")')).toBeEnabled()
+
+    // Trigger the swap transaction
+    await page.click('button:has-text("Swap")')
+
+    // Second confirmation: the swap transaction itself
+    await metamask.confirm()
+
+    // Assert the output balance updated
+    await expect(page.locator('[data-testid="output-balance"]')).not.toHaveText('0')
+    await expect(page.locator('[data-testid="swap-success"]')).toBeVisible()
+  })
+})
+```
+
+A few things to highlight:
+
+**`metamask.authorize()`** approves the wallet connection popup. This is always the first wallet interaction in any flow.
+
+**The first `metamask.confirm()`** approves the ERC-20 approval transaction. At this point, the router contract has been granted permission to spend tokens on the user's behalf.
+
+**`toBeEnabled()` on the Swap button** is the load-bearing assertion. It tells Playwright to wait until your dApp has received the approval receipt and re-enabled the Swap button. Without this, the next `page.click()` fires before the button is interactive, and the second `confirm()` call waits for a MetaMask popup that never opens.
+
+**The second `metamask.confirm()`** approves the swap transaction. This is the actual trade.
+
+## What to assert at each stage
+
+Testing only the final output balance tells you something broke — it doesn't tell you where. A more useful structure pins each stage:
+
+- **After `authorize()`:** Check that the wallet address renders in the UI header. This confirms the connection handshake completed cleanly.
+- **After the first `confirm()`:** Check that the Swap button is enabled and any approval status indicator (e.g., a checkmark or "Approved" label) is visible.
+- **After the second `confirm()`:** Check the output balance changed, a success message appeared, or a transaction hash link is displayed.
+
+When a regression hits, this structure tells you exactly which stage failed. An approval-stage regression (contract revert, UI not listening to the receipt event) shows up differently from a swap-stage regression (bad slippage, router address mismatch).
+
+## Running against a realistic fork
+
+Swap tests need real token balances and liquidity to behave like production. A blank Anvil node has neither — your ERC-20 balance starts at zero and there are no pools. Use Anvil's mainnet fork mode:
+
+```bash
+anvil --fork-url https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY
+```
+
+Then seed your test account with the input token before the test runs. If you're using Foundry's Anvil, you can call `anvil_deal` via an RPC request to set any ERC-20 balance without deploying anything:
+
+```ts
+await page.evaluate(() =>
+  window.ethereum.request({
+    method: 'anvil_deal',
+    params: [tokenAddress, walletAddress, '0x' + (100n * 10n ** 18n).toString(16)],
+  })
+)
+```
+
+Your test now runs against real Uniswap pool liquidity and real token decimals without spending mainnet gas. Edge cases like stale allowances, 6-decimal tokens, and slippage rejections all behave as they would for a real user.
+
+## Closing
+
+DEX swap flows are a good proxy for multi-step dApp E2E testing in general. Real interactions don't always map to a single wallet action, and the pattern here — trigger, confirm, wait for UI state, trigger again, confirm, assert — applies wherever your dApp requires sequential wallet interactions.
+
+`@avalix/chroma`'s `confirm()` handles both transaction approvals and message signatures, so the same structure extends to permit-based gasless approvals, multi-step DeFi protocols, and any flow where the user needs to sign more than once. Start with the intermediate assertions. They're what turn a flaky multi-step test into a reliable one.
