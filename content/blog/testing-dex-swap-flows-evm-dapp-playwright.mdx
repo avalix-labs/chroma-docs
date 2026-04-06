@@ -1,0 +1,125 @@
+---
+title: "Testing DEX Token Swap Flows End-to-End: MetaMask, Playwright, and Two Confirmations"
+description: "Learn how to E2E test a DEX token swap in your EVM dApp — handling the two-step approve + swap flow with real MetaMask confirmations in Playwright."
+date: 2026-04-06
+author: Chroma Team
+---
+
+Swapping tokens is one of the core interactions in any DeFi dApp. From a user's perspective it looks simple: pick tokens, enter an amount, confirm in MetaMask, done. But behind that single button click there are almost always two wallet prompts — one for the ERC-20 approval, one for the swap itself. That compound structure is exactly where **EVM dApp testing** falls apart.
+
+Most teams either unit-test the swap router contract in isolation, or mock the wallet to return a fake confirmation. Neither approach tells you whether your frontend correctly sequences two MetaMask popups, handles intermediate loading states, or recovers gracefully when a user cancels the second confirmation after approving the first.
+
+## Why Two Confirmations Change the Testing Problem
+
+A DEX swap follows a predictable two-step pattern:
+
+1. **Approve**: The user grants the swap router a spending allowance on the input token (`approve()` on the ERC-20 contract). This opens the first MetaMask transaction popup.
+2. **Swap**: The router executes the trade (`swapExactTokensForTokens()` or equivalent). This opens a second popup.
+
+Many dApp UIs manage this automatically — showing a progress indicator, detecting whether an existing allowance is sufficient, and sequencing the transactions. But that sequencing logic is custom frontend code. It's brittle, and the bugs are subtle: a stale allowance check, a race between the approval confirmation and the swap button re-enabling, a UI that shows "swap complete" before the second transaction actually lands.
+
+Unit tests and mocked wallets won't catch any of these because they short-circuit the async sequencing entirely. You need a test that drives both prompts in sequence against a real MetaMask extension.
+
+## Setting Up the Local Environment
+
+For deterministic results, run your **Hardhat Playwright** tests against a local node with instant mining. Deploy your ERC-20 token contracts and the swap router to the local chain, then fund the test wallet with both tokens so the approval step has real balances to work with.
+
+Configure your `hardhat.config.ts` with `auto` mining:
+
+```ts
+networks: {
+  hardhat: {
+    mining: {
+      auto: true,
+      interval: 0,
+    },
+  },
+}
+```
+
+With instant mining, the approval transaction confirms synchronously — no polling loop needed before MetaMask surfaces the second popup.
+
+## Writing the Swap Test with @avalix/chroma
+
+Once your local environment is up, the test follows a direct sequence: connect the wallet, enter swap parameters, confirm the approval, assert the intermediate state, then confirm the swap.
+
+```typescript
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test.describe('DEX swap flow', () => {
+  test.beforeEach(async ({ wallets }) => {
+    await wallets.metamask.importSeedPhrase({
+      seedPhrase: 'test test test test test test test test test test test junk',
+    })
+  })
+
+  test('completes a token swap via approve + swap', async ({ page, wallets }) => {
+    const metamask = wallets.metamask
+
+    // Connect wallet
+    await page.goto('http://localhost:3000')
+    await page.click('button:has-text("Connect Wallet")')
+    await metamask.authorize()
+
+    // Enter swap parameters
+    await page.fill('input[name="amount"]', '100')
+    await page.click('button:has-text("Swap")')
+
+    // First MetaMask popup: the ERC-20 approval
+    await metamask.confirm()
+
+    // UI should show intermediate progress before the second tx
+    await expect(page.locator('.swap-status')).toHaveText('Awaiting swap confirmation...')
+
+    // Second MetaMask popup: the swap transaction
+    await metamask.confirm()
+
+    // Assert the swap completed and balances updated
+    await expect(page.locator('.swap-status')).toHaveText('Swap complete')
+    await expect(page.locator('.output-balance')).not.toHaveText('0')
+  })
+})
+```
+
+The key pattern here is calling `metamask.confirm()` twice in sequence. `@avalix/chroma` waits for each MetaMask popup to appear before confirming, so there's no need for manual `waitForTimeout` calls between steps.
+
+The intermediate assertion — checking for "Awaiting swap confirmation..." — is worth including explicitly. It verifies that your UI correctly distinguishes between the two wallet prompts rather than jumping straight from "approve" to "done." Without it, a bug where both popups fire at once would still pass the test.
+
+## Testing the Partial Cancellation Path
+
+A user who approves the token but then cancels the swap creates a real edge case: the allowance was granted, but no trade executed. Your dApp needs to handle this state — ideally by recognizing the existing allowance on retry so the user isn't prompted to approve again.
+
+```typescript
+test('handles cancellation of swap after approval', async ({ page, wallets }) => {
+  const metamask = wallets.metamask
+
+  await page.goto('http://localhost:3000')
+  await page.click('button:has-text("Connect Wallet")')
+  await metamask.authorize()
+
+  await page.fill('input[name="amount"]', '100')
+  await page.click('button:has-text("Swap")')
+
+  // Confirm the ERC-20 approval
+  await metamask.confirm()
+
+  // Cancel the swap itself
+  await metamask.reject()
+
+  // UI should recover — no error screen, swap button re-enabled
+  await expect(page.locator('.swap-error')).not.toBeVisible()
+  await expect(page.locator('button:has-text("Swap")')).toBeEnabled()
+})
+```
+
+This scenario is almost never tested in **dApp E2E testing** suites, and it fails in production more often than teams expect. A user who pauses mid-flow, reads gas fees, and decides not to proceed should land back at a functional UI — not a broken state requiring a page refresh.
+
+## What to Take Away
+
+The approve + swap pattern is a useful template for any compound DeFi flow. Permit2 approvals, multi-hop routes, cross-protocol transactions — they all follow the same structure: multiple sequential `metamask.confirm()` calls with meaningful UI state between them.
+
+The real value of **Playwright wallet** automation here isn't just confirming transactions. It's verifying that your frontend manages the in-between states correctly: what the user sees after step one but before step two, and what they can do if they change their mind partway through. Those are the moments that mocked wallets always skip, and where real DeFi UX failures tend to live.
