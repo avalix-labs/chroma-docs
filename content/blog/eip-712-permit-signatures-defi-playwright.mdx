@@ -1,0 +1,133 @@
+---
+title: "Playwright Web3 Testing: EIP-712 Permit Signatures and Gasless DeFi Approvals"
+description: "Test EIP-712 permit signature flows in DeFi dApps with Playwright and @avalix/chroma — gasless approvals, real MetaMask popups, no mocks."
+date: 2026-04-06
+author: Chroma Team
+---
+
+Most EVM dApp testing tutorials assume token approvals mean an `approve()` transaction followed by a second transaction for the swap or deposit. But modern DeFi protocols — Uniswap v3, AAVE v3, Compound v3, and many others — use EIP-712 permit signatures instead. The user signs an off-chain typed message in MetaMask, the signature bytes are bundled into the action call, and no separate approval transaction hits the chain. One fewer wallet interaction. No gas for the permission step.
+
+That changes how you need to think about Playwright Web3 tests. The approval and permit flows look similar on the surface — both involve calling `metamask.confirm()` — but the MetaMask popups are different, the UI states your dApp needs to handle are different, and the failure modes are different. This article walks through exactly how to automate permit flows with real wallet extension testing using `@avalix/chroma`.
+
+## Why EIP-712 Permit Is Different from ERC-20 approve()
+
+The traditional ERC-20 approval flow generates two on-chain transactions:
+
+1. User clicks "Approve [token]" → MetaMask shows a **transaction** popup with a gas estimate
+2. User confirms → `approve()` tx lands on-chain, mutates the `allowance()` storage slot
+3. User clicks "Swap" → MetaMask shows a second transaction popup
+4. User confirms → action tx executes against the now-approved allowance
+
+The EIP-712 permit flow collapses the first step into an off-chain signature:
+
+1. User clicks "Swap" → dApp calls `eth_signTypedData_v4` internally
+2. MetaMask shows a **signing** popup — labeled "Signature Request" or "Sign Typed Data," with no gas estimate and a "Sign" button instead of "Confirm"
+3. User signs → signature bytes returned to the dApp, nothing on-chain yet
+4. dApp bundles the signature into the action call
+5. MetaMask shows one transaction popup
+6. User confirms → single tx goes on-chain with the permit embedded
+
+From a blockchain test automation standpoint, step 2 is the critical difference. `@avalix/chroma`'s `metamask.confirm()` handles both signing popups and transaction popups, but the MetaMask UI your user sees — and the intermediate state your dApp must render correctly — differs meaningfully between them.
+
+## How Permit Flows Break in Ways Transaction Tests Miss
+
+When you test with a mocked wallet, `eth_signTypedData_v4` typically resolves immediately with a stub signature. Your dApp logic handles it synchronously and moves straight to submitting the action transaction. No waiting, no popup timing, no intermediate UI state.
+
+In a real browser with a real wallet extension:
+
+- The MetaMask signing popup opens asynchronously. There is a gap between your dApp calling `eth_signTypedData_v4` and the user seeing the popup. Your UI should show a "Waiting for signature" state during that window.
+- If the user rejects the signing request, the error thrown is a user rejection (`ACTION_REJECTED` in ethers.js, error code `4001` in raw JSON-RPC). Your error boundary should distinguish this from a network error.
+- After signing, there is a second async gap while MetaMask processes the bundled transaction. A second loading state may apply.
+- The "Swap" button should not re-enable until the full flow either completes or fails — not after the signature alone.
+
+Unit tests with mocked providers skip all of this. The intermediate states, the error handling for rejection specifically, and the button re-enable timing are only catchable in a test that drives a real MetaMask extension through the full popup sequence. This is exactly where EVM dApp testing with real wallets adds value over mocked approaches.
+
+## Writing the Permit E2E Test with @avalix/chroma
+
+Here is a complete test for a permit-based swap flow against a local Anvil node:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test.describe('Permit-based swap flow', () => {
+  test.beforeEach(async ({ wallets }) => {
+    await wallets.metamask.importSeedPhrase({
+      seedPhrase: 'test test test test test test test test test test test junk',
+    })
+  })
+
+  test('signs permit and completes swap in one user journey', async ({ page, wallets }) => {
+    const metamask = wallets.metamask
+
+    await page.goto('http://localhost:3000')
+
+    // Connect wallet — MetaMask shows connection popup
+    await page.click('button:has-text("Connect Wallet")')
+    await metamask.authorize()
+
+    // Initiate swap — dApp calls eth_signTypedData_v4 before submitting
+    await page.click('button:has-text("Swap")')
+
+    // First popup: MetaMask "Sign Typed Data" request (no gas, no tx yet)
+    await metamask.confirm()
+
+    // Second popup: MetaMask transaction confirmation (bundled permit + action)
+    await metamask.confirm()
+
+    await expect(page.locator('[data-testid="swap-success"]')).toBeVisible()
+  })
+
+  test('handles permit rejection without leaving the UI stuck', async ({ page, wallets }) => {
+    const metamask = wallets.metamask
+
+    await page.goto('http://localhost:3000')
+    await page.click('button:has-text("Connect Wallet")')
+    await metamask.authorize()
+
+    await page.click('button:has-text("Swap")')
+
+    // User rejects the signing request — not the transaction
+    await metamask.reject()
+
+    // dApp should recover: button re-enabled, no stuck spinner
+    await expect(page.locator('button:has-text("Swap")')).toBeEnabled()
+    await expect(page.locator('[data-testid="swap-error"]')).toBeVisible()
+  })
+})
+```
+
+Two things to notice in the happy path test: `metamask.confirm()` is called twice. The first call handles the EIP-712 signing popup. The second handles the transaction confirmation. Your dApp triggers both in sequence — you just need to confirm each as the popup appears.
+
+The rejection test targets the signing step specifically. Rejecting a permit signature is a different user action from rejecting a transaction, and your error messaging should reflect that. "You rejected the approval" is more useful than "Transaction failed."
+
+Start Anvil with the same test mnemonic so the `importSeedPhrase` wallet is funded from the start:
+
+```bash
+anvil --mnemonic "test test test test test test test test test test test junk"
+```
+
+## What to Verify Beyond the Happy Path
+
+Once basic flow coverage is in place, add assertions for the intermediate UI states. These are the states that wallet extension testing makes visible and that mocked tests skip:
+
+**After clicking "Swap," before the first `metamask.confirm()`** — assert that a loading indicator is visible. This verifies your UI shows "Waiting for signature" rather than going blank or staying idle.
+
+```ts
+await page.click('button:has-text("Swap")')
+await expect(page.locator('[data-testid="signing-indicator"]')).toBeVisible()
+await metamask.confirm()
+```
+
+**After the signature is accepted, before the transaction confirms** — if your dApp shows a distinct "Submitting transaction" state, assert it here. This phase only exists in permit flows, not in the traditional approve() pattern.
+
+**Test the transaction rejection separately from the signing rejection.** A user who signs the permit but then rejects the transaction is in a different state than a user who rejected the signature. The permit signature is already "spent" — your dApp may need to handle whether the permit nonce is still valid before allowing a retry.
+
+These edge cases are invisible to any test that does not drive the real wallet popup sequence from start to finish. They represent the gap between a test suite that verifies your code and a test suite that verifies your product.
+
+## Closing
+
+EIP-712 permit flows are the default approval pattern in modern DeFi protocols — not an obscure edge case. If your test dApp flows only model the traditional `approve() + action` two-transaction pattern, you are missing a growing portion of what your users actually experience. `@avalix/chroma` makes the permit flow testable with the same API surface: `metamask.confirm()` handles both signing requests and transaction confirmations. The work is in asserting the intermediate states between those two calls — and in explicitly testing the rejection and recovery path for the signing step.
