@@ -1,0 +1,152 @@
+---
+title: "E2E dApp Testing Against a Local Hardhat Node with Playwright"
+description: "Learn how to wire Playwright E2E tests to a local Hardhat node for deterministic, fast EVM dApp testing — no live network required."
+date: 2026-04-06
+author: Chroma Team
+---
+
+If your EVM dApp tests depend on a public testnet, you've already hit the wall: flaky RPC endpoints, Sepolia faucet rate limits, 12-second block times, and chain state that shifts between runs. Moving your **EVM dApp testing** to a local Hardhat node eliminates all of it. You get instant mining, fully funded accounts, and complete control over block state — the same determinism you already expect from unit tests.
+
+## Why a Local Node Beats Public Testnets for E2E Tests
+
+Public testnets are fine for staging gates but unreliable for CI. Three things consistently cause pain:
+
+- **Nondeterminism**: Other transactions compete with yours. The state you forked yesterday differs from today's.
+- **Rate limits**: Free RPC providers throttle under load. The CI job that was green at midnight fails at 9 AM.
+- **Faucet dependency**: Every new team member burns 30 minutes chasing test ETH before writing a single assertion.
+
+A local Hardhat node sidesteps all three. It runs as a subprocess, mines instantly, and starts with 20 pre-funded accounts at 10 000 ETH each.
+
+## Starting Hardhat as a Playwright Global Fixture
+
+Playwright's `globalSetup` and `globalTeardown` hooks are the right place to manage long-lived infrastructure. Spin Hardhat up once before the suite runs, tear it down after.
+
+```ts
+// global-setup.ts
+import { spawn, ChildProcess } from 'child_process'
+
+let hardhatProcess: ChildProcess
+
+export async function setup() {
+  hardhatProcess = spawn('npx', ['hardhat', 'node'], {
+    stdio: 'pipe',
+    shell: true,
+  })
+
+  await new Promise<void>((resolve) => {
+    hardhatProcess.stdout?.on('data', (data: Buffer) => {
+      if (data.toString().includes('Started HTTP and WebSocket JSON-RPC server')) {
+        resolve()
+      }
+    })
+  })
+}
+
+export async function teardown() {
+  hardhatProcess?.kill()
+}
+```
+
+Register it in `playwright.config.ts`:
+
+```ts
+export default defineConfig({
+  globalSetup: './global-setup.ts',
+  globalTeardown: './global-setup.ts',
+})
+```
+
+Point your dApp's `NEXT_PUBLIC_RPC_URL` (or equivalent) to `http://localhost:8545` for the test environment, and every contract call now hits an instantly-confirming local chain.
+
+## Deploying Contracts Before Each Test
+
+For hermetic tests you want a fresh deployment per run — not a contract that carries state from a previous test. A Playwright fixture that shells out to a Hardhat deploy script gives you this cleanly.
+
+```ts
+// fixtures.ts
+import { test as base } from '@playwright/test'
+import { execSync } from 'child_process'
+
+export const test = base.extend<{ contractAddress: string }>({
+  contractAddress: async ({}, use) => {
+    const output = execSync(
+      'npx hardhat run scripts/deploy.ts --network localhost'
+    ).toString()
+    const address = output.match(/deployed to: (0x[a-fA-F0-9]{40})/)?.[1] ?? ''
+    await use(address)
+  },
+})
+```
+
+Test 1's side effects — storage writes, token mints, approval state — never bleed into test 2. Each test starts from a known-good deployment.
+
+## Wiring in MetaMask with @avalix/chroma
+
+A local Hardhat node handles the chain layer, but you still need MetaMask running in a real browser context to simulate what your users actually click. That is the gap `@avalix/chroma` fills. It wraps Playwright with first-class wallet support, giving you `metamask.authorize()` and `metamask.confirm()` alongside your normal `page` interactions — all in the same test.
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test.describe('Token transfer on local Hardhat node', () => {
+  test.beforeEach(async ({ wallets }) => {
+    await wallets.metamask.importSeedPhrase({
+      // Hardhat's well-known test mnemonic — never use in production
+      seedPhrase: 'test test test test test test test test test test test junk',
+    })
+  })
+
+  test('user can transfer tokens', async ({ page, wallets }) => {
+    const metamask = wallets.metamask
+
+    await page.goto('http://localhost:3000')
+    await page.click('button:has-text("Connect Wallet")')
+    await metamask.authorize()
+
+    await page.fill('input[name="recipient"]', '0x70997970C51812dc3A010C7d01b50e0d17dc79C8')
+    await page.fill('input[name="amount"]', '10')
+    await page.click('button:has-text("Transfer")')
+    await metamask.confirm()
+
+    await expect(page.locator('.transfer-success')).toBeVisible()
+  })
+})
+```
+
+`importSeedPhrase` uses Hardhat's standard test mnemonic — the same 12 words backing your pre-funded local accounts — so the imported wallet already holds ETH. No faucet, no bridge.
+
+You will need Hardhat's `localhost` network added to MetaMask. During local development, do this once via the MetaMask UI. In CI, configure your dApp to auto-add the network on first connect (EIP-3085 `wallet_addEthereumChain`) and let the test click through that prompt before authorizing.
+
+## Keeping State Clean Between Runs
+
+Nonces accumulate across a long-lived Hardhat node. If test 3 deploys a contract that test 4 assumes is absent, you will get subtle, hard-to-diagnose failures. Two patterns address this:
+
+**Option A — Restart the node between test files.** Most reliable, adds a few seconds per file.
+
+**Option B — Call `hardhat_reset` before each test.** Faster; resets the chain to genesis (or a saved fork snapshot) in-process.
+
+```ts
+test.beforeEach(async () => {
+  await fetch('http://localhost:8545', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'hardhat_reset',
+      params: [],
+      id: 1,
+    }),
+  })
+})
+```
+
+Pair `hardhat_reset` with per-test contract redeployment and your suite becomes order-independent — critical once you start running tests in parallel.
+
+## The Payoff
+
+Local Hardhat nodes turn **EVM dApp testing** from a network-dependent gamble into a repeatable engineering discipline. The infrastructure overhead is small: a global fixture, a deploy script, and a reset call before each test. Once the chain layer is deterministic, `@avalix/chroma` handles the wallet layer — real MetaMask clicks, real confirmations, zero mocks — and the whole stack runs identically on a developer laptop and in CI.
+
+If you are currently skipping wallet interaction tests because testnets are too unreliable, a local node removes that excuse. The tests are not hard to write; the environment was just getting in the way.
