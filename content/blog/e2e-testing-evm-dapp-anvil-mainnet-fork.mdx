@@ -1,0 +1,121 @@
+---
+title: "EVM dApp Testing on an Anvil Mainnet Fork: Real State, Zero Risk"
+description: "Learn how to combine Anvil's mainnet fork with @avalix/chroma for EVM dApp testing against real on-chain state — no mainnet gas, no mocks."
+date: 2026-04-02
+author: Chroma Team
+---
+
+EVM dApp testing almost always starts the same way: deploy a blank local contract, send test transactions, assert the UI updates. That works for basic happy-path coverage. But real users aren't interacting with blank chains — they're approving tokens that already have allowances, swapping against pools that already have liquidity, and hitting proxies that have been upgraded since you last audited the ABI.
+
+Anvil's mainnet fork mode bridges that gap. Combine it with `@avalix/chroma`'s wallet automation and you get a test suite that drives a real MetaMask extension against real on-chain state — without spending a cent of gas.
+
+## Why Blank Devnets Fall Short for EVM dApp Testing
+
+A default `anvil` or `hardhat node` gives you a clean slate: no existing token balances, no contract history, no prior allowances. Tests that run against it are verifying that your contract behaves correctly in isolation. That's valuable — but it's a different question than "does my UI work correctly when a real user interacts with the live protocol?"
+
+On a blank devnet:
+- Your ERC-20 approval test passes even if you're sending `50 * 10^18` instead of `50 * 10^6` for a 6-decimal token like USDC, because nothing checks the balance against prior state.
+- Stale allowance handling never triggers, because no prior allowance exists in storage.
+- Proxy contract behavior is whatever your local deployment compiles to — not what's actually deployed at that address on mainnet.
+
+Fork testing makes these issues visible before users do.
+
+## What Fork Mode Actually Gives You
+
+Running `anvil --fork-url <rpc>` creates a local EVM node that starts as an exact copy of mainnet at a specific block. Every contract, every storage slot, every token balance is pulled in lazily from the RPC as your tests reference it. Transactions run locally and instantly — but against real state.
+
+```bash
+anvil \
+  --fork-url https://eth-mainnet.g.alchemy.com/v2/YOUR_KEY \
+  --fork-block-number 21000000 \
+  --port 8545
+```
+
+After this runs, `http://localhost:8545` behaves like mainnet at block 21,000,000. Point your dApp's RPC URL at `localhost:8545` and it has no idea it's not talking to a real node. This is the foundation of Anvil local node testing for realistic E2E scenarios.
+
+## Seeding a Test Wallet with Tokens
+
+Your test wallet needs tokens. On a fork, you can impersonate a known token holder using Anvil's `anvil_impersonateAccount` JSON-RPC method, then transfer tokens to the default test address:
+
+```bash
+# Impersonate a large USDC holder
+curl http://localhost:8545 -X POST -H "Content-Type: application/json" \
+  --data '{
+    "method": "anvil_impersonateAccount",
+    "params": ["0xYourWhaleAddress"],
+    "id": 1,
+    "jsonrpc": "2.0"
+  }'
+```
+
+From there, send a transfer transaction from the impersonated address to Anvil's default funded account — the one derived from the standard test mnemonic. Most teams wrap this in a small script that runs in `globalSetup` once before the entire Playwright suite.
+
+## Writing the Wallet Test with @avalix/chroma
+
+Once Anvil is running with seeded state and your dApp is pointing at `http://localhost:8545`, the Playwright wallet test itself is straightforward:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test.describe('Token transfer on Anvil fork', () => {
+  test.beforeEach(async ({ wallets }) => {
+    await wallets.metamask.importSeedPhrase({
+      seedPhrase: 'test test test test test test test test test test test junk',
+    })
+  })
+
+  test('approves and transfers USDC, confirms UI update', async ({ page, wallets }) => {
+    const metamask = wallets.metamask
+
+    await page.goto('http://localhost:3000')
+    await page.click('button:has-text("Connect Wallet")')
+    await metamask.authorize()
+
+    await page.fill('input[name="amount"]', '50')
+    await page.click('button:has-text("Approve USDC")')
+    await metamask.confirm()
+
+    await page.click('button:has-text("Transfer")')
+    await metamask.confirm()
+
+    await expect(page.locator('.transfer-success')).toBeVisible()
+  })
+})
+```
+
+`importSeedPhrase` runs the full MetaMask onboarding flow before each test — wallet import, password setup — so every test starts from the same clean state. `authorize()` handles the wallet connection popup. Each `confirm()` call handles one MetaMask transaction popup: the ERC-20 approval and the transfer are two separate transactions, so you call it twice.
+
+There are no mocks here. The test is driving your actual UI, which calls your actual contracts, running against actual mainnet storage. That's a fundamentally different confidence level than anything a unit test can provide.
+
+## The Bugs Fork Tests Surface
+
+**Token decimal mismatches.** USDC has 6 decimals, not 18. Your UI might display "50 USDC" while sending `50 * 10^18` to the contract. On a blank devnet this passes — nothing checks the balance against prior state. On a mainnet fork, the transfer reverts or produces a wildly wrong balance and your test fails where it should.
+
+**Stale allowance logic.** If a user already approved the spender contract, your dApp may need to handle a non-zero existing allowance — either skipping the approval step or calling `approve(0)` first. This code path only exists when the contract's storage contains a prior allowance, which a fork gives you and a fresh devnet doesn't.
+
+**Upstream proxy upgrades.** Forking at a recent block means you're testing against the current implementation contract — including any changes that happened after you last looked at the ABI. These surprises are far better found in your test suite than in production.
+
+This is the core value proposition of blockchain test automation against forked state: the bugs it catches are invisible to tests that run on isolated, blank infrastructure.
+
+## A Practical Local Dev Loop
+
+```bash
+# Terminal 1 — start Anvil fork
+anvil --fork-url $ETH_RPC_URL --fork-block-number 21000000 --silent
+
+# Terminal 2 — seed tokens to the test wallet
+node scripts/seed-fork.js
+
+# Terminal 3 — run Playwright wallet tests
+npx playwright test
+```
+
+In CI, start Anvil as a background process (`&`) in the same job step that runs your tests. The [CI/CD guide](/blog/from-local-testing-to-ci-pipelines-dapps) has a complete GitHub Actions config if you want the full wiring.
+
+---
+
+Fork testing doesn't replace contract unit tests or security audits. But for catching the class of bugs that only appear when your UI talks to real token state through a real wallet extension, it's the most realistic test you can run without deploying to mainnet. A single critical flow — ERC-20 approval followed by a transfer — is a good first candidate. Once that's green against forked state, you've closed a gap that most dApp test suites leave wide open.
