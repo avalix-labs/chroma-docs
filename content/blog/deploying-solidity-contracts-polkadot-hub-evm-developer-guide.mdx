@@ -1,0 +1,100 @@
+---
+title: "Deploying Solidity Contracts on Polkadot Hub: A Practical Guide for EVM Developers"
+description: "Polkadot Hub now runs Solidity natively. Here's what EVM developers need to know about tooling setup, the forge test caveat, and deployment differences."
+date: 2026-04-06
+authors: ["Chroma Team"]
+---
+
+Polkadot Hub launched native smart contract support on January 27, 2026, and it is designed to be a minimal-friction target for Ethereum developers. If you have existing Solidity contracts, the promise is real: deploy them to Polkadot Hub without modifying your code. MetaMask works. Foundry works. Ethers.js and Viem work. But there are a few specific things you need to know before assuming the migration is entirely frictionless.
+
+This guide walks through how the compatibility actually works, the Foundry setup steps, and the caveats that matter in practice.
+
+## How Polkadot Hub's EVM Compatibility Works
+
+Polkadot Hub runs two execution backends in parallel. REVM handles EVM contracts — the same execution engine used in several Ethereum clients — giving full compatibility with Solidity contracts and the existing JSON-RPC API surface. PVM (Polkadot Virtual Machine, based on RISC-V) handles contracts written for Polkadot's native environment, including Rust-based contracts and compute-intensive workloads.
+
+From an EVM developer's perspective, you interact exclusively with the REVM backend. The chain ID is `420420419` for mainnet and `420420417` for testnet. The JSON-RPC API is the same one Ethers.js, Viem, Wagmi, and MetaMask already understand. Standard ERC-20, ERC-721, and other OpenZeppelin contracts deploy without changes.
+
+The cross-VM boundary is strictly opt-in. If you want your Solidity contract to call a PVM contract — for example, to use XCM precompiles for cross-chain token transfers — you can do that. But nothing about a standard contract forces you to engage with it. A typical token or DEX contract deployed on Polkadot Hub behaves exactly as it does on Ethereum.
+
+## Setting Up Foundry for Polkadot Hub
+
+You need Foundry's nightly build. The stable release doesn't include Polkadot chain configurations. Install or update it:
+
+```bash
+curl -L https://foundry.paradigm.xyz | bash
+foundryup --version nightly
+```
+
+Update `foundry.toml` to specify a Solidity version. If you're using Blockscout for verification, add the verifier block:
+
+```toml
+[profile.default]
+src = "src"
+out = "out"
+libs = ["lib"]
+solc_version = "0.8.28"
+
+[etherscan]
+polkadot-testnet = { key = "", url = "https://blockscout-testnet.polkadot.io/api?" }
+```
+
+The `key = ""` is intentional — Blockscout on Polkadot Hub does not require an API key. Deploying to testnet:
+
+```bash
+forge create src/MyContract.sol:MyContract \
+    --chain polkadot-testnet \
+    --rpc-url https://services.polkadothub-rpc.com/testnet \
+    --private-key $PRIVATE_KEY \
+    --broadcast
+```
+
+The `--chain polkadot-testnet` flag sets the chain ID and picks up testnet configuration automatically. For mainnet, swap `polkadot-testnet` for `polkadot` and the RPC URL for `https://services.polkadothub-rpc.com/mainnet`.
+
+Verify after deployment:
+
+```bash
+forge verify-contract $CONTRACT_ADDRESS src/MyContract.sol:MyContract \
+    --chain polkadot-testnet
+```
+
+Cast works identically for reading and writing contract state:
+
+```bash
+# Read state
+cast call $CONTRACT_ADDRESS "balanceOf(address)(uint256)" $WALLET \
+    --chain polkadot-testnet
+
+# Send transaction
+cast send $CONTRACT_ADDRESS "transfer(address,uint256)" $RECIPIENT 1000 \
+    --chain polkadot-testnet \
+    --private-key $PRIVATE_KEY
+```
+
+## The forge test Caveat You Need to Know
+
+`forge test` does not run against a Polkadot node. It runs against a standard Anvil instance — an Ethereum local node. This means two things:
+
+**Existential Deposit is not enforced.** Polkadot Hub requires accounts to maintain a minimum balance to stay alive on-chain. Anvil follows Ethereum semantics, where accounts can hold zero balance without being removed. If your contract creates accounts or your tests rely on zero-balance edge cases, those tests may pass locally and behave differently on Polkadot Hub.
+
+**Balance semantics differ.** Operations that would fail on Polkadot Hub due to minimum balance requirements will silently succeed in `forge test`.
+
+The practical solution: run `forge test` for pure contract logic — unit tests, invariant tests, and anything that doesn't touch account lifecycle. For tests that involve account creation or native token balance behavior, run against the Polkadot Hub testnet directly. Adding a testnet deployment and smoke-test step to CI catches the class of issues that local Anvil cannot surface.
+
+## Wallet Testing Against Polkadot Hub
+
+Since Polkadot Hub exposes a standard EVM JSON-RPC API, MetaMask connects to it the same way it connects to any EVM network. Your dApp can call `wallet_addEthereumChain` to prompt the user to add the Polkadot Hub network — MetaMask shows a standard approval popup, and the user (or your test) confirms it.
+
+If you're already using `@avalix/chroma` for wallet automation, there is nothing to change structurally. The core wallet interactions — `metamask.authorize()`, `metamask.confirm()`, `metamask.reject()` — work identically regardless of which EVM-compatible chain is on the other end of the RPC. The wallet popup behavior is driven by MetaMask and your dApp, not by the specific chain. You point your test environment at the Polkadot Hub testnet RPC, seed your test wallet with DOT for gas rather than ETH, and your existing E2E test flows run against real Polkadot Hub state.
+
+## What the Migration Actually Looks Like
+
+For most existing Ethereum contracts, the practical checklist is short:
+
+1. Install Foundry nightly
+2. Add the `foundry.toml` changes above
+3. Deploy to Polkadot Hub testnet with `--chain polkadot-testnet`
+4. Add `forge verify-contract` to your CI deployment step
+5. Test account-lifecycle edge cases against testnet, not just `forge test`
+
+The EVM tooling compatibility is genuine. The caveats are specific — Existential Deposit semantics in local tests, nightly build requirement — and both have clear workarounds. For teams that want to reach Polkadot's ecosystem without rewriting contracts or adopting a new development stack, that path is available and functional today.
