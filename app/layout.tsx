@@ -26,6 +26,9 @@ export const metadata: Metadata = {
     title: '@avalix/chroma',
     description: 'End-to-end testing library for wallet interactions across multiple blockchain ecosystems',
   },
+  verification: {
+    google: 'C-ECLejZY-mzsuDPXpkFB6AWB_ZohcmCha2G-6YmGyE',
+  },
 };
 
 export default function Layout({ children }: LayoutProps<'/'>) {
