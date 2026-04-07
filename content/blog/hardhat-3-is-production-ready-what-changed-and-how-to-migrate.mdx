@@ -1,0 +1,140 @@
+---
+title: "Hardhat 3 Is Production-Ready: What Changed and How to Migrate"
+description: "Hardhat 3 rewrites the dev network in Rust, adds native Solidity tests, and simulates OP Stack locally. Here's what changed and how to migrate."
+date: 2026-04-07
+author: Chroma Team
+---
+
+Hardhat 3 hit production-ready beta with v3.3.0 in late March 2026. It's a ground-up rewrite: the simulation engine is now written in Rust, Solidity-native tests are built in, and OP Stack can be simulated locally without a third-party node. If you're on Hardhat 2, the migration requires real effort — but the result is a significantly faster and more flexible test environment.
+
+Here's a practical breakdown of the four changes that matter most.
+
+## The EDR: A Rust-Powered Simulation Engine
+
+The biggest architectural change is the **EDR** (Ethereum Development Runtime), a Rust-based in-process blockchain simulation engine that replaces Hardhat 2's JavaScript network layer.
+
+From a test code perspective, the EDR is mostly invisible. It speaks the same JSON-RPC protocol your tests already use. What changed is how you access the network: `hre.network.provider` is replaced by `hre.network.connect()`, which returns a connection object:
+
+```ts
+const { provider } = await hre.network.connect();
+const blockNumber = await provider.send("eth_blockNumber");
+```
+
+This explicit connection model allows multiple independent simulated networks in a single process — something Hardhat 2 couldn't do. The network config syntax also changed: every simulated network is now typed as `edr-simulated` with an explicit `chainType`:
+
+```ts
+networks: {
+  hardhatMainnet: {
+    type: "edr-simulated",
+    chainType: "l1",
+  },
+},
+```
+
+The default hardfork in Hardhat 3 is `"osaka"`. If you relied on Hardhat 2's older default, add an explicit `hardfork` field to your network config to preserve behavior.
+
+## Native Solidity Tests, Fuzz Included
+
+Hardhat 3 ships Foundry-compatible Solidity tests with no plugin required. Any file inside `test/` or any `contracts/**/*.t.sol` file with a function starting with `test` is treated as a test file automatically.
+
+A basic Solidity test using `forge-std`:
+
+```solidity
+import { Test } from "forge-std/Test.sol";
+
+contract TokenTest is Test {
+  function testTransfer() public {
+    Token token = new Token();
+    token.mint(address(this), 1000);
+    token.transfer(address(0xBEEF), 500);
+    assertEq(token.balanceOf(address(0xBEEF)), 500);
+  }
+}
+```
+
+Install `forge-std` via npm: `npm install 'github:foundry-rs/forge-std#v1.9.7'`
+
+Fuzz tests work exactly as in Foundry — any test function that takes parameters is automatically fuzzed:
+
+```solidity
+function testTransferFuzz(uint256 amount) public {
+  vm.assume(amount <= 1000);
+  token.transfer(address(0xBEEF), amount);
+  assertEq(token.balanceOf(address(0xBEEF)), amount);
+}
+```
+
+Run only Solidity tests: `hardhat test solidity`. Run with coverage: `hardhat test --coverage` — built-in, no separate plugin.
+
+The practical shift: teams that split contract unit tests between Foundry and Hardhat can now consolidate. Hardhat 3 supports Solidity and TypeScript tests side by side in a single config.
+
+## Multichain Support: Simulating OP Stack Locally
+
+Hardhat 2 always simulated Ethereum Mainnet. Hardhat 3 introduces `chainType`, and the first non-L1 type is `"op"` — a precise local simulation of OP Mainnet including OP-specific opcodes, precompiles, and L1 gas estimation behavior.
+
+Configure an OP network:
+
+```ts
+networks: {
+  hardhatOp: {
+    type: "edr-simulated",
+    chainType: "op",
+  },
+},
+```
+
+Run tests against it:
+
+```sh
+hardhat test --network hardhatOp --chain-type op
+```
+
+The `op` chain type exposes `estimateL1Gas` through viem, letting you verify L1 data fee estimates locally:
+
+```ts
+const { viem } = await hre.network.connect({ network: "hardhatOp", chainType: "op" });
+const publicClient = await viem.getPublicClient();
+const l1Gas = await publicClient.estimateL1Gas({ account, to, value: 1n });
+```
+
+If you're building on Optimism, Base, or any OP Stack chain, this means gas estimates you develop against locally are actually meaningful — not a rough approximation from a generic EVM simulator.
+
+## What the Migration Actually Involves
+
+Hardhat 3 requires **Node.js v22 or later**. The config format is the most significant breaking change: it must use ESM, and plugins are declared explicitly in a `plugins` array rather than imported for side effects.
+
+**Before (Hardhat 2):**
+```js
+import "@nomicfoundation/hardhat-toolbox";
+```
+
+**After (Hardhat 3):**
+```ts
+import hardhatToolboxViem from "@nomicfoundation/hardhat-toolbox-viem";
+
+export default defineConfig({
+  plugins: [hardhatToolboxViem],
+  solidity: { version: "0.8.28" },
+});
+```
+
+Custom tasks also move to an explicit `tasks` array with a builder pattern:
+
+```ts
+const printAccounts = task("accounts", "Print the accounts")
+  .setInlineAction(async (_, hre) => {
+    const { provider } = await hre.network.connect();
+    console.log(await provider.request({ method: "eth_accounts" }));
+  })
+  .build();
+
+export default defineConfig({ tasks: [printAccounts] });
+```
+
+One more change to catch in CI: the compile command changed from `hardhat compile` to `hardhat build`. Update any pipeline scripts that call the old command.
+
+For test files: convert `require()` to `import`, update network access from `hre.network.provider.send(...)` to the connection pattern shown above, and update Chai matchers that take ethers as a first argument (e.g., `.revert(ethers)` instead of `.reverted`).
+
+If you run `@avalix/chroma` wallet E2E tests alongside Hardhat for contract testing, the migration is scoped to your Hardhat layer only. Chroma tests are Playwright-based and don't use Hardhat's network connection API — your wallet test files stay untouched.
+
+The [official migration guide](https://hardhat.org/docs/migrate-from-hardhat2) covers both the Mocha+Ethers and viem toolbox paths in detail. The Hardhat team marks the API stable — no major user-facing breaking changes before the final release.
