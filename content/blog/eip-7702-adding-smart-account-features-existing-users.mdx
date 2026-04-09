@@ -1,0 +1,87 @@
+---
+title: "EIP-7702 in Practice: Adding Smart Account Features to Your Existing Users"
+description: "EIP-7702 lets you add session keys, gas sponsorship, and batching to EOA wallets using viem—no user migration required."
+date: 2026-04-08
+author: Chroma Team
+---
+
+Most account abstraction tutorials start from a clean slate: create a new smart contract account, fund it, build your app around it. That works for greenfield projects. For dApps with existing users on MetaMask or other EOA wallets, the story is different — you cannot ask your users to migrate to a new address without breaking their in-app history, token balances, and on-chain identity.
+
+EIP-7702, which shipped on Ethereum mainnet with the Pectra upgrade in May 2025, solves this. It lets an EOA temporarily delegate its execution to a smart contract — for a single transaction or persistently — without changing the EOA's address. The account abstraction features come to the user, not the other way around.
+
+## How EIP-7702 EOA Delegation Works
+
+EIP-7702 introduces a new transaction type (Type 4) with an `authorizationList` field. Each entry in the list is a signed message from an EOA that says: for purposes of this transaction, treat my account as if it were this contract.
+
+The signed authorization specifies:
+- **contractAddress** — the delegation contract to invoke
+- **chainId** — which chain this authorization is valid on (0 means all chains)
+- **nonce** — the EOA nonce this authorization is scoped to
+
+Once an EOA has delegated, calls sent to the EOA's address invoke the delegate contract's bytecode. The EOA's storage is used, and the EOA keeps full control — it can revoke delegation at any time by submitting a new authorization pointing to the zero address.
+
+This is fundamentally different from ERC-4337, which requires a new `UserOperation` mempool and a new smart contract wallet address. With EIP-7702, your users keep their existing address and seed phrase.
+
+## The viem Authorization Flow
+
+Viem's EIP-7702 API stabilized with `signAuthorization` and `sendTransaction` (with `authorizationList`). Here is the minimal relay flow, where a backend account pays gas so the user does not need to hold ETH:
+
+```ts
+import { privateKeyToAccount } from 'viem/accounts'
+import { createWalletClient, encodeFunctionData, http } from 'viem'
+import { mainnet } from 'viem/chains'
+
+const eoa = privateKeyToAccount('0x...')    // the user's existing EOA
+
+// A relay account your backend controls — pays gas on behalf of the user
+const relay = privateKeyToAccount('0x...')
+const client = createWalletClient({ account: relay, chain: mainnet, transport: http() })
+
+// Step 1: user signs the authorization off-chain (a small structured message)
+const authorization = await client.signAuthorization({
+  account: eoa,
+  contractAddress: '0xYourDelegationContract',
+})
+
+// Step 2: relay broadcasts the Type-4 transaction with the authorization attached
+const hash = await client.sendTransaction({
+  authorizationList: [authorization],
+  data: encodeFunctionData({ abi, functionName: 'initialize' }),
+  to: eoa.address,
+})
+```
+
+The user signs the authorization — a small EIP-712-structured message, not a full transaction. Your relay account submits the actual transaction and pays the gas. After `initialize` runs on the delegation contract, subsequent calls to `eoa.address` invoke the delegation contract without needing another authorization.
+
+If the EOA is executing the transaction itself (no relay), pass `executor: 'self'` to `signAuthorization`. This adjusts nonce handling so the authorization nonce and transaction nonce do not collide:
+
+```ts
+const authorization = await client.signAuthorization({
+  contractAddress: '0xYourDelegationContract',
+  executor: 'self',
+})
+```
+
+## What You Can Build Once Delegation Is Active
+
+With a delegation contract in place, three features become available that were previously only possible with smart contract wallets:
+
+**Session keys.** The delegation contract accepts signatures from a hot key — stored in-browser or on a backend — instead of requiring the EOA to sign every transaction. Users approve a session once; your app drives subsequent calls silently during that session.
+
+**Gas sponsorship.** Your relay account pays gas on behalf of the user. Users never need to hold ETH to interact with your dApp. This is the highest-impact UX change you can ship without asking users to change wallets or addresses.
+
+**Batched calls.** The delegation contract executes multiple operations atomically in one transaction — swap and approve in a single click, for example. The user sees one confirmation instead of two.
+
+These patterns require deploying a delegation contract that implements the corresponding logic. OpenZeppelin's modular account library and Alchemy's LightAccount both support EIP-7702 delegation patterns if you prefer not to write the contract from scratch.
+
+## Testing the Authorization Step in Your dApp
+
+When you introduce EIP-7702 delegation, the authorization request is a distinct wallet interaction — separate from the transaction that follows it. If your dApp prompts users to sign the authorization through MetaMask, that signature prompt is a first-class event in your user flow, not an invisible backend detail.
+
+Your E2E tests need to account for it. @avalix/chroma treats wallet signature prompts the same as transaction confirmations — `await metamask.authorize()` handles the authorization approval, and `await metamask.confirm()` handles the subsequent delegated call. If you restructure your dApp flow around EIP-7702, add a test that walks through both interactions end-to-end: authorization approval, the delegated call, and the expected on-chain outcome. The failure modes worth covering are the same ones that matter in any wallet flow — what happens when the user rejects the authorization, and whether your UI recovers cleanly.
+
+## Wrapping Up
+
+The production infrastructure for EIP-7702 is in place: open-source bundlers funded by the Ethereum Foundation are live on mainnet and Optimism, viem's API is stable, and Foundry v1.0 added native authorization signing support for local tests. The upgrade path for existing users is the most realistic account abstraction migration story in production today.
+
+If your dApp has real users on MetaMask with an existing address they care about, EIP-7702 is where account abstraction stops being theoretical. You can add session keys and gas sponsorship incrementally — one feature at a time, without touching your users' addresses or asking them to move funds.
