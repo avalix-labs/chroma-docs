@@ -1,0 +1,89 @@
+---
+title: "Solidity 0.8.34 Fixes a High-Severity Transient Storage Bug: What --via-ir Users Need to Know"
+description: "A high-severity Solidity bug in 0.8.28–0.8.33 silently skips clearing transient storage in --via-ir mode. Who's affected and how to upgrade to 0.8.34."
+date: 2026-04-09
+author: Chroma Team
+---
+
+Solidity 0.8.34 shipped on February 18, 2026, with a single critical bug fix: a high-severity defect in the Yul IR code generator that could silently fail to clear transient storage — or persistent storage — in contracts that use both. If your project compiles with `--via-ir` and uses any version between 0.8.28 and 0.8.33, this is worth reading before you ship again.
+
+Transient storage was introduced in EIP-1153 and became available on mainnet with the Dencun upgrade in March 2024. Since then it has become the standard tool for reentrancy guards, flash loan accounting, and short-lived cross-function state. It is fast, cheap, and scoped to the current transaction. It is also the exact feature where this bug lives.
+
+## What the Bug Actually Does
+
+The root cause is a naming collision in the Yul IR code generator. When the compiler generates a helper function to zero out a variable, it needs two variants: one for persistent storage and one for transient storage. In versions 0.8.28–0.8.33, those two helpers were assigned the same name — neither variant included the storage location type in its identifier.
+
+The result: in a contract that clears both persistent and transient storage within the same compilation unit, only one variant of the helper survives. Which location gets cleared and which gets silently skipped depends on code generation order — something you do not control.
+
+In practice, the bug triggers when a contract uses `delete` on a transient storage variable and also clears persistent storage via `delete`, `pop()`, or array assignment elsewhere in the same contract. For a reentrancy guard using transient storage, the typical pattern looks like this:
+
+```solidity
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.28;
+
+contract Vault {
+    transient uint256 private _lock;
+    uint256[] private _pendingWithdrawals;
+
+    function withdraw() external {
+        require(_lock == 0, "reentrant");
+        _lock = 1;
+
+        // ... process withdrawal, call external contract ...
+
+        delete _pendingWithdrawals; // clears persistent storage
+        delete _lock;               // may silently fail with the bug
+    }
+}
+```
+
+If the naming collision hits the transient variant, `_lock` is never reset after the transaction. The next caller is incorrectly blocked by a stale lock. If the collision hits the persistent side, `_pendingWithdrawals` is silently left set.
+
+The bug is silent. No compile-time error, no runtime revert. Your tests may pass if they do not independently verify the post-transaction state of both storage locations.
+
+## Who Is Affected
+
+You are in the affected range if all three of the following are true:
+
+1. **Compiler version:** 0.8.28, 0.8.29, 0.8.30, 0.8.31, 0.8.32, or 0.8.33
+2. **IR compilation enabled:** `--via-ir` flag, or `viaIR: true` in your Foundry or Hardhat config
+3. **Mixed storage clearing:** At least one `delete` on a `transient` variable, plus at least one `delete`, `pop()`, or array assignment on a regular state variable, in the same contract
+
+If you do not use `viaIR`, the legacy code generator has a separate implementation without this collision and you are not affected.
+
+A quick check for Foundry projects:
+
+```bash
+# Check if via-ir is enabled
+grep -r "via_ir\|viaIR" foundry.toml
+
+# Check if any contracts use transient storage
+grep -rn "transient " src/
+```
+
+If both return results and your compiler version is in the 0.8.28–0.8.33 range, treat the project as affected until proven otherwise.
+
+One thing worth noting for teams running dApp E2E tests: tools like `@avalix/chroma` validate user flows at the UI and wallet interaction level — they will not surface a compiler-level bug like this. A reentrancy guard that fails to reset will not cause a MetaMask popup to behave differently; the failure shows up in on-chain state. E2E coverage and compiler correctness test different layers, and both matter.
+
+## Upgrading to 0.8.34
+
+The fix is straightforward: upgrade the Solidity compiler to 0.8.34.
+
+In Foundry (`foundry.toml`):
+
+```toml
+[profile.default]
+solc_version = "0.8.34"
+```
+
+In Hardhat:
+
+```bash
+npm install --save-dev solc@0.8.34
+```
+
+After upgrading, do a clean recompile and rerun your full test suite. Pay specific attention to any tests that verify post-transaction state involving both transient and persistent storage. If you rely on a transient reentrancy lock, add a test that confirms the lock is zero after a successful call — not just that the call itself succeeds. The bug will not cause a revert; only an explicit state assertion will catch it.
+
+For deployed contracts compiled with an affected version, the risk is proportional to whether your contracts actually mix transient and persistent storage deletion. A contract with a transient reentrancy guard but no persistent `delete` or `pop()` calls in the same contract is outside the triggering conditions.
+
+Solidity 0.8.34 also includes a minor optimizer improvement that removes redundant steps from the default Yul optimizer sequence. The upgrade is low-risk and high-value. There is no practical reason to stay on an affected version.
