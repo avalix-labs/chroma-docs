@@ -1,0 +1,67 @@
+---
+title: "ink! Is No Longer Maintained: What Polkadot Smart Contract Developers Should Do Now"
+description: "ink! smart contract development on Polkadot ended in January 2026. Here's why it happened, what it means for existing code, and where to go next."
+date: 2026-04-10
+author: Chroma Team
+---
+
+If you have been writing smart contracts for Polkadot using ink!, the Rust-based smart contract language, you may have already noticed the notices at the top of the [use.ink](https://use.ink) website and the [GitHub repository](https://github.com/use-ink/ink):
+
+> "Since January 2026, we are unfortunately unable to actively maintain or develop ink! further."
+
+Issues and pull requests on the repository are locked. No new features are coming. This is not a hiatus — it is a hard stop.
+
+For developers with ink! code in production or in progress, this raises practical questions: What happens to your contracts? What should new projects use? And what does the Polkadot smart contract landscape look like going forward? This post answers each of those.
+
+## Why ink! Development Stopped
+
+The short answer is funding. The ink! team relied on Polkadot's on-chain governance system (OpenGov) to fund continued development. Multiple proposals were rejected, and without a sustainable funding path, active development became impossible.
+
+This outcome reflects a broader tension in decentralized ecosystems: technically ambitious tooling that serves a subset of the developer community can struggle to secure consistent on-chain funding when competing with proposals that have wider stakeholder appeal.
+
+It is worth noting that the technical work itself was sound. ink! introduced a genuinely ergonomic way to write Wasm-based smart contracts in Rust, with a type-safe contract model, built-in test utilities, and a well-designed storage API. The problem was institutional, not technical.
+
+## What Happens to Your Existing ink! Code
+
+If you have ink! contracts already deployed, they continue to run. Contracts on Astar, Aleph Zero, or other Substrate chains that support the `pallet-contracts` Wasm execution environment are not affected. The runtime is not going away.
+
+What changes is the development experience going forward:
+
+- **No new ink! versions.** If a security issue or incompatibility surfaces, there will be no patch.
+- **No new toolchain support.** As Rust and compiler toolchains evolve, ink! contracts may become harder to compile over time.
+- **Community forks exist** but none have reached production-ready status or broad adoption as of writing.
+
+If your contract is in active development or you are planning a new project, this is the moment to evaluate alternatives.
+
+## Polkadot's Smart Contract Path Is Now Solidity on Revive
+
+The officially supported direction for Polkadot smart contract development is now **Revive**, the EVM-compatible execution environment on Polkadot Hub.
+
+Revive reached production on Polkadot in January 2026 (following Kusama in late December 2025). It lets you write and deploy **standard Solidity contracts** on Polkadot using the same tools you already know:
+
+- **Foundry** — `forge build`, `forge test`, `forge script` all work
+- **Hardhat** — deploy scripts and plugins carry over
+- **OpenZeppelin Contracts** — the Contracts Wizard now has first-class Polkadot support
+- **Remix** — deploy directly from the browser
+
+The chain ID and RPC endpoint differ, but the compilation and deployment workflow is nearly identical to Ethereum mainnet or any EVM-compatible chain.
+
+One important distinction: Polkadot Hub also supports a native execution environment called PVM (PolkaVM), based on RISC-V. EVM contracts (Revive) and PVM contracts are interoperable, so you can call between them. For most teams coming from Ethereum, starting with Revive and Solidity is the pragmatic path.
+
+## What Your Workflow Looks Like Going Forward
+
+If you are migrating an ink! project:
+
+1. **Rewrite in Solidity.** The contract logic translates directly in most cases — storage mappings, events, modifiers, and access control patterns all have clean Solidity equivalents.
+2. **Configure your tool of choice for Polkadot Hub.** Foundry and Hardhat need the correct RPC URL and chain ID for Polkadot Hub. The [Polkadot developer docs](https://docs.polkadot.com/smart-contracts/overview/) cover the specifics.
+3. **Update your wallet setup.** Polkadot Hub's EVM environment uses Ethereum-style addresses and MetaMask-compatible wallets. If you were using Substrate-native wallets (Polkadot.js extension, Talisman in Substrate mode), your users will now interact with the EVM address space.
+
+That last point has real implications for how you test user flows. EVM wallet interactions on Polkadot Hub behave like standard MetaMask flows — approvals, transaction confirmation, chain switching. If you are writing E2E tests for dApps deployed on Polkadot Hub, [@avalix/chroma](https://chroma.avalix.dev) supports both EVM wallet testing (MetaMask) and Polkadot-native wallet testing (Polkadot.js, Talisman), which matters if your dApp bridges both environments.
+
+## A Moment Worth Taking Seriously
+
+The ink! shutdown is not a signal that Polkadot's smart contract ecosystem is struggling — Revive and Polkadot Hub represent a significant step toward developer accessibility. But it is a genuine shift that requires action if you have been building on ink!.
+
+The ecosystem is converging on Solidity as the shared language across Ethereum, Polkadot Hub, and a growing number of other chains. For developers who never left Solidity, this opens up Polkadot as a deployment target with almost no migration cost. For developers who had invested in Rust and ink!, it is time to evaluate what to carry forward and what to rewrite.
+
+The contracts you already shipped are still running. But the tooling that built them is no longer moving.
