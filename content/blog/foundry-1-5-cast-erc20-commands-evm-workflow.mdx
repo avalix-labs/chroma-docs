@@ -1,0 +1,92 @@
+---
+title: "Foundry 1.5: The cast erc20 Commands and How They Simplify EVM Token Work"
+description: "Foundry 1.5 ships cast erc20 — a dedicated CLI for ERC-20 balance checks, transfers, and approvals. Here's what changed and why it matters for your workflow."
+date: 2026-04-11
+author: Chroma Team
+---
+
+Working with ERC-20 tokens from the Foundry CLI wasn't hard, but it wasn't clean either. Foundry 1.5 fixes that with `cast erc20` — a dedicated subcommand suite that replaces raw ABI calls for the most common token operations. If you build or test DeFi applications, this is the kind of small change that adds up across hundreds of daily interactions.
+
+## Before cast erc20, What You Were Actually Doing
+
+Before 1.5, interacting with ERC-20 tokens from the command line meant two options: the `--erc20` flag on `cast balance` (which only covered balances), or writing raw ABI calls by hand:
+
+```sh
+# old: check balance
+cast balance --erc20 <TOKEN> <OWNER> --rpc-url $RPC_URL
+
+# old: check allowance — you had to get the signature right
+cast call <TOKEN> "allowance(address,address)(uint256)" <OWNER> <SPENDER>
+
+# old: approve a spender
+cast send <TOKEN> "approve(address,uint256)" <SPENDER> <AMOUNT> --private-key $PK
+```
+
+Functional, but noisy. Any typo in the ABI string (`uint` instead of `uint256`, wrong return type in parentheses) returns wrong data or silently fails. For contracts you interact with constantly, it's unnecessary overhead.
+
+## The cast erc20 Command Suite
+
+Foundry 1.5 introduces a structured subcommand that covers the full standard interface:
+
+```sh
+# Read operations
+cast erc20 balance <TOKEN> <ACCOUNT> --rpc-url $RPC_URL
+cast erc20 allowance <TOKEN> <OWNER> <SPENDER> --rpc-url $RPC_URL
+cast erc20 name <TOKEN> --rpc-url $RPC_URL
+cast erc20 symbol <TOKEN> --rpc-url $RPC_URL
+cast erc20 decimals <TOKEN> --rpc-url $RPC_URL
+cast erc20 total-supply <TOKEN> --rpc-url $RPC_URL
+
+# Write operations (require a signer)
+cast erc20 transfer <TOKEN> <RECIPIENT> <AMOUNT> --private-key $PK --rpc-url $RPC_URL
+cast erc20 approve <TOKEN> <SPENDER> <AMOUNT> --private-key $PK --rpc-url $RPC_URL
+```
+
+Each command takes the token contract address first, then the addresses and amounts relevant to that operation. Amounts use the token's native units — so if you're working with a 6-decimal token like USDC, `1000000` is one dollar. The commands don't auto-scale for decimals, which is consistent with how the EVM itself handles values.
+
+Write operations (`transfer`, `approve`) accept the same signing options as `cast send`: `--private-key`, `--account` for keystore files, or `--ledger` for hardware wallets.
+
+The existing `--erc20` flag on `cast balance` still works but now prints a deprecation warning. If you have scripts using it, they won't break immediately, but it's worth migrating.
+
+## Installing Foundry via npm
+
+The same release ships `cast`, `anvil`, and `chisel` as npm packages under the `@foundry-rs` scope. `forge` was already available; 1.5 completes the set.
+
+```sh
+npm install --save-dev @foundry-rs/cast @foundry-rs/anvil
+# or
+bun add -d @foundry-rs/cast @foundry-rs/anvil
+```
+
+Then use them without a global install:
+
+```sh
+npx @foundry-rs/cast erc20 balance $USDC $WALLET --rpc-url $RPC_URL
+```
+
+The main benefit is version pinning in CI. The common pattern of `foundryup` in CI scripts pulls whatever is current at pipeline time — which is fine until a release changes behavior and your tests break without an obvious cause. With npm packages, you pin the version in `package.json` and every run uses the same binary.
+
+For teams that already manage a JavaScript or TypeScript project alongside their contracts (common in dApp repos), this eliminates the "global tool install" step from your CI setup entirely.
+
+## How This Fits into a DeFi Test Workflow
+
+The most immediate use case is test fixture setup. When you're writing E2E tests for a DeFi dApp, you often need to verify wallet token state before and after a transaction — not just that the transaction was confirmed, but that balances actually changed as expected.
+
+```sh
+# Before running the test: seed the test wallet
+cast erc20 transfer $USDC $TEST_WALLET 1000000000 \
+  --private-key $WHALE_KEY \
+  --rpc-url $FORK_URL
+
+# After the test: verify final balance
+BALANCE=$(cast erc20 balance $USDC $TEST_WALLET --rpc-url $FORK_URL)
+echo "Final USDC balance: $BALANCE"
+```
+
+This pattern slots naturally into test setup scripts. If you're running wallet E2E flows with a tool like @avalix/chroma — which drives MetaMask or other wallet extensions through Playwright — the cast commands handle the on-chain state setup before the browser test runs. You set up token balances via cast, the Playwright test triggers the wallet flow, and then cast verifies the outcome directly against the node.
+
+## Upgrading
+
+Run `foundryup` to pull the latest stable release. If you're using the npm packages, update the version in `package.json`. No configuration changes are required — the new commands are purely additive.
+
+For reference, the complete list of changes is in the [Foundry v1.5.0 release notes](https://github.com/foundry-rs/foundry/releases/tag/v1.5.0) on GitHub.
