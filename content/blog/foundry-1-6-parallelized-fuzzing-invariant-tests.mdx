@@ -1,0 +1,93 @@
+---
+title: "Foundry 1.6: Parallelized Fuzzing and the check_interval Option That Cuts Invariant Test Time by 3.6x"
+description: "Foundry 1.6 ships parallelized fuzzing, a configurable check_interval that cuts invariant test time by 3.6x, and time-based block fuzzing for catching vulnerabilities unit tests miss."
+date: 2026-04-15
+author: Chroma Team
+---
+
+Fuzz testing smart contracts has always been single-threaded in Foundry. One corpus, one fuzzer, one process — and on a high-depth invariant campaign, most of your CPU sitting idle.
+
+Foundry 1.6.0-rc1 changes that with three meaningful testing improvements: parallelized fuzz workers, a `check_interval` configuration option that makes deep invariant runs significantly faster, and `max_time_delay`/`max_block_delay` settings for discovering time-dependent vulnerabilities. Here is what each one means for your test suite.
+
+## How Parallel Fuzzing Works in 1.6
+
+Foundry 1.6 introduces multi-threaded fuzz execution. Each worker thread maintains its own corpus and explores inputs independently, then periodically syncs with a shared master corpus. When one worker discovers new coverage — a previously unreached branch, a new edge case — that finding propagates to the other workers on the next sync. The full campaign benefits from every thread's discoveries without duplicating work.
+
+For standard fuzz tests, enabling this is a single config change:
+
+```toml
+[fuzz]
+runs = 1000
+workers = 4
+```
+
+A reasonable starting value for `workers` is the number of physical cores available on your machine or CI runner. The coverage-sharing model keeps workers from re-exploring the same paths, so adding workers translates to meaningfully more input space covered per run rather than just parallel redundancy.
+
+## The check_interval Option: What Was Eating Your Invariant Test Time
+
+Invariant tests work differently from fuzz tests: they call a sequence of functions in random order, checking your invariant assertion after each call. The problem is that those assertion evaluations are expensive. In high-depth scenarios, invariant checks consume approximately 86% of total execution time — which means deep runs are bottlenecked by checking, not by transaction execution.
+
+Foundry 1.6 adds `check_interval` to the `[invariant]` section:
+
+```toml
+[invariant]
+runs = 500
+depth = 500
+check_interval = 10
+```
+
+The three meaningful values:
+- `check_interval = 1` (default): assert after every call — most precise, slowest
+- `check_interval = 0`: assert only on the final call — fastest, but misses violations that surface mid-sequence
+- `check_interval = N`: assert every N calls plus the final call
+
+The official benchmark with `check_interval = 10`: execution time drops from 15.09 seconds to 4.17 seconds — a 3.6x improvement for deep runs.
+
+Which value makes sense depends on the nature of your invariant. If your invariant must hold at every intermediate step (a token balance floor, a conservation law), keep it at `1` or use a low value like `5`. If your invariant is a final-state check — asserting something about where the system ends up rather than every step along the way — `check_interval = 0` is safe and fastest. For most invariants that should hold throughout but where small violations mid-sequence are detectable at the end anyway, `10` is a practical default that preserves most precision at a fraction of the cost.
+
+## Time-Based Invariant Testing
+
+By default, consecutive transactions in a Foundry invariant campaign arrive in the same block or in immediate succession. That covers a wide range of logic, but misses an important class of vulnerabilities: anything that depends on time passing between transactions.
+
+Foundry 1.6 adds two new invariant config options:
+
+```toml
+[invariant]
+max_time_delay = 86400    # up to 1 day in seconds between transactions
+max_block_delay = 100     # up to 100 blocks between transactions
+```
+
+With `max_time_delay` set, the fuzzer can advance `block.timestamp` by up to 86400 seconds between consecutive calls. With `max_block_delay`, it can jump `block.number` by up to 100. These values are chosen independently per call pair, so a campaign will explore scenarios like normal-speed sequences, sudden large time jumps, and mixed intervals.
+
+The vulnerabilities this surfaces that normal invariant testing misses:
+- **Vesting and unlock schedules**: tokens released after a specific timestamp or block
+- **TWAP manipulation**: time-weighted average prices that depend on the gap between observations
+- **Auction deadlines**: bid windows that open or close at specific block numbers
+- **Reward accrual drift**: staking or yield calculations that accumulate per second or per block
+
+If your contract is correct under normal transaction timing but breaks after a 24-hour gap, you want to know that in CI. Setting `max_time_delay = 86400` and running a short invariant campaign is a quick way to surface that class of issue.
+
+## Osaka Is Now the Default Hardfork
+
+Foundry 1.6 sets Osaka (the execution layer of Fusaka, which shipped December 3, 2025) as the default EVM hardfork. The most developer-relevant addition in Osaka is EIP-7951: a native `secp256r1` precompile that brings low-gas verification of NIST P-256 signatures to the EVM. This is the curve used by WebAuthn, Apple Secure Enclave, Android Keystore, and hardware security keys — making on-chain passkey verification practical for the first time without prohibitive gas costs.
+
+If you are deploying to a network that has not adopted Osaka yet, set your EVM version explicitly to avoid unexpected compilation differences:
+
+```toml
+[profile.default]
+evm_version = "cancun"   # or whichever hardfork your target chain supports
+```
+
+Tests that compile cleanly against Osaka semantics may behave differently if the target chain runs an older fork, particularly around the new precompile addresses.
+
+## Upgrading
+
+Foundry 1.6.0-rc1 is available now:
+
+```bash
+foundryup --version v1.6.0-rc1
+```
+
+The three testing improvements are independent. A practical first step is adding `check_interval = 10` to your longest-running invariant campaigns — it requires no test code changes and the speedup is immediate. Add `max_time_delay` once you've identified which contracts involve time-sensitive logic. Parallel workers scale naturally with your CI instance.
+
+Foundry's fuzzing catches contract-layer vulnerabilities before deployment. For the user-facing layer — wallet connections, transaction confirmations, and rejection paths — @avalix/chroma covers E2E flows in Playwright. The two complement each other: if a fuzzing campaign surfaces an unexpected contract state, a wallet-aware E2E test can verify whether your dApp communicates that state to users correctly.
