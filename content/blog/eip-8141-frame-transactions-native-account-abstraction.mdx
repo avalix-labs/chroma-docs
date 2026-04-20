@@ -1,0 +1,58 @@
+---
+title: "EIP-8141 Frame Transactions: Ethereum's Native Account Abstraction Model Explained"
+description: "EIP-8141 Frame Transactions bring native account abstraction to Ethereum's Hegotá upgrade. How they differ from EIP-7702 and ERC-4337, explained."
+date: 2026-04-20
+author: Chroma Team
+---
+
+The account abstraction landscape on Ethereum now has three distinct approaches. ERC-4337 powers tens of millions of smart accounts through an alternative mempool and bundler network. EIP-7702, which shipped with Pectra in May 2025, lets any EOA delegate execution to a smart contract for a single transaction without changing address. EIP-8141, currently "Consider for Inclusion" for Ethereum's Hegotá upgrade targeting H2 2026, introduces a third: Frame Transactions — a new native transaction type at the protocol level.
+
+These are not interchangeable. Understanding how EIP-8141 is architecturally distinct matters if you build wallets, paymaster infrastructure, or dApps that will eventually need to handle all three models.
+
+## What Frame Transactions Actually Are
+
+EIP-8141 defines transaction type `0x06`, where a transaction is a sequence of **frames** rather than a single call. Each frame has a mode, a target, a gas limit, a value, and calldata. A transaction can contain 1–64 frames.
+
+Three frame modes exist:
+
+- **VERIFY** — executes read-only (as STATICCALL). It must call the new `APPROVE` opcode (`0xaa`) before returning, or the entire transaction is invalid. This is where authorization logic lives.
+- **SENDER** — executes as the user's actual intent with `msg.sender = tx.sender`. Requires a preceding VERIFY frame to have already called APPROVE.
+- **DEFAULT** — runs from the protocol entry point address. Used in paymaster patterns for factory contract deployment.
+
+The `APPROVE` opcode behaves like `RETURN` — it exits execution — but also sets a transaction-scoped authorization flag. The scope bitmask controls what is permitted: `APPROVE_PAYMENT` (allows gas deduction from the sender), `APPROVE_EXECUTION` (allows SENDER frames to run), or both.
+
+Two additional opcodes, `TXPARAM` and `FRAMEPARAM`, let VERIFY code introspect the transaction envelope — reading fee caps, frame count, and the canonical signature hash — without ABI encoding overhead.
+
+One design decision worth noting: the canonical signature hash **elides VERIFY frame data**. A paymaster or sponsor can insert data into a VERIFY frame after the user signs without invalidating the user's signature. That is the mechanism enabling gas sponsorship in this model without separate relay infrastructure.
+
+Native P256 verification is built into the default account behavior: accounts derived from a P256 key pair can authorize frame transactions using their P256 key without deploying any custom contract. Passkey-backed accounts become first-class at L1.
+
+## How EIP-8141 Differs from EIP-7702 and ERC-4337
+
+| | ERC-4337 | EIP-7702 | EIP-8141 |
+|---|---|---|---|
+| **Layer** | Application (off-protocol) | Protocol (live, Pectra) | Protocol (CFI, Hegotá) |
+| **Bundlers needed** | Yes | No | No |
+| **Mempool** | Alternative | Standard | Standard |
+| **Custom crypto** | Via smart account code | Via delegation contract | Built-in (P256 natively) |
+| **Batching** | Via UserOperation | Via delegation contract | Native frame batching |
+
+EIP-7702 adds smart account behaviors to an EOA for a single transaction by pointing execution to a delegation contract. The EOA keeps its address and nonce. It is a transaction-level affordance layered on top of the existing transaction format.
+
+EIP-8141 is more structural. Authorization is a first-class step embedded in the transaction type itself, not a side effect of delegation. The VERIFY frame runs arbitrary validation code — custom signature schemes, multisig logic, spending limits — with no external contract required for the basic case. The sender address is an explicit field in the transaction envelope rather than derived from the signature.
+
+ERC-4337 continues to work after Hegotá. Chains that do not adopt EIP-8141 remain on ERC-4337 indefinitely. For most production deployments, nothing changes immediately.
+
+## What Smart Contract Developers Should Audit
+
+Two Solidity-level changes are worth reviewing before Hegotá ships.
+
+**The `ORIGIN` opcode behavior changes.** In standard transactions, `ORIGIN` returns `tx.origin`. In frame transactions, `ORIGIN` returns the current frame's `caller` instead. If any contract in your codebase uses `ORIGIN == CALLER` as a check to confirm an EOA caller — a pattern occasionally found in reentrancy guards and anti-bot filters — that logic behaves differently under frame transactions. The EIP spec notes this is consistent with EIP-7702, but if you have contracts not yet reviewed in light of Pectra's ORIGIN changes, Hegotá is a second reason to do that audit.
+
+**Receipts gain per-frame structure.** A frame transaction produces one receipt per frame: `[status, gas_used, logs]`. The top-level receipt adds a `payer` field identifying which account funded gas. Off-chain indexers, event listeners, and log parsers that assume a single log set per transaction will need to handle the new structure when EIP-8141 activates. If you write end-to-end tests for your dApp — for example with `@avalix/chroma` — the transaction confirmation and receipt assertion patterns for frame transactions will evolve once wallet implementations for this transaction type ship.
+
+## What to Do Now
+
+EIP-8141 has "Consider for Inclusion" status as of April 2026. Mempool validation rules are still being refined and final inclusion in Hegotá is not confirmed. Building directly on raw frame transaction primitives today would be premature.
+
+Practical guidance: continue building on ERC-4337 for production account abstraction, use EIP-7702 for EOA UX improvements that need to ship before Hegotá, and track EIP-8141's progress on the [Ethereum Magicians forum](https://ethereum-magicians.org/t/eip-8141-frame-transaction/27617) as the upgrade approaches. Two concrete items for your Hegotá readiness checklist: audit `ORIGIN` usage in contracts you maintain, and plan updates to receipt parsing logic in any off-chain infrastructure you own.
