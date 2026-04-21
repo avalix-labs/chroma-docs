@@ -1,0 +1,67 @@
+---
+title: "EIP-7805 FOCIL: How Ethereum's Hegota Upgrade Hardens Transaction Inclusion"
+description: "EIP-7805 FOCIL arrives in Ethereum's Hegota upgrade to make censorship by block builders structurally harder. How inclusion lists work and what it means for developers."
+date: 2026-04-21
+author: Chroma Team
+---
+
+Ethereum's transaction censorship problem is structural. Since Proposer-Builder Separation (PBS) became the dominant block construction model, a small number of MEV builders assemble the majority of Ethereum blocks. That concentration creates a pressure point: builders facing regulatory demands or commercial incentives can selectively exclude transactions from the mempool. If you build on Ethereum, this affects your users even when your contracts are perfectly correct.
+
+EIP-7805, Fork-choice Enforced Inclusion Lists (FOCIL), is confirmed for Ethereum's Hegota upgrade targeting H2 2026. It doesn't eliminate specialized block builders — it makes censorship by those builders structurally harder, enforced at the consensus layer. Here is how it works and what you need to know as a developer.
+
+## How Block Builders Censor Transactions Today
+
+In Ethereum's current PBS model, validators propose blocks but typically don't build them. Block building is dominated by professional MEV builders. Validators pick the most profitable block from these builders via relays, and the relay sits between the builder and the validator as an intermediary.
+
+This architecture is efficient for MEV extraction. It is also a centralization point. A builder can refuse to include specific addresses or transaction types. A relay can enforce filtering policies on behalf of the builders it serves. As of 2024, a large share of Ethereum blocks from major builders filtered transactions touching OFAC-sanctioned addresses. Nothing in the protocol prevents this. Validators can choose to build their own blocks, but the MEV opportunity cost is real.
+
+FOCIL directly targets this gap.
+
+## How FOCIL's Inclusion List Committee Works
+
+FOCIL introduces a committee of validators whose job is to submit transactions from the public mempool that a block *must* include. The mechanism has three moving parts.
+
+**The IL Committee.** At the start of each slot (slot N), 16 validators are selected at random to serve as Inclusion List committee members. Each member independently samples the public mempool and publishes a signed Inclusion List containing transactions they believe should be in the next block.
+
+**The Inclusion Obligation.** The block proposer for slot N+1 must embed the transactions from all published IL entries into the execution payload before broadcasting the block. This is not advisory — it is a consensus rule enforced by the fork-choice.
+
+**The Enforcement Mechanism.** Attesters verify that the block satisfies the IL conditions before voting. If the block omits IL-required transactions without valid justification, attesters refuse to vote for it. A block without sufficient attestations cannot become canonical.
+
+The key property: only 1 of the 16 IL committee members needs to be non-censoring for the mechanism to protect the transaction in question. An honest minority is sufficient.
+
+## Technical Parameters and the Slot Timeline
+
+The FOCIL spec defines concrete parameters that bound the system's behavior:
+
+| Parameter | Value |
+|-----------|-------|
+| `IL_COMMITTEE_SIZE` | 16 validators per slot |
+| `MAX_BYTES_PER_INCLUSION_LIST` | 8,192 bytes per member |
+| Total maximum IL data per slot | 128 KB |
+
+The timeline within each slot matters:
+
+```
+Slot N  [0s–8s]:   Committee members build ILs from the public mempool and gossip them
+Slot N  [9s+]:     Validators freeze their IL view — no new ILs accepted from prior slot
+Slot N+1 [0s]:     Proposer builds block, embeds IL transactions in execution payload
+Slot N+1 [4s]:     Attestation deadline — attesters check IL compliance before voting
+```
+
+Two new P2P topics are introduced: a global gossip topic for committee members to broadcast signed ILs, and an RPC topic for validators to request specific ILs by committee index.
+
+There is a conditional inclusion exception: a proposer may omit a transaction from an IL if the block is already full (gas constraints) or if the committee member who submitted it was observed equivocating. This prevents adversarial committee members from griefing proposers with malformed or unexecutable transactions.
+
+## What dApp Developers Should Know About Hegota
+
+For most developers, FOCIL's impact is subtle but meaningful in production environments.
+
+**Stronger inclusion guarantees for mempool transactions.** After Hegota, a valid transaction in the public mempool has a structural guarantee: at least one of 16 randomly selected validators per slot will observe it and list it for inclusion. A builder cannot silently exclude it by omission — doing so means the block won't pass attestation. For applications that depend on timely execution — liquidation protocols, oracle updates, bridge relays, governance execution — this removes a meaningful category of production failure.
+
+**Private order flow is not covered.** FOCIL protects only transactions in the public mempool. Transactions routed through private channels (MEV Boost bundles, private RPC endpoints) don't appear in the public mempool and won't be seen by IL committee members. If your protocol routes transactions privately for MEV protection, FOCIL provides no additional guarantee for those transactions.
+
+**The 8 KB per member cap matters for large payloads.** Each committee member's IL is bounded at 8,192 bytes. Very large transactions or transactions accompanied by heavy calldata may not fit into ILs, especially in busy blocks. This is unlikely to affect typical ERC-20 transfers or swaps, but worth knowing if your protocol uses large calldata payloads.
+
+**Local test environments remain unaffected.** Anvil and Hardhat nodes have no IL committee. In fork testing, your transactions are included deterministically without any FOCIL dynamics. After Hegota, real-world inclusion behavior will diverge from local test behavior in subtle ways — particularly for scenarios involving transaction ordering and timed inclusion. When you write E2E wallet tests with `@avalix/chroma`, your local Anvil test node will continue to include transactions instantly and without IL overhead, while mainnet gains this additional inclusion layer.
+
+**What you do not need to change.** FOCIL is entirely at the consensus and client layer. Your Solidity code, deployment scripts, and dApp frontend are unchanged. No new opcodes, no new transaction types, no migration required. The change is in who can stop your transaction from reaching a block — and after Hegota, the answer becomes a much harder problem for any single actor.
