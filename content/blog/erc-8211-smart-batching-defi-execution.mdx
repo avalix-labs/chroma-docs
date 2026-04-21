@@ -1,0 +1,66 @@
+---
+title: "ERC-8211: How Ethereum's Smart Batching Standard Solves Multi-Step DeFi Execution"
+description: "ERC-8211 introduces runtime parameter resolution for multi-step DeFi batches — no more cascading reverts when swap outputs don't match deposit inputs."
+date: 2026-04-18
+author: Chroma Team
+---
+
+One common frustration in DeFi: you bundle a swap and a supply into a single transaction, sign it, and it reverts because the actual swap output was three wei short of the hardcoded deposit amount. The swap settled. The deposit failed. The batch collapsed.
+
+This is the fundamental problem ERC-8211 addresses. Published April 6, 2026, by Biconomy with Ethereum Foundation backing, it introduces a batch encoding standard where transaction parameters are resolved on-chain at execution time — not frozen at signing. Here is how it works and what it changes for developers building complex DeFi flows.
+
+## Why Static Batching Fails Multi-Step DeFi Flows
+
+Every Ethereum transaction is structurally a single function call. ERC-4337 and EIP-5792 extended this with batch execution — multiple calls under one signature — but the core limitation remained: every parameter is static. Calldata is frozen when you build the transaction.
+
+That works for simple transfers. It breaks for multi-step DeFi operations where step B depends on step A's output:
+
+- A swap returns 2,498.3 USDC. Your deposit was hardcoded for 2,500 USDC. The batch reverts.
+- A vault withdrawal returns a variable share amount. The bridge transaction expecting an exact input fails.
+- You want to "supply all WETH I receive from this swap to Aave." Static batching cannot express "all WETH I receive" — you have to guess.
+
+The standard workaround is deploying a custom intermediary contract that reads live state and mediates between steps. ERC-8211 eliminates that requirement entirely.
+
+## How ERC-8211 Resolves Parameters at Runtime
+
+ERC-8211 defines a batch encoding format where each parameter carries two orthogonal declarations: **how to obtain the value** (fetcher type) and **where to route it** (call target, ETH value, or calldata).
+
+Three fetcher types are defined:
+
+- **RAW_BYTES** — literal values encoded at construction time, for parameters you know in advance
+- **STATIC_CALL** — reads any on-chain state at execution time: oracle prices, allowances, balances, arbitrary view functions
+- **BALANCE** — queries an ERC-20 or native token balance immediately before the call executes
+
+Instead of hardcoding `supply(50e6)`, you write `supply(BALANCE(USDC))`. The execution engine queries the actual USDC balance at that point in the batch and uses whatever it finds. No estimation. No rounding error.
+
+A TypeScript SDK compiles high-level flows into the batch encoding:
+
+```typescript
+const batch = smartBatch([
+  swap({ from: WETH, to: USDC, amount: fullBalance() }),
+  predicate({ balance: gte(USDC, account, 2500e6) }),
+  supply({ protocol: "aave", token: USDC, amount: fullBalance() }),
+])
+```
+
+The second entry is a predicate — no external call, just a constraint check. If the USDC balance after the swap falls below 2,500 USDC due to slippage or MEV, the entire batch reverts before the supply fires.
+
+## Predicate Assertions as On-Chain Safety Guards
+
+The predicate system is one of ERC-8211's more useful features for production DeFi flows. An entry with `target = address(0)` executes no call — it acts as a pure boolean gate on chain state. If the condition fails, the batch reverts entirely.
+
+Supported predicates: `GTE` (≥), `LTE` (≤), `EQ` (=), and `IN` (set membership). These compose with AND logic — if any predicate fails, the batch stops. The intentional constraints (no OR logic, no dynamic arrays, no reentrancy) keep batches statically analyzable by wallets and block explorers without requiring a simulation step.
+
+For a leverage loop, a predicate like "WETH balance must remain above 1.5 ETH after this step" protects against conditions that would leave the account underwater. The guard lives in the batch encoding itself — no separate contract deployment, no off-chain keeper.
+
+The standard also includes a shared Storage contract with per-account namespacing and EIP-1153 transient storage support, so output values from one batch entry can feed into subsequent entries or even a separate UserOperation in the same session.
+
+## What ERC-8211 Means for Your dApp
+
+ERC-8211 is a contract-layer encoding, not a protocol fork. It works as an ERC-7579 executor module, an ERC-6900 plugin, a native smart account method, or an ERC-7702 delegation target for EOA upgrades. No migration required for accounts already using ERC-4337 or EIP-5792.
+
+For developers building multi-step DeFi flows, the practical shift is that complex sequences — swap-then-supply, withdraw-bridge-deposit, leverage loops — can now be expressed without custom intermediary contracts. The batch itself handles parameter resolution and safety gates.
+
+From a testing standpoint, ERC-8211 batches change the wallet interaction pattern in a way worth noting. A three-step DeFi sequence that previously required two or three separate user confirmations now surfaces as a single transaction confirmation in MetaMask. If you are testing these flows end-to-end with `@avalix/chroma`, your test calls `metamask.confirm()` once for the entire batch rather than once per step — which means your assertions around intermediate UI states (loading spinners, step progress indicators) carry more weight than before, since the user has no opportunity to re-evaluate at each step boundary.
+
+ERC-8211 remains a draft standard as of this writing. Wallet and protocol adoption will determine how quickly this encoding becomes idiomatic. But the problem it addresses — static parameters failing against dynamic on-chain state — is real and persistent, and the encoding design is practical: it covers the majority of production DeFi flows without the complexity that would slow adoption.
