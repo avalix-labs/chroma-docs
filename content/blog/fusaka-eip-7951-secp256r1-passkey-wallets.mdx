@@ -1,0 +1,115 @@
+---
+title: "EIP-7951 and Ethereum's Fusaka Upgrade: Passkey Wallets Are Now First-Class on L1"
+description: "EIP-7951 in Fusaka adds P-256 signature verification to Ethereum L1 at 6,900 gas, making passkey wallets viable without L2 workarounds."
+date: 2026-04-22
+author: Chroma Team
+---
+
+Fusaka shipping in December 2025 generated coverage focused almost entirely on PeerDAS and cheaper L2 transactions. That change matters — but there is a quieter one in the same upgrade that matters more if you are building wallets or smart accounts: **EIP-7951**, a new precompile at address `0x100` that verifies secp256r1 (P-256) signatures natively on Ethereum mainnet for the first time.
+
+P-256 is the curve behind Apple Secure Enclave, Android Keystore, YubiKeys, and FIDO2/WebAuthn credentials — the same hardware that generates passkey signatures on every modern phone and laptop. Before Fusaka, verifying one of these signatures in Solidity cost hundreds of thousands of gas because the EVM had no native shortcut. After Fusaka, it costs **6,900 gas**. That gap is large enough to change what is architecturally possible.
+
+## Why P-256 Verification Was Expensive Before EIP-7951
+
+Ethereum's native cryptography is built around secp256k1 — the curve behind `ecrecover`. P-256 (secp256r1) is a different curve, standardized by NIST and widely adopted in hardware security chips because of its FIPS certification. The EVM had no native path to verify it.
+
+A pure-Solidity P-256 verifier using elliptic curve arithmetic costs 300,000–500,000 gas. That is roughly 10–17x the cost of a typical ETH transfer, which makes it impractical as a per-transaction authentication mechanism on L1.
+
+L2s solved this earlier. RIP-7212 — the Rollup Improvement Proposal variant — deployed P-256 verification as a precompile on Base, Optimism, and other rollups at 3,450 gas. If you have built passkey-based accounts on those chains, you have been using RIP-7212. EIP-7951 brings equivalent functionality to mainnet, with a higher gas cost reflecting mainnet benchmarking and with proper security fixes that were missing in the original RIP spec — specifically, point-at-infinity checks and correct modular comparisons during signature validation.
+
+## How the EIP-7951 Precompile Works
+
+The precompile lives at `0x100` and accepts a fixed 160-byte input:
+
+```
+msg_hash  [32 bytes]  — the message digest that was signed
+r         [32 bytes]  — signature component
+s         [32 bytes]  — signature component
+qx        [32 bytes]  — signer public key, x-coordinate
+qy        [32 bytes]  — signer public key, y-coordinate
+```
+
+It returns 32 bytes: `0x0000...0001` if the signature is valid, or empty bytes if invalid or if the inputs are malformed. Calling it from Solidity follows the standard precompile pattern:
+
+```solidity
+function verifyP256(
+    bytes32 hash,
+    bytes32 r,
+    bytes32 s,
+    bytes32 qx,
+    bytes32 qy
+) internal view returns (bool) {
+    bytes memory input = abi.encodePacked(hash, r, s, qx, qy);
+    (bool success, bytes memory result) = address(0x100).staticcall(input);
+    if (!success || result.length == 0) return false;
+    return abi.decode(result, (uint256)) == 1;
+}
+```
+
+The call costs a flat 6,900 gas. There is no dynamic component based on input values. On a chain with a 60M gas limit (the new Fusaka default), you could in principle verify roughly 8,600 P-256 signatures per block — enough to support meaningful authentication throughput in contracts.
+
+## Building a Passkey-Backed Smart Account
+
+The practical authentication pattern for passkey accounts has three steps.
+
+**Registration.** When a user sets up their account, the device generates a P-256 key pair inside the secure enclave. Your dApp receives the public key coordinates and stores them in the smart account's storage.
+
+**Signing.** When the user initiates a transaction, the dApp calls `navigator.credentials.get()` with the transaction hash as the challenge. The device signs the hash using the key stored in the enclave — no seed phrase, no browser extension. The response includes the `r` and `s` signature components.
+
+**Verification.** The smart contract calls `0x100` with the signature and stored public key. If the check passes, the transaction executes.
+
+```solidity
+contract PasskeyAccount {
+    bytes32 public pubKeyX;
+    bytes32 public pubKeyY;
+    uint256 public nonce;
+
+    constructor(bytes32 qx, bytes32 qy) {
+        pubKeyX = qx;
+        pubKeyY = qy;
+    }
+
+    function execute(
+        address target,
+        bytes calldata data,
+        bytes32 r,
+        bytes32 s
+    ) external {
+        bytes32 txHash = keccak256(abi.encode(target, data, nonce));
+        require(verifyP256(txHash, r, s, pubKeyX, pubKeyY), "invalid signature");
+        nonce++;
+        (bool success,) = target.call(data);
+        require(success, "call failed");
+    }
+
+    function verifyP256(
+        bytes32 hash, bytes32 r, bytes32 s, bytes32 qx, bytes32 qy
+    ) internal view returns (bool) {
+        (bool ok, bytes memory result) = address(0x100).staticcall(
+            abi.encodePacked(hash, r, s, qx, qy)
+        );
+        return ok && result.length > 0 && abi.decode(result, (uint256)) == 1;
+    }
+}
+```
+
+This pattern is also the verification engine EIP-8141 Frame Transactions rely on for their "native P256 accounts" in the Hegotá upgrade — where accounts derived from P-256 key pairs can authorize frame transactions without deploying any custom contract. The precompile EIP-7951 brought to L1 in Fusaka is the foundation for what EIP-8141 makes protocol-native.
+
+Production passkey accounts need more than this sketch — replay protection that includes the chain ID, signature malleability handling, and a recovery mechanism for lost credentials. But the core verification step is genuinely this simple.
+
+## What This Changes for dApp Testing
+
+Passkey wallets introduce a different testing surface than MetaMask or other browser extension wallets. The signing step does not happen in an extension popup — it happens via the browser's `navigator.credentials.get()` API, which calls into the OS-level credential store. There is no extension to automate.
+
+For E2E testing purposes, this means the typical pattern — wait for the wallet popup, call an API to confirm — does not transfer directly. Testing passkey wallet flows requires either:
+
+- Using the browser's WebAuthn testing APIs (Chromium's `VirtualAuthenticatorManager` via DevTools Protocol) to inject a software authenticator, or
+- Intercepting `navigator.credentials` at the JavaScript level before the call reaches the browser API
+
+@avalix/chroma handles MetaMask's extension-based transaction and signing flows today. The underlying principle — test real credential flows rather than mocking the signing step — applies equally here. A mocked WebAuthn response will not tell you whether your dApp handles `NotAllowedError` (the user dismisses the OS dialog), nor will it reveal timing bugs between the credential request and the UI's loading state.
+
+As passkey wallets grow more common following EIP-7951, the tooling for testing them will mature in the same direction wallet E2E testing has: away from mocks, toward real browser credential flows with controlled test identities.
+
+---
+
+EIP-7951 has been live for four months. If you are building smart accounts, wallet infrastructure, or any system that verifies user identity on-chain, the `0x100` precompile is worth incorporating before EIP-8141 ships in Hegotá and raises expectations for what L1 accounts can do natively.

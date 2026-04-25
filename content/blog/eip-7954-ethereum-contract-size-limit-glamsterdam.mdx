@@ -1,0 +1,55 @@
+---
+title: "Ethereum's Contract Size Limit Is Growing: What EIP-7954 Changes for Developers"
+description: "EIP-7954 raises Ethereum's 24KiB contract size limit to 32KiB in Glamsterdam. Why the limit exists, what workarounds it forces, and what changes."
+date: 2026-04-23
+author: Chroma Team
+---
+
+The 24,576-byte (24KiB) contract size limit has been a recurring frustration in Solidity development since 2016. If you have built anything complex — a DeFi protocol with governance, a multisig with recovery logic, an NFT contract with royalty splitting — you have probably bumped into it. Not always at compile time. Sometimes only after you add a new feature, tighten an internal library, or try to ship a security patch.
+
+EIP-7954, currently prioritized for Ethereum's Glamsterdam upgrade, proposes the most direct fix: raise the limit from 24KiB to 32KiB. No gas metering changes, no new opcodes. Just more room.
+
+## Why the 24KiB Limit Exists
+
+EIP-170, introduced in the Spurious Dragon hard fork in November 2016, set the contract code size cap at 24,576 bytes. The motivation was DoS resistance: without a limit, an attacker could deploy arbitrarily large contracts and force nodes to load and preprocess megabytes of bytecode during `CREATE` calls. The 24KiB value was conservative by design — a reasonable ceiling for the contracts being written at the time, with enough headroom to catch abuse.
+
+The problem is that Ethereum has gotten more complex and so have its contracts. The same 24KiB cap that was spacious in 2016 now constrains patterns that teams genuinely need: multi-permission access control, cross-chain bridging logic, complex DeFi vault mechanics. The limit hasn't changed since Spurious Dragon. The ecosystem around it has.
+
+## How Developers Work Around It Today
+
+There are four common strategies, each with tradeoffs:
+
+**Proxy patterns (UUPS, transparent proxy)**: Separate storage from logic. The proxy stays small and holds state; the implementation contract holds logic. Useful for upgradeability, but every cross-contract call adds gas, and debugging delegated execution paths is harder than debugging a single contract.
+
+**External libraries**: Move shared functions into a deployed library referenced via `DELEGATECALL`. Reduces the main contract's bytecode, but library deployment is a separate step and the split introduces another address dependency.
+
+**Diamond pattern (EIP-2535)**: Route function calls to multiple "facets," each a separate contract. Effectively removes the size ceiling by splitting functionality across as many facets as needed. Powerful, but requires custom tooling to manage facet routing and adds significant deployment overhead.
+
+**Feature reduction**: The least architectural answer — strip functionality to stay under the limit. Teams have shipped worse interfaces or cut planned features because the alternative was redesigning contract architecture from scratch.
+
+The overhead is not abstract. Real protocols have paid for it: Aave's gateway contracts, Origin Protocol's vault, Alchemix's rebasing token logic — all required workarounds purely because of the 24KiB ceiling, not because the underlying design was wrong. Each workaround adds deployment complexity, and each `DELEGATECALL` boundary is a potential attack surface if access control is misapplied.
+
+## What EIP-7954 Actually Changes
+
+EIP-7954 makes two numeric changes:
+
+- Contract code size limit: **24KiB (0x6000 bytes) → 32KiB (0x8000 bytes)**
+- Initcode size limit: **48KiB → 64KiB**
+
+That is the full spec. No new gas schedule, no progressive cost for larger contracts, no new opcodes. The change is backward compatible: every contract deployed before activation continues to work exactly as before. Only contracts between 24KiB and 32KiB become newly deployable after the Glamsterdam hard fork.
+
+It is worth knowing the competing proposal: EIP-7907 targets a larger increase to 64KiB, but pairs it with a gas metering surcharge of 2 gas per 32-byte word for code above the existing 24KiB threshold. The Ethereum Foundation's Checkpoint #9 blog (April 2026) notes that EIP-7954 is the one gaining traction for Glamsterdam, most likely because the simpler change is easier to implement and reason about across all clients simultaneously.
+
+The 8KiB gain may sound modest. In practice, it is the difference between shipping a feature and restructuring your entire contract layout. Most contracts that hit the ceiling are bumping against it by a few hundred to a few thousand bytes — not megabytes. For those teams, 32KiB is enough to ship without the split.
+
+## What to Reconsider After Glamsterdam Ships
+
+The limit increase does not eliminate proxy patterns — upgradeability is still valuable independent of size constraints. What changes is the reason for choosing them.
+
+Contracts currently split *only* because of the 24KiB ceiling are candidates for consolidation after Glamsterdam. Fewer contracts means fewer deployment steps, fewer cross-contract gas costs, and a smaller attack surface. Contracts split for genuine architectural reasons — modular upgrade paths, separate permission domains, pluggable logic — still benefit from proxies and the Diamond pattern. EIP-7954 removes the constraint that forced some teams into complex patterns before they were actually ready for that complexity.
+
+One audit worth doing before the upgrade lands: any contract that uses a size-driven proxy but has `address(this)` assumptions baked into logic. If you consolidate post-Glamsterdam, those assumptions change and may produce subtle bugs.
+
+Code size optimizations — tight packing, shorter error strings, removing redundant checks — are still worth doing. A smaller contract costs less gas to deploy and is easier to reason about. But starting from "how do I fit this in 24KiB" will no longer be the first question in your design process.
+
+If you are testing contracts that currently span multiple facets or proxy layers, your `@avalix/chroma` end-to-end tests will keep working after consolidation — just update the contract address references in your test fixtures to reflect the new single-contract deployment.

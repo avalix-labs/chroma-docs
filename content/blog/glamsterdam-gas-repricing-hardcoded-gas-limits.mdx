@@ -1,0 +1,81 @@
+---
+title: "Glamsterdam's Gas Repricing: Why Your Hardcoded Gas Limits Are About to Break"
+description: "Glamsterdam's gas repricing EIPs change costs for DIV, KECCAK256, calldata, and nested storage. Here's what to audit before the upgrade ships."
+date: 2026-04-24
+author: Chroma Team
+---
+
+Most Glamsterdam coverage focuses on the big architectural changes: EIP-7732's enshrined proposer-builder separation and EIP-7928's block-level access lists for parallel execution. Those are the headliners. But there's a set of repricing proposals — currently under active consideration for Glamsterdam — that will affect everyday Solidity code more directly than either of those. The gas schedule for opcodes and calldata is being recalibrated across the board.
+
+Some operations get 2–3x more expensive. Some patterns that are currently expensive become cheaper. And contracts that hardcode gas amounts for subcalls — a pattern that still exists in production code — are at direct risk of breaking silently.
+
+## Why Ethereum's Gas Schedule Needs Recalibrating
+
+Ethereum's gas prices were set in 2015, benchmarked against hardware from that era. As clients have been rewritten in faster languages, node hardware has improved, and the gas limit has risen significantly — the relationship between gas cost and actual computational cost has drifted.
+
+EIP-7904 makes this concrete by benchmarking 13 underpriced compute operations against a target of 60 million gas per second. If an operation takes 3x longer to execute than its gas cost implies, it can slow down nodes disproportionately — a DoS vector that becomes more accessible as the gas limit rises. With Glamsterdam targeting a roughly 3x increase in the block gas budget, leaving underpriced operations alone is not neutral; it makes them attack surface.
+
+The fix across the repricing bundle is recalibration: price operations closer to what they actually cost nodes to execute, while simultaneously changing the block gas limit so the net cost to users can stay flat or fall.
+
+## What Gets More Expensive
+
+**Compute operations (EIP-7904)**
+
+The repricing targets operations that benchmark below the 60Mgas/second threshold:
+
+| Opcode | Current | Proposed | Change |
+|--------|---------|----------|--------|
+| `DIV` | 5 gas | 15 gas | 3x |
+| `SDIV` | 5 gas | 20 gas | 4x |
+| `MOD` | 5 gas | 12 gas | 2.4x |
+| `KECCAK256` (base) | 30 gas | 45 gas | 1.5x |
+| `ECADD` precompile | 150 gas | 314 gas | 2x |
+
+For most contracts, these changes are negligible — the affected opcodes represent a small fraction of total gas in typical DeFi calls. But contracts that use `KECCAK256` heavily in loops (Merkle proof verifiers, hash-based data structures, commitment schemes) will see measurable increases. Contracts doing repeated integer division in financial calculations — price normalization, fee computation across many iterations — should be profiled against the new schedule.
+
+The higher-priority risk is hardcoded gas forwarding. EIP-7904's specification explicitly warns: contracts that pass a fixed gas amount to a subcall may revert if the new opcode costs exceed that limit. The `transfer()` and `send()` 2300-gas stipend is the well-known example — deprecated for exactly this reason. But the same pattern appears in less obvious forms: any `call{gas: CONSTANT}(...)` in your codebase is a potential breakage point after this upgrade.
+
+**Calldata costs (EIP-7976)**
+
+EIP-7976 raises the calldata floor cost introduced by EIP-7623:
+
+- Zero bytes: 10 → 15 gas (50% increase)
+- Non-zero bytes: 40 → 60 gas per byte (50% increase)
+
+This floor applies specifically to data-heavy transactions. For standard DeFi operations — token transfers, swaps, deposits — the impact is minimal; those transactions aren't hitting the calldata floor. For protocols that submit large calldata payloads (L2 data submission before EIP-4844 migration, contracts receiving large encoded arrays, or any flow that passes substantial off-chain data on-chain), the cost increase is material.
+
+**Storage and state creation (EIP-8032, EIP-8037)**
+
+EIP-8032 introduces depth-based pricing for storage writes: deeply nested storage structures cost exponentially more. Contracts using complex nested mappings or deep Merkle tree storage layouts will see this more than flat key-value stores.
+
+EIP-8037 raises state creation costs approximately 10x. `CREATE` and `CREATE2` operations become significantly more expensive — a relevant number for factory patterns and proxy deployments that generate many contracts on the fly.
+
+## What Gets Cheaper or More Predictable
+
+Not all repricing moves upward.
+
+**Memory costs (EIP-7923)**
+
+The current quadratic memory expansion model makes large in-memory allocations expensive in a non-linear way that's hard to predict or optimize for. Using 64KB of memory today costs 14,336 gas. That cost penalizes contracts that need to assemble byte arrays, encode large structs, or do work entirely in memory — so compilers work around it rather than using memory efficiently.
+
+EIP-7923 replaces this with a linear, page-based model. Memory is priced per page rather than quadratically. The practical effect: memory-intensive operations become meaningfully cheaper at moderate to large sizes, and the cost is predictable rather than curve-dependent. Solidity and Vyper can also start implementing more efficient memory allocators once the gas model doesn't penalize them for it.
+
+**Intrinsic transaction costs (EIP-2780)**
+
+EIP-2780 lowers the base transaction cost (the fixed 21,000 gas overhead) while adding a small fee for ETH transfers that create new accounts. For the common case — calls to existing contracts — simple EVM interactions get a slight base cost reduction.
+
+## What to Audit Before Glamsterdam Ships
+
+These EIPs are in "Considered for Inclusion" status — not all are finalized for Glamsterdam. The upgrade is targeting H1 2026, with a realistic possibility of slipping to Q3. That window is the right time to review your contracts.
+
+**Fixed-gas subcall forwarding.** Any `call{gas: SOME_CONSTANT}(...)` pattern is a breaking risk. Replace with forwarding `gasleft()` minus an overhead buffer, or let the callee revert on its own. The Solidity docs have recommended against fixed-gas forwarding since the 2300-stipend issue surfaced — EIP-7904 is another reason to clean it up now.
+
+**KECCAK256 in loops.** If your contract verifies Merkle proofs, hashes storage keys iteratively, or repeatedly hashes function selectors, profile it against the proposed 45-gas base cost. A proof verifier running 30 hashes per call sees the KECCAK256 base cost go from 900 to 1,350 gas just on the base — additional per-word costs apply on top.
+
+**Calldata-heavy encodings.** If your dApp sends large payloads in calldata (not blobs), model EIP-7976's 50% floor increase against your typical transaction data sizes.
+
+**Factory patterns.** If you deploy contracts via `CREATE2` in normal user flows — minimal proxies, per-user vaults, any factory pattern — EIP-8037's state creation cost increase changes the economics materially. Consider whether pre-deployment or singleton patterns reduce your exposure.
+
+**Gas estimation in tests.** If you're running E2E tests against an Anvil mainnet fork, your fork inherits the gas schedule at the fork block. After Glamsterdam activates, tests should fork from a post-activation block to get accurate gas estimates — otherwise wallet UI assertions about gas costs (useful to test with @avalix/chroma or similar tooling) will be based on a stale schedule.
+
+The repricing doesn't make the EVM uniformly more expensive. The block gas budget is rising at the same time, and base fees are expected to fall on net. But that's a macro statement — it does not protect individual contracts with fixed gas assumptions from breaking. The audit is worth doing before devnets reveal the incompatibilities in your production code.
