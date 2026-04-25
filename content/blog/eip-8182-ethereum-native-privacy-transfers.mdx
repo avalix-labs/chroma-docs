@@ -1,0 +1,65 @@
+---
+title: "EIP-8182: Ethereum Is Getting a Native Privacy Layer — Here's What Developers Need to Know"
+description: "EIP-8182 proposes a native shielded pool and ZK precompile for Ethereum. Here's how the architecture works and what it means for dApp developers."
+date: 2026-04-25
+author: Chroma Team
+---
+
+Ethereum has had privacy tools for years — Tornado Cash, Railgun, Aztec — but they've always been application-layer contracts competing with each other, each managing its own state, using different proof systems, and requiring users to trust a specific protocol rather than the base chain. A new draft EIP changes that assumption.
+
+EIP-8182, published on April 24, 2026, proposes embedding a shared shielded pool and a ZK proof-verification precompile directly into the Ethereum protocol. If adopted, private ETH and ERC-20 transfers would become a native capability, not an opt-in application. Here is what the proposal actually contains and what it changes for developers.
+
+## Why Application-Layer Privacy Has Always Been Fragmented
+
+The core problem with existing privacy solutions is state isolation. Tornado Cash managed its own anonymity set. Railgun has its own. A user who deposits into Tornado Cash gains privacy only within that pool — they cannot privately interact with Uniswap or Aave without de-anonymizing themselves at the protocol boundary.
+
+The result for developers is a forked UX problem: you can build a private transfer flow, or you can build a DeFi integration, but combining them creates a bridge that breaks privacy at the seam.
+
+EIP-8182's answer is a single unified pool deployed as a system contract at a fixed address, managing a shared note-commitment tree and nullifier set. All privacy activity across compatible dApps shares the same anonymity set. A deposit made through one protocol is indistinguishable from a deposit made through another — which is the point.
+
+## How the Shielded Pool System Contract Works
+
+The system contract manages four components:
+
+- **Note-commitment tree**: records that a private note (a shielded balance) exists, without revealing who holds it or how much it contains.
+- **Nullifier set**: marks notes as spent. When you withdraw, a nullifier is published on-chain — it proves the spend occurred without linking back to the original deposit.
+- **Authorization policy registry**: allows users to register custom authentication schemes — ECDSA, passkeys, multisig — without a protocol upgrade.
+- **Delivery-key registry**: handles encrypted note delivery so recipients can detect incoming private funds.
+
+The verification model uses a recursive circuit architecture. An outer circuit, managed by the protocol, enforces invariants — value conservation, Merkle membership, and nullifier derivation. Inner circuits handle authentication and intent parsing, and can be registered by anyone. The outer circuit recursively verifies the inner ones.
+
+This split means adding a new authentication method like hardware passkeys does not require a hard fork. Users register a new inner circuit; the pool contract stays unchanged. The contract has no admin key and no on-chain upgrade path — changes to the outer circuit require hard forks, which is intentional. It makes the pool's behavior predictable and prevents governance capture.
+
+## The Atomic Privacy Flow: De-sensitize, Interact, Re-shield
+
+The most practically useful feature for dApp developers is the atomic de-sensitization → interaction → re-privatization flow.
+
+A user can deposit into the shielded pool, use those private funds to call a public contract such as Uniswap, and re-shield the resulting tokens — all in a single atomic transaction. No intermediate exposed balance. No separate approval or withdrawal step.
+
+This changes what is possible in private DeFi. Instead of privacy being a wrapper you add at the edges of a flow, it becomes something you can thread through the middle of it. A swap, a yield deposit, or an NFT purchase can all happen without the intermediate balance ever appearing as a plaintext entry in the public state.
+
+For developers building interfaces over these flows: the user's wallet will present a single transaction confirmation for what was previously a multi-step manual process. If you are writing E2E tests for a dApp that integrates with the shielded pool, the wallet confirmation step works like any other transaction — `@avalix/chroma` can drive the confirmation through MetaMask as normal, but you will also need to account for the client-side latency of ZK proof generation before the transaction is submitted to the mempool.
+
+## What EIP-8182 Does Not Solve
+
+The EIP is explicit about its scope. Protocol-level privacy from the shielded pool does not protect against:
+
+**Mempool observation.** Transactions appear in the public mempool before inclusion. Even if the ZK proof hides amounts and recipients, timing patterns, gas usage, and the calling address can leak information before a block is produced.
+
+**Network anonymity.** Your IP and node identity remain visible to peers. The EIP does not touch the p2p layer. Users who need network-level privacy need Tor, a trusted relay, or private mempool submission separately.
+
+**Wallet UX.** Existing wallets like MetaMask have no native understanding of shielded pool interactions. The EIP defers wallet integration entirely to the application layer.
+
+This scope is intentional — solving all three layers in a single EIP would produce an enormous attack surface and make coordination nearly impossible. But it means that "private transfers via EIP-8182" is not a complete privacy solution out of the box. The gaps are real and developers need to handle them explicitly.
+
+## Status and What to Watch
+
+EIP-8182 is a draft. No upgrade target has been assigned. Open questions the community is actively debating:
+
+**Prover trust.** The client generates a ZK proof before broadcasting a transaction, but proving services have access to sensitive inputs. How does a user verify that their proving service cannot observe private values? A lightweight attestation framework has been proposed but not standardized.
+
+**State growth.** Nullifiers and commitment leaves accumulate permanently. The proposal has not yet been stress-tested at realistic usage volumes — numbers for what ten thousand private transfers per day would cost in state growth have not been published.
+
+**Post-quantum readiness.** The outer circuit currently relies on elliptic curves. Replacing it with a post-quantum proof system requires a hard fork, which some community members argue should be addressed at the design stage rather than deferred.
+
+EIP-8182 is the most coherent protocol-level privacy proposal Ethereum has produced. If you are building privacy-adjacent features, the shared anonymity set and atomic flow model are worth understanding now — even at draft stage, the architecture is likely to influence how privacy tooling evolves on EVM chains in the near term.
