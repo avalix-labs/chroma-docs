@@ -1,0 +1,72 @@
+---
+title: "EIP-8182: How Ethereum's Proposed Native Privacy Pool Works for Developers"
+description: "EIP-8182 proposes a native shielded pool and ZK precompile for Ethereum. Here's how the architecture works and what it means for dApp developers."
+date: 2026-04-30
+author: Chroma Team
+---
+
+Privacy on Ethereum has always been an application-layer concern. Protocols like Tornado Cash and its successors deploy their own contracts, manage separate state trees, and maintain isolated anonymity sets. Effective privacy requires opting into a specific third-party system — and the more fragmented that opt-in is, the smaller the anonymity set each user hides in.
+
+EIP-8182, a draft proposal published in late April 2026, changes the model. It introduces a shielded pool as a protocol-managed system contract deployed at a fixed address, paired with a new ZK proof verification precompile at the Ethereum protocol layer. Private ETH and ERC-20 transfers would become native to Ethereum — not a third-party protocol you join. The proposal has no upgrade target yet, but the specification is concrete enough to understand what building with it would actually require.
+
+## Why a Shared Shielded Pool Matters for Anonymity
+
+The defining property of EIP-8182 is the shared pool. On standalone privacy protocols, your anonymity set is limited to users who deposited the same denomination into the same pool. The smaller the pool, the weaker the privacy guarantee.
+
+EIP-8182's pool is protocol-level: a single shared pool for all ETH and ERC-20 deposits across Ethereum. If widely adopted, every private transfer hides among the full population of shielded pool users — not just users of one specific application.
+
+The shielded pool system contract at `0x0000000000000000000000000000000000081820` has no admin key, no governance token, and no on-chain upgrade mechanism. It can only change through a hard fork. That removes the trust assumption present in any application-layer privacy protocol where a multisig or DAO can modify parameters.
+
+## The EIP-8182 Architecture: Precompile and Pool Contract
+
+Two components make up the proposal.
+
+**The verification precompile** lives at address `0x30`. It takes an ABI-encoded `(proof, publicInputs)` — a 256-byte Groth16 proof over the BN254 elliptic curve and a 21-field public inputs struct — and returns `uint256(1)` on success, `uint256(0)` on any failure. It never reverts. Gas cost: **300,000 gas**. The verification key is pinned at deployment and changes only through a hard fork.
+
+BN254 is the same curve used by Ethereum's existing `ECADD` and `ECMUL` precompiles at `0x06` and `0x07`, and by Groth16-based zkSNARK verifiers already deployed on mainnet today. EIP-8182 doesn't introduce a new curve — it adds a protocol-layer verifier with an immutable, hard-fork-managed key.
+
+**The shielded pool system contract** manages the note commitment tree, nullifier set, and user registry. Core entry points:
+
+```solidity
+// Deposit ETH or ERC-20 tokens into the shielded pool
+function deposit(
+    address token,        // address(0) for native ETH
+    uint256 amount,
+    uint256 ownerCommitment,
+    bytes calldata outputNoteData
+) external payable
+
+// Execute a private transfer (requires a valid Groth16 proof)
+function transact(
+    bytes calldata poolProof,
+    bytes calldata authProof,
+    PublicInputs calldata publicInputs,
+    bytes calldata outputNoteData0
+) external
+
+// Register a hidden owner identifier for your address
+function registerUser(
+    uint256 ownerNullifierKeyHash,
+    uint256 noteSecretSeedHash
+) external
+```
+
+`deposit` takes a standard ERC-20 `token` address (`address(0)` for ETH), an amount, and an `ownerCommitment` — a cryptographic binding between the on-chain deposit and the user's off-chain key material.
+
+`transact` takes two separate ZK proofs. The `poolProof` is a Groth16 proof verified against the pinned key, enforcing the accounting invariants of the pool. The `authProof` is user-selected and can verify any credential — passkeys, hardware tokens, or custom multisig policies. This split means authentication schemes can evolve without a hard fork to the pool contract itself. A dApp could, for example, register an auth policy requiring biometric attestation via the P-256 precompile introduced in EIP-7951, and the pool would verify it without any changes to the pool contract.
+
+## What Building With EIP-8182 Actually Looks Like
+
+**Deposits are a standard wallet interaction.** `deposit()` is a regular on-chain transaction — MetaMask presents it the same way as any ERC-20 transfer. If the deposit involves an ERC-20 token, the flow is `approve → deposit`: two wallet confirmations, identical to any DeFi approval pattern. That's fully testable in your E2E suite today; @avalix/chroma handles the MetaMask confirmation steps for both the approval and the deposit call without any changes.
+
+**Private transfers require off-chain proof generation.** `transact()` includes a Groth16 proof generated off-chain by client-side proving software. Proof generation takes seconds. Your dApp must invoke the prover, wait for completion, then submit the transaction. That async proving step is a dependency that doesn't exist in any standard ERC-20 or ETH transfer flow. If the user closes the tab before proof generation finishes, your UI needs an explicit error and recovery path — not just a loading spinner.
+
+**The 300,000 gas cost is fixed per private transfer.** That's a meaningful base cost — roughly comparable to a complex multi-step DeFi operation — but not prohibitive at Ethereum's current gas limits. For applications that need to batch many private transfers (a payroll contract, a treasury disbursement tool), the per-transfer proving and verification cost needs to be planned for in your architecture from the start.
+
+**Privacy isn't complete at the protocol layer.** The EIP itself is explicit: end-to-end privacy also requires mempool encryption (transactions visible to builders before inclusion), network-layer anonymity (your IP address reveals transaction origin), and wallet UX changes to prevent metadata leakage. EIP-8182 provides the on-chain privacy primitive — it doesn't replace the other layers. Treat it as one component in a larger privacy stack, not a complete solution on its own.
+
+## Where the Proposal Is Now
+
+EIP-8182 is in Draft status as of late April 2026, with no client implementation commitment or upgrade target. The full specification and a reference implementation are available on the Ethereum EIPs repository. No client team has signed off yet, and the proposal has not entered any upgrade's consideration process.
+
+For most teams building on Ethereum today, the takeaway is architectural awareness. The Groth16/BN254 proof scheme, the deposit-and-transact interface, and the split auth-proof model represent patterns that will appear in any serious Ethereum privacy implementation — whether EIP-8182 is the one that ships or a successor that builds on its design.
