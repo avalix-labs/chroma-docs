@@ -1,0 +1,60 @@
+---
+title: "EIP-8182: What Ethereum's Native Privacy Pool Means for dApp Developers"
+description: "EIP-8182 proposes a native Ethereum privacy pool and a generic ZK verification precompile. Here's what the draft means for dApp developers."
+date: 2026-04-30
+author: Chroma Team
+---
+
+On-chain privacy has been an application-layer problem since 2022. After OFAC sanctioned Tornado Cash's smart contracts, most Ethereum privacy tools — Aztec, Railgun, and their successors — moved to more cautious architectures or continued as standalone protocols users have to consciously opt into. The result is fragmentation: no canonical way to send a private transfer, no shared protocol standard, and no reusable ZK verification primitive for applications that want to add zero-knowledge proofs without deploying a custom verifier contract.
+
+EIP-8182, published as a draft on April 24, 2026, is a proposal to change that. It introduces a shared shielded pool as a system contract and a generic ZK verification precompile, both at the Ethereum protocol level. The EIP is early-stage and has not been proposed for inclusion in any hard fork, but the architecture is worth understanding — especially the ZK precompile, which has implications well beyond private transfers.
+
+## Why Application-Layer Privacy Has Structural Limits
+
+When privacy is implemented at the application layer, every protocol makes independent choices: proof systems, note formats, nullifier schemes, key derivation. That works for each protocol in isolation, but creates fragmentation that both developers and users pay for. A private balance in Aztec cannot interact with an Aave position without de-shielding. A Railgun note cannot be used in a contract that expects a standard ERC-20. Private state is siloed per application.
+
+For developers, building privacy-sensitive features today means choosing an application-layer protocol and inheriting all of its trust assumptions — its verifier contracts, its upgrade keys, its governance. There is no shared pool that provides a meaningful anonymity set across applications, and no protocol-level standard to build on.
+
+EIP-8182 proposes to add that standard directly to the Ethereum execution layer, following the model of EIP-4788 (beacon roots) and EIP-4844 (blobs): a system contract at a fixed address, managed through the hard fork process, with no admin key.
+
+## How the Shared Pool Architecture Works
+
+EIP-8182 defines a system contract maintaining four pieces of state:
+
+- **Note-commitment tree** — a Merkle structure where each leaf represents a private note, a record of shielded ETH or ERC-20 tokens owned by a hidden identifier
+- **Nullifier set** — prevents double-spending by tracking which notes have been consumed; once a nullifier is recorded, the corresponding note can never be spent again
+- **Delivery-key registry** — maps ordinary Ethereum addresses and ENS names to hidden owner identifiers, so users receive private transfers without exposing their receiving key on-chain
+- **Authorization policy registry** — allows new authentication circuits to be registered permissionlessly, without waiting for a hard fork
+
+The contract has no proxy and no admin function. Modifications to the system contract itself require a hard fork — the same bar as changing any other Ethereum core primitive.
+
+Users deposit ETH or ERC-20 tokens to create a note in the tree. Withdrawals consume a note and move funds back to a public address. The proposal also supports atomic three-step flows: deposit into the pool, interact with a public protocol, then re-shield the result in a single transaction sequence. A user could, in principle, swap tokens on a public DEX and re-shield the output without leaving a clear on-chain link between their shielded identity and their trading activity.
+
+At 10,000 daily private transfers, the EIP estimates roughly 700 MB of annual state growth — about 1% of overall Ethereum state growth at current rates.
+
+## The ZK Precompile: General-Purpose Infrastructure
+
+The more significant piece for developers who have no interest in private transfers is the ZK verification precompile.
+
+Today, a smart contract that needs to verify a zkSNARK on-chain has two options: deploy a bespoke Solidity verifier contract (expensive to deploy, tightly coupled to one proof system) or use existing precompiles like the BN254 pairing check, which is limited to one elliptic curve. EIP-8182 adds a precompile that accepts a `circuitId` parameter alongside a proof and public inputs, then routes verification to the appropriate verifier. Multiple proof systems can coexist under one interface.
+
+The design uses a recursive outer/inner circuit architecture:
+
+- **Outer circuit** — enforces protocol invariants (value conservation, nullifier uniqueness, Merkle membership). Updated only through hard forks, it defines the trust boundary of the pool.
+- **Inner circuits** — handle user-facing logic: authentication and intent parsing. These can be registered permissionlessly, meaning developers can add support for new authorization methods (ECDSA, passkeys, multisig, or future schemes) without waiting for a consensus change.
+
+The separation matters: a broken inner circuit can only prove false authorization claims — it cannot break the conservation invariants enforced by the outer circuit. The outer boundary is protocol-managed; the inner boundary is open to extension.
+
+For developers building ZK applications outside the privacy context — bridge verifiers, identity attestations, off-chain computation proofs, or on-chain oracle validation — the precompile's `circuitId`-keyed interface reduces per-application deployment overhead. You register a circuit once, call the precompile with your proof, and pay the precompile's gas cost rather than running a custom Solidity verifier.
+
+Gas costs and exact circuit registration interfaces are not yet specified in the current draft.
+
+## What to Track as a Developer
+
+**Smart contract developers**: The generic ZK precompile is the component most likely to affect your contracts even if you have no interest in the privacy pool. If it ships in a future hard fork, it becomes the canonical verification surface for on-chain ZK applications — cheaper and more interoperable than per-application verifier contracts. Bridge protocols and oracle systems that currently maintain custom verifiers should watch the EIP's progress.
+
+**dApp developers**: If your protocol integrates deposit or withdrawal flows for the privacy pool, those involve wallet interactions users are not familiar with. Private transactions are harder to reproduce and debug in production than standard token transfers. Testing these flows end-to-end before release matters — connect, deposit, approve the transfer in MetaMask, verify the note commitment appears. @avalix/chroma covers the full wallet interaction sequence for flows like this, so the test machinery is the same even when the underlying contract is a shielded pool rather than a standard ERC-20.
+
+**Protocol designers**: The delivery-key registry is a new on-chain primitive — privacy-preserving address resolution that maps an ENS name to a hidden receiving identifier. Applications that need to send funds to a recipient without creating a visible link between the sender and the recipient's public address will interact with it. The interface is not stable yet, but the pattern is novel enough to track.
+
+EIP-8182 is a draft with an open specification process. The Ethereum Magicians thread is the active venue for technical discussion, and the proposal is notably narrower than earlier Ethereum privacy proposals — no governance tokens, no admin keys, and a deliberate separation between protocol-managed invariants and permissionless extension. Whether it advances to a hard fork inclusion depends on that community process, but the architecture it describes is a useful lens for thinking about where on-chain ZK infrastructure is heading.
