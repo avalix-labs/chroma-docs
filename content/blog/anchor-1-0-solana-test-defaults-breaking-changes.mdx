@@ -1,0 +1,57 @@
+---
+title: "Anchor 1.0 for Solana Developers: New Test Defaults, Breaking Changes, and What to Migrate First"
+description: "Anchor 1.0 is the first stable release for Solana. Surfpool and LiteSVM become defaults, the TS package is renamed, and the Solana CLI dependency is gone."
+date: 2026-05-04
+author: Chroma Team
+---
+
+Anchor has been the default framework for Solana program development for years, but until now every release was technically pre-1.0 — APIs shifted between 0.29, 0.30, 0.31, and 0.32, and most teams eventually got bitten by a breaking change in a minor version. Anchor 1.0 changes that contract. It is the first stable major release of the framework, and it ships with new test defaults, a renamed TypeScript package, and the removal of the external Solana CLI dependency. If you maintain a Solana program, this is the upgrade where the migration work pays for itself.
+
+## What "first stable" actually means
+
+Anchor 1.0 commits to semantic versioning. Breaking changes land on major versions, not on patches or minor versions — the change most teams have wanted since they first watched a `0.x.y` patch break their build. The Rust crates (`anchor-lang`, `anchor-spl`) and the TypeScript client surface are now clearly separated, and the TS package has been renamed.
+
+The rename is the most disruptive piece for client code. `@coral-xyz/anchor` is now `@anchor-lang/core`:
+
+```ts
+// before
+import { Program, AnchorProvider } from "@coral-xyz/anchor";
+
+// after
+import { Program, AnchorProvider } from "@anchor-lang/core";
+```
+
+IDL types are exported from the new root, so path-based imports like `@coral-xyz/anchor/dist/cjs/idl` need updating too.
+
+## The new test stack: Surfpool and LiteSVM as defaults
+
+This is the change that affects daily workflow most. Pre-1.0, `anchor test` and `anchor localnet` shelled out to `solana-test-validator`, which spins up a full validator process with genesis and ledger directories on disk. It works, but cold starts take seconds and snapshots can be heavy.
+
+Anchor 1.0 makes two changes here:
+
+- **`anchor test` and `anchor localnet` now default to Surfpool**, a drop-in replacement for `solana-test-validator` that mirrors mainnet state without downloading a full snapshot. Cloning specific accounts and programs from mainnet becomes a first-class workflow rather than a script you write yourself.
+- **`anchor init` now uses the LiteSVM test template by default.** LiteSVM runs a Solana VM in-process inside your test runner. There is no validator process, no socket, no `localhost:8899`. The `ProgramTest` you write in Rust (or via the `solders`-based bindings in TS) instantiates the SVM directly, processes instructions, and inspects state — typically in milliseconds per test.
+
+This shift matters because the SVM execution model rewards fast in-process testing. Solana programs are stateless; every account they touch is an explicit input. Remove the validator round-trip and program tests become extremely deterministic and very cheap. A LiteSVM test that builds a versioned transaction with the right accounts, signs it, and asserts on post-execution lamport balances and account data is meaningful coverage — and you can run hundreds per second.
+
+Front-end dApp testing — the Phantom popup, the connect flow, a user signing a versioned transaction in a real browser — is a different layer, and is where a tool like [@avalix/chroma](https://github.com/avalix-labs/chroma) fits alongside LiteSVM rather than replacing it.
+
+## The breaking changes you will trip on first
+
+Aside from the package rename, three changes catch most teams.
+
+**Solana 3.0 SDK upgrade.** Anchor 1.0 pins to Solana 3.0. If your program imports `solana-program` with an older constraint, bump it. Client code picks this up via `@anchor-lang/core` automatically.
+
+**Duplicate mutable accounts are disallowed by default.** If your instruction intentionally takes the same account in two `mut` positions — a pattern that appears in escrow or routing programs — add the new `dup` constraint to opt in. Otherwise the account validator will reject the transaction at runtime.
+
+**`Anchor.toml` cleanups.** The `[registry]` section is removed. Lifecycle hooks are added, so pre-test or post-build commands can live in the manifest instead of a Justfile. The external `solana` CLI dependency is also gone — `anchor` now ships native implementations of `balance`, `airdrop`, `address`, and `deploy`, which shaves real time off CI cold starts.
+
+## `Migration<From, To>`: account schema upgrades
+
+The most quietly useful addition is the `Migration<'info, From, To>` account type. Schema migrations on Solana have always been awkward: when an account's layout changes, existing accounts still serialise with the old layout, and your program either reads garbage or panics. Teams have handled this with versioned discriminators and manual deserialisation branching.
+
+`Migration<From, To>` formalises that pattern. Declare the old and new types in your account context, and Anchor handles the in-place upgrade — reading the old layout, writing the new one, and updating the discriminator atomically within the instruction. That removes a class of subtle bugs around partial writes and discriminator mismatch.
+
+## Where to start
+
+A migration order that works for most teams: bump `anchor-lang` to `1.0`, fix Solana 3.0 import paths, rename `@coral-xyz/anchor` to `@anchor-lang/core` in the client, then evaluate whether your test suite benefits from LiteSVM as the default runner. Surfpool slots in for tests that genuinely need validator behaviour. The breaking changes are real, but the day-to-day developer experience after the upgrade — particularly test feedback time — is meaningfully better than 0.32.
