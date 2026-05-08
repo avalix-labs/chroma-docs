@@ -1,0 +1,84 @@
+---
+title: "Anchor 1.0 Changes How You Test Solana Programs: LiteSVM, Surfpool, and What to Use When"
+description: "Anchor 1.0 replaces solana-test-validator with LiteSVM and Surfpool by default. Here's what changed in Solana program testing and which layer to use when."
+date: 2026-05-08
+author: Chroma Team
+---
+
+Anchor 1.0 shipped on April 2, 2026, and the most consequential change for day-to-day developers is not the framework features — it is the testing stack underneath them. The default `anchor test` command no longer spins up `solana-test-validator`. Instead, Anchor's CLI now reaches for **LiteSVM** for Rust unit tests and **Surfpool** for the integration layer that used to be `solana-test-validator`'s job. If you have a Solana program with a working test suite on Anchor 0.30 or 0.31, those tests will not run unchanged after the upgrade — and the way you reason about Solana program testing speed and realism is different in 1.0 than it was a month ago.
+
+This post walks through what each runtime actually does, why the defaults changed, and how to pick the right layer for a given test.
+
+## What Anchor 1.0 Actually Changes for Testing
+
+Anchor 1.0 is the framework's first stable major release, and the breaking changes around testing are intentional. Three things matter here:
+
+- **No more bundled Solana CLI dependency.** The `anchor` CLI now ships native implementations of `balance`, `airdrop`, `address`, and `deploy`. You no longer need `solana-cli` on your `PATH` for the standard workflow.
+- **LiteSVM is the default Rust test template.** When `anchor init` scaffolds a new project, the generated Rust test file uses `litesvm::LiteSVM` rather than `solana-program-test`.
+- **Surfpool replaces `solana-test-validator` for `anchor test`.** Running `anchor test` now expects Surfpool to be installed; if it is not, the command fails with a connection error instead of falling back.
+
+On the TypeScript side, `@coral-xyz/anchor` was renamed to `@anchor-lang/core`, and Anchor 1.0's TypeScript test scaffolding imports from the new package.
+
+The reasoning is straightforward. `solana-test-validator` is a full validator process: it boots, syncs, and listens, which costs seconds per test run before any of your code executes. LiteSVM and Surfpool sit on the `solana-svm` API directly and skip everything that is not strictly needed to execute a program against an account state.
+
+## LiteSVM: In-Process SVM for Fast Unit Tests
+
+LiteSVM is an in-process Solana virtual machine. There is no network, no JSON-RPC server, and no separate process — your test instantiates the SVM, deploys a program into it, builds versioned transactions, and submits them, all inside the same Rust binary. Startup is on the order of milliseconds rather than seconds.
+
+A minimal LiteSVM Rust test looks like this:
+
+```rust
+use litesvm::LiteSVM;
+use solana_keypair::Keypair;
+use solana_message::Message;
+use solana_signer::Signer;
+use solana_system_interface::instruction::transfer;
+use solana_transaction::Transaction;
+
+#[test]
+fn basic_transfer() {
+    let mut svm = LiteSVM::new();
+    let from = Keypair::new();
+    let to = Keypair::new().pubkey();
+
+    svm.airdrop(&from.pubkey(), 10_000).unwrap();
+
+    let ix = transfer(&from.pubkey(), &to, 64);
+    let tx = Transaction::new(
+        &[&from],
+        Message::new(&[ix], Some(&from.pubkey())),
+        svm.latest_blockhash(),
+    );
+
+    svm.send_transaction(tx).unwrap();
+    assert_eq!(svm.get_account(&to).unwrap().lamports, 64);
+}
+```
+
+`LiteSVM::new()` boots an empty SVM instance. `airdrop` mints lamports directly — no faucet, no slot wait. `send_transaction` runs the instruction through the real Solana runtime and returns metadata you can assert against. `set_account` writes arbitrary account state for arrange-style tests; `set_sysvar` and `warp_to_slot` let you simulate clock-dependent program logic; `with_compute_budget` lets you assert against compute-unit limits — important because compute units are a first-class concern in any non-trivial Solana program. A `litesvm` Node.js wrapper is published for TypeScript.
+
+The tradeoff is realism. LiteSVM does not expose the full JSON-RPC surface and does not model real validator timing. For program-level assertions — does this instruction succeed, does it touch the right accounts, does it consume the expected compute — that is fine. For anything that needs real RPC parity, reach for Surfpool.
+
+## Surfpool: Mainnet State Without the 2 TB Snapshot
+
+Surfpool is a drop-in replacement for `solana-test-validator` built on top of the same `solana-svm` and LiteSVM primitives, but it adds the one feature `solana-test-validator` never had: mainnet state on demand. You do not download the chain. When a test references an account or program that exists on mainnet, Surfpool fetches it lazily from a remote RPC and caches it locally. The first reference is slower; subsequent reads are instant.
+
+For Solana program testing, that closes a gap that has bothered teams for years. If your program composes with Jupiter, with a pool that already exists on mainnet, or with a Token-2022 mint that uses transfer hooks, you do not have to redeploy and re-seed those programs locally. You point Surfpool at mainnet, run your test, and the dependencies appear in the local SVM at the moment your transaction touches them.
+
+Starting Surfpool inside an Anchor project is one command:
+
+```bash
+surfpool start
+```
+
+`surfpool start` discovers the Anchor workspace, builds, and deploys your program. `anchor test` wires this flow end to end: start Surfpool, build, deploy, run the test suite, shut down. Surfpool also offers cheatcodes for time travel and state writes that map onto LiteSVM's, so tests can often be ported down to LiteSVM for the parts that do not need RPC.
+
+## Choosing Between LiteSVM, Surfpool, and Browser-Level E2E
+
+The practical model after Anchor 1.0:
+
+- **LiteSVM** for unit tests of program instructions in isolation. Fast, deterministic, no I/O. Use it for the bulk of your assertions.
+- **Surfpool** for integration tests that exercise composition with mainnet programs, or anything that needs real RPC behavior. Slower than LiteSVM, far faster than a real mainnet fork.
+- **Browser-level E2E** for the layer above the program — your dApp UI, the connect-wallet flow, the transaction-confirmation popup, the post-confirmation state update. These are not assertions about your program; they are assertions about whether a real user can complete a flow in a real browser with a real wallet. `@avalix/chroma` handles this layer for EVM and Polkadot dApps today via Playwright; the same separation of concerns applies whatever chain you are on.
+
+Anchor 1.0 sharpens the bottom two layers. Picking the right one per test — and treating the browser flow as a third, separate question — is the simplest mental model going forward.
