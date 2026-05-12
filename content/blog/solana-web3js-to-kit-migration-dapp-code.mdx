@@ -1,0 +1,93 @@
+---
+title: "From solana-web3.js to @solana/kit: What Actually Changes in Your dApp Code"
+description: "@solana/kit replaces solana-web3.js v1 with a tree-shakable functional SDK. Here's what actually changes when you migrate your Solana dApp code."
+date: 2026-05-05
+author: Chroma Team
+---
+
+Solana frontend developers have lived with `@solana/web3.js` v1 since 2020. It was class-based, single-package, and it worked. That era is closing. Anza shipped `@solana/web3.js` 2.0 — now rebranded as `@solana/kit` — and the release-candidate label has been dropped. It is the recommended SDK for new Solana dApp code.
+
+The change is not cosmetic. Almost every line of your transaction-building code is touched, and so is the way bundlers handle your output. This post walks through what actually changes, with the conceptual shifts you need to map onto your existing code.
+
+## Why the rewrite shipped at all
+
+Three forces drove it:
+
+- **Bundle size.** v1 shipped one package containing everything. Tree-shaking could not strip parts you did not use, so a dApp that only sent SOL transfers still paid for the SPL token, stake, and vote serializers. In one published benchmark the Solana Explorer landing bundle dropped 26% (311 KB → 226 KB) after migrating.
+- **Performance.** v1 used userland Ed25519 implementations. Modern runtimes — Node, Safari 17+, Chrome — ship Web Crypto APIs that handle Ed25519 natively. Routing signing through them is roughly 10× faster than the JavaScript path.
+- **API ergonomics.** v1's class-heavy model (`Connection`, `Transaction`, `Keypair`) coupled state and behavior tightly. Mocking a `Connection` for unit tests meant subclassing or stubbing a large surface.
+
+`@solana/kit` answers all three with one design choice: ship a set of small, focused modules of pure functions. `@solana/rpc`, `@solana/transaction-messages`, `@solana/transactions`, `@solana/signers`, `@solana/accounts`, `@solana/codecs`, `@solana/addresses`. You import what you use. The optimizer drops the rest.
+
+## The RPC client is now a thin proxy
+
+In v1 you wrote `new Connection(url)`. The `Connection` object was both the network client and a grab bag of helper methods. In `@solana/kit`, the RPC client is a thin proxy that does nothing else:
+
+```ts
+import { createSolanaRpc } from '@solana/kit'
+
+const rpc = createSolanaRpc('http://127.0.0.1:8899')
+const slot = await rpc.getSlot().send()
+```
+
+Two things to note. First, every RPC call is staged: build the request, then `.send()` it. That separation lets you batch, retry, or swap transports without subclassing. Second, the RPC client does not carry transaction-building state — that lives in dedicated packages and is composed at the call site.
+
+## Building a v0 transaction is now a pipe of pure functions
+
+Versioned transactions (v0) are the default in `@solana/kit`. You build them by composing pure functions instead of mutating a `Transaction` object. The Anza-maintained pattern looks like this:
+
+```ts
+import { pipe } from '@solana/functional'
+import {
+  createTransactionMessage,
+  setTransactionMessageFeePayer,
+  setTransactionMessageLifetimeUsingBlockhash,
+  appendTransactionMessageInstructions,
+  signTransaction,
+  sendAndConfirmTransaction,
+  lamports,
+} from '@solana/kit'
+import { getTransferSolInstruction } from '@solana-program/system'
+
+const message = pipe(
+  createTransactionMessage({ version: 0 }),
+  (tx) => setTransactionMessageFeePayer(feePayer, tx),
+  (tx) => setTransactionMessageLifetimeUsingBlockhash(blockhash, tx),
+  (tx) => appendTransactionMessageInstructions([
+    getTransferSolInstruction({
+      source,
+      destination,
+      amount: lamports(1_000_000n),
+    }),
+  ], tx),
+)
+
+const signed = await signTransaction([signer], message)
+await sendAndConfirmTransaction(signed)
+```
+
+What is happening line by line: `createTransactionMessage` returns an empty v0 message. Each subsequent step takes a message and returns a new message with one more thing set — the fee payer, the blockhash that bounds the transaction's lifetime, the instructions. `pipe` is just function composition; nothing here mutates.
+
+Two changes worth absorbing:
+
+- **The transaction message is built up immutably.** There is no `Transaction` class with `.add()`. Every step is a value transformation. That makes intermediate states trivial to log, snapshot, and assert on in tests.
+- **Amounts are `bigint`.** SOL transfers, token amounts, anything mapping to a Rust `u64`. Mixing `number` and `bigint` is a TypeScript error, so you cannot accidentally lose precision on amounts above `2^53` lamports.
+
+The instruction itself comes from a separate package — `@solana-program/system` — instead of from a `SystemProgram` class. That same pattern repeats across every program: SPL token instructions live in `@solana-program/token`, and so on. If your dApp does not use SPL, you do not pay the bundle cost for it.
+
+This is also the right moment to remember the Solana execution model that the SDK is serving: every account a transaction touches is an explicit input, programs do not hold internal state, and a v0 transaction can pull in extra accounts via Address Lookup Tables. `@solana/kit` exposes those concerns directly — there is a function for adding ALTs to a message — instead of hiding them behind class methods. The shape of the SDK now matches the shape of the protocol.
+
+## What this changes for testing your dApp
+
+A real Solana dApp does not just call RPC — it asks Phantom or another wallet extension to sign. The wallet extension sees the v0 transaction your dApp built, displays the parsed instructions, and the user either signs or rejects. The kit-based code paths that build that transaction are easier to unit test because they are pure functions: feed in known accounts and a known blockhash, snapshot the resulting message bytes, diff on regression. But the wallet popup is still where users decide. For end-to-end tests that drive a real browser and a real wallet extension, libraries like `@avalix/chroma` automate the Playwright side of that boundary so the connect-and-sign path is exercised on every run rather than only by hand.
+
+## Where to start the migration
+
+Most dApps do not need a big-bang switch. A practical order:
+
+1. Add `@solana/kit` alongside your existing `@solana/web3.js` v1 install.
+2. Migrate read-only RPC calls first — `getSlot`, `getAccountInfo`, `getBalance`. They are isolated and easy to verify against the v1 result.
+3. Migrate transaction building one user flow at a time. Each call moves from a `Transaction` class to a `pipe` of message-building functions.
+4. Remove the v1 dependency last, after every flow is on `@solana/kit`.
+
+The headline benefit is not the 10× faster signing or the smaller bundle, useful as those are. It is that your transaction code becomes data — pure functions producing pure values — and that data is far easier to log, snapshot, diff, and assert on than a stateful object graph ever was.
