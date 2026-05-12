@@ -1,0 +1,67 @@
+---
+title: "Solana's P-Token Upgrade: How SIMD-0266 Cuts SPL Token Compute Costs by 98%"
+description: "SIMD-0266 introduces P-Token to Solana — a drop-in SPL Token replacement that cuts a TransferChecked from 6,200 CUs to 105. Here's what changes for builders."
+date: 2026-05-07
+author: Chroma Team
+---
+
+The SPL Token program is the most-invoked program on Solana. Every wallet transfer, every swap leg, every CPI from a DeFi protocol that touches a token account routes through it. By the Solana Foundation's own measurements, it consumes roughly **10% of all block compute units** — not because token transfers are doing anything exotic, but because the program was written years ago and has accumulated overhead that no longer reflects what's possible on the runtime.
+
+SIMD-0266, approved by validator vote on March 14, 2026, replaces it. P-Token is a from-scratch, zero-copy reimplementation that keeps the existing instruction layout intact while cutting per-instruction compute usage by 95–98%. If you write Solana programs or build dApps that bundle token operations into composed transactions, this is the single change most likely to affect your compute-unit budgeting before the end of the year.
+
+## Why the Existing Token Program Eats So Many Compute Units
+
+A `TransferChecked` instruction on the current SPL Token program consumes around 6,200 compute units. The transfer itself — debiting one token account, crediting another, checking the mint and decimals — is a handful of arithmetic operations and a few memory writes. The rest is overhead: heap allocations for instruction parsing, redundant deserialization of account data, defensive copies of account state, and program log lines like `Program log: Instruction: TransferChecked` that each cost ~100 CUs to emit.
+
+Solana's per-transaction compute limit is 1,400,000 CUs, but the per-instruction default cap is 200,000 CUs unless you raise it with a `ComputeBudgetInstruction::SetComputeUnitLimit`. When a program does three CPIs into Token — a typical DEX swap with a fee leg — you're spending 15,000–20,000 CUs just on Token-program overhead. That budget pressure is what forces complex protocols to either request larger compute limits (which raises priority fees) or split work across multiple transactions.
+
+## What P-Token Actually Changes
+
+P-Token is deliberately not a redesign. The instruction discriminators, the account ordering, and the on-chain account layouts are byte-for-byte identical to the existing program. From a calling program's perspective — including every Anchor program with `anchor_spl::token` constraints — nothing in your IDL or your composed instructions changes.
+
+The savings come entirely from the implementation:
+
+- **Zero heap allocations.** Instruction data and account data are read directly from the runtime's input buffer using zero-copy patterns rather than being deserialized into owned types.
+- **No instruction-name logs.** The `Program log: Instruction: <Name>` lines are dropped, saving ~100 CUs per call.
+- **Tighter account validation.** Mint and authority checks reuse already-loaded data instead of re-borrowing accounts.
+
+The effect, per the SIMD-0266 spec:
+
+| Instruction        | Current SPL Token | P-Token | Reduction |
+|--------------------|-------------------|---------|-----------|
+| `Transfer`         | 4,645 CU          | 76 CU   | 98.4%     |
+| `TransferChecked`  | 6,200 CU          | 105 CU  | 98.3%     |
+| `MintTo`           | 4,538 CU          | 119 CU  | 97.4%     |
+| `Burn`             | 4,753 CU          | 126 CU  | 97.4%     |
+| `CloseAccount`     | 2,916 CU          | 120 CU  | 95.9%     |
+| `InitializeAccount`| 4,527 CU          | 154 CU  | 96.6%     |
+
+Activation works through Solana's Upgradable Loader v3: when the feature gate `ptokFjwyJtrwCa9Kgo9xoDS59V4QccBGEaRFnRPnSdP` flips, the runtime swaps the program at `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA` for the audited P-Token bytecode. Existing token mints and accounts are untouched. No migration script, no client redeploy.
+
+## Three New Instructions Worth Knowing
+
+P-Token also adds three instructions that the original program didn't expose:
+
+**`batch` (discriminator 255)** executes multiple Token instructions inside a single CPI, paying the 1,000-CU CPI base cost once instead of per call. For a DEX or lending protocol that performs three or four token operations as part of one user action, this alone can reclaim several thousand CUs.
+
+**`withdraw_excess_lamports` (discriminator 38)** lets a mint or multisig authority recover SOL that has accumulated above the rent-exempt minimum. Useful for programs that previously had no clean path to sweep stranded lamports.
+
+**`unwrap_lamports` (discriminator 45)** transfers SOL out of a wrapped-SOL (native) token account directly to a destination, skipping the temporary-account dance that wrapped-SOL handling typically requires.
+
+## What This Means for Your Programs and Tests
+
+Most existing programs need no code changes. But the assumptions baked into your transactions will shift:
+
+- **Compute-unit requests.** If you call `setComputeUnitLimit(200_000)` because three Token CPIs were eating into a 200k budget, that ceiling becomes overkill. Right-sizing the request lowers the priority fee a user pays — Solana's fee market multiplies CU price by requested CUs, not consumed ones.
+- **Transaction packing.** Versioned transactions with address lookup tables that previously hit the per-tx CU ceiling on big batches may now fit. Routing logic that splits a multi-step swap across two transactions for headroom can sometimes collapse back to one.
+- **Anchor `#[account]` constraints and CPI helpers.** Anchor's `token` and `token_2022` interfaces sit on top of standard CPI calls, so they pick up the savings automatically. Your test suite's snapshotted CU consumption numbers, however, will move dramatically the moment the feature gate activates on whichever cluster you're testing against.
+
+That last point is the one to plan for now. If you have program tests that assert exact compute-unit consumption (a reasonable defensive practice for catching regressions), pin them to the cluster's current feature set or rewrite them as upper-bound assertions. End-to-end tests that simulate real wallet flows — a Phantom user approving a swap, a token transfer landing on a frontend — won't break, but the priority fee and confirmation-time profile of those flows will look meaningfully different post-activation. SVM support in `@avalix/chroma` is on the roadmap precisely because that human-layer behavior is the one place where compute-budget changes show up as a perceived UX shift.
+
+P-Token is unusual for a protocol upgrade: a 98% efficiency gain with zero API surface change. The work for builders is mostly in noticing it and using the headroom intentionally — tighter CU requests, denser transaction batching, and tests that don't lock you to today's numbers.
+
+Sources:
+- [SIMD-0266: Efficient Token program (PR)](https://github.com/solana-foundation/solana-improvement-documents/pull/266/files)
+- [P-Token: Solana's Next Big Efficiency Unlock — Helius](https://www.helius.dev/blog/solana-p-token)
+- [Solana Approves SIMD-0266 Upgrade — Coinfomania](https://coinfomania.com/solana-approves-simd-0266-upgrade-for-faster-transactions/)
+- [Solana Ecosystem Roundup: March 2026](https://solana.com/news/solana-ecosystem-roundup-march-2026)
