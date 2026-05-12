@@ -1,0 +1,57 @@
+---
+title: "Ethereum Hegota: How Verkle Trees Change Gas Costs and State Proofs for Developers"
+description: "Hegota's Verkle tree migration changes how storage access is priced and introduces a new state proof precompile. Here's what Solidity developers need to audit."
+date: 2026-04-29
+author: Chroma Team
+---
+
+Ethereum's current state data structure — the Merkle Patricia Tree (MPT) — has a witness problem. Proving a single account exists in Ethereum's state requires bundling roughly 3 KB of sibling hashes. Multiply that across the accounts touched in a block and you get witnesses too large to propagate within a 12-second slot. Stateless clients, nodes that verify blocks without storing the full 100+ GB state, remain impractical because of it.
+
+Verkle trees fix this. Ethereum's Hegota upgrade, targeting H2 2026, replaces the MPT with a Verkle tree that reduces per-account witnesses from ~3 KB to ~200 bytes. That structural change enables stateless client support — and it brings meaningful gas schedule changes for smart contract developers, bundled in EIP-4762, plus a new state proof verification precompile in EIP-7545.
+
+## Why the Merkle Patricia Tree Is Being Replaced
+
+The MPT stores Ethereum state as a tree of hash-linked nodes. Proving that a specific account or storage slot exists requires presenting a path from root to leaf, including every sibling node along the way. Those sibling nodes are what make witnesses large: the deeper the tree, the more hashes you need to bundle.
+
+Verkle trees use polynomial commitments instead of hash-based sibling paths. A single vector commitment across all children of a node replaces the per-sibling hashing structure. The result is a witness that proves multiple values simultaneously without growing linearly with tree depth.
+
+The practical consequence: a stateless Ethereum node becomes viable. Instead of syncing the full state, a client receives a small witness alongside each block and uses it to verify the block locally. Mobile wallets and browser-based signing tools could validate without trusting a remote RPC endpoint. For most dApp developers, this matters indirectly — it expands who can run a node, which improves decentralization and RPC availability over time.
+
+## EIP-4762: What Changes About State Access Gas Costs
+
+The Verkle tree migration requires restructuring how gas is charged for state access, because the cost model for witness generation changes alongside the data structure. EIP-4762 introduces this new schedule, and the net effect is nuanced.
+
+**Code access costs more.** For the first time, executing contract code carries an explicit cost based on how much code the EVM touches: 200 gas per 31-byte chunk. A 10 KB contract incurs roughly 200 × 330 = 66,000 gas in code access cost for a fresh call that touches every chunk. In practice, calls don't touch all chunks, and this cost only applies on first access per transaction — subsequent touches within the same transaction are free. Estimated average gas increase across typical contracts: 6–12%.
+
+**Adjacent storage slots get cheaper.** The Verkle tree groups storage slots into ranges. After the first slot access in a group, subsequent accesses in the same group drop from 2,100 gas to 200 gas. Slots 0–63 receive a universally reduced cost of 200 gas for all accesses, including the first. Contracts that cluster related state into low-numbered storage slots — a design choice many Solidity developers already make — will see their storage reads become substantially cheaper.
+
+**What this means for your contracts.** Most contracts will see a modest net gas change. The code chunk cost typically adds a few percent; the storage adjacency discount partially offsets it. Two patterns worth reviewing:
+
+- **Storage layout**: If you have frequently-accessed variables scattered across high-numbered slots, consider consolidating them into slots 0–63. This is already good practice under EIP-2929's cold/warm distinction, and becomes more valuable under EIP-4762.
+- **Large contracts**: Contracts near or above 10 KB of bytecode will see the code chunk charge matter more. This doesn't require redeployment — but it's worth knowing before the upgrade so gas estimates stay accurate.
+
+Solidity compilers are expected to adapt to EIP-4762's access patterns, and tooling updates will help offset the raw increase. For now, auditing storage layout is the most actionable step.
+
+## EIP-7545: What Bridge and Oracle Developers Need to Know
+
+Bridge contracts and oracle contracts that verify Ethereum state proofs have a harder problem. They typically hardcode MPT proof verification — either an on-chain library or an inlined implementation. After Hegota, `eth_getProof` returns Verkle tree witnesses, not MPT witnesses. That's a breaking format change for any contract that parses raw proof bytes.
+
+EIP-7545 addresses this directly. It introduces a precompile at address `0x21` that verifies state proofs in a version-aware way. The input is a tightly packed structure:
+
+```
+version    [1 byte]   — 0 for MPT, 1 for Verkle polynomial commitment scheme
+state_root [32 bytes] — the root being verified against
+proof_data [variable] — the proof bytes
+```
+
+The precompile returns `1` if verification succeeds, `0` otherwise. Gas cost is calculated per commitment, though exact values are still TBD in the current draft.
+
+The key design choice: both proof formats are supported through the same interface. A bridge contract that migrates to calling `0x21` can handle proofs from blocks before and after Hegota without deploying a separate verification library for each format. For bridges that custody significant TVL, this migration window matters — you want the contract to verify both formats correctly before the hard fork, not scramble to redeploy after it.
+
+## What Most Developers Don't Need to Do
+
+For the large majority of Solidity contracts, the Verkle tree migration is transparent. No redeployment is required. The EVM opcodes your contracts use (`SLOAD`, `SSTORE`, `CALL`, `STATICCALL`) continue to work with the same interfaces. The gas schedule changes are the main thing worth understanding, and for most DeFi patterns — token swaps, lending operations, voting flows — the delta is small enough to absorb.
+
+The state migration itself (converting existing MPT state into Verkle tree format) is handled at the node level by EIP-7748. It runs as a background process across multiple blocks after Hegota activates. Contracts don't participate in or notice this migration — it is invisible at the execution layer.
+
+Hegota is targeting Q4 2026. The EIP list is not fully frozen, but Verkle trees are one of the few items considered load-bearing for the upgrade. For most developers, the right action now is understanding EIP-4762's storage implications and flagging any bridge or proof-verification contracts for EIP-7545 evaluation before the feature freeze.
