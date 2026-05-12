@@ -1,0 +1,76 @@
+---
+title: "EIP-7825 Is Live: What the 16.78M Per-Transaction Gas Cap Means for Your Contracts"
+description: "Fusaka's EIP-7825 caps individual Ethereum transactions at 16.78M gas. Here's which contract patterns break and how to audit and fix them."
+date: 2026-04-26
+author: Chroma Team
+---
+
+Fusaka landed on Ethereum mainnet in late 2025, and for most developers the upgrade was invisible. Blob counts went up, passkey wallets got cheaper, and nothing obviously broke. But EIP-7825 is different — it quietly enforces a hard ceiling on how much gas a single transaction can use. If your contracts perform batch operations, large deployments, or relay multiple actions in one call, you need to know whether you are approaching that ceiling.
+
+The cap is 16,777,216 gas — 2^24, roughly 16.78 million. Any transaction specifying a gas limit above this value is rejected at the mempool level with a `MAX_GAS_LIMIT_EXCEEDED` error. It never reaches a block.
+
+## Why Ethereum Needed a Per-Transaction Gas Cap
+
+Before EIP-7825, the only constraint on a single transaction's gas was the block gas limit itself. With Fusaka pushing the block gas limit toward 60 million, a single transaction could theoretically consume the entire block. That creates three compounding problems.
+
+First, it enables DoS: one expensive transaction can delay everyone else by monopolizing block capacity. Second, it makes blocks unpredictable — a block with one 58M-gas transaction behaves very differently than one with many smaller transactions, complicating mempool scheduling and block propagation. Third, it works against future parallel execution. Parallel EVM designs (proposed in EIP-7928 and related work) rely on transactions having bounded resource profiles so validators can schedule them concurrently. An uncapped transaction undermines that model.
+
+The 2^24 boundary was chosen deliberately: it is a clean power-of-two for efficient client-level enforcement, and it sits at roughly half the block gas limit. The Ethereum Foundation confirmed in their pre-fork communications that the cap would be invisible to most users, since the vast majority of on-chain activity falls well below this threshold.
+
+## Which Contract Patterns Hit the Cap
+
+At 16.78 million gas, a rough sense of what fits in one transaction:
+
+- Around 800 simple ETH transfers (21K gas each)
+- Around 258 ERC-20 transfers (65K gas each)
+- Around 33 basic Uniswap swaps (roughly 500K gas each, depending on pool state)
+
+Individual user actions almost never approach the cap. The patterns that do:
+
+**Large batch operations.** Minting 500 NFTs in a single transaction, distributing an airdrop to 300 addresses, or batch-processing a queue of user operations can easily cross 16.78M. A loop over 300 ERC-20 transfers alone requires approximately 19.5M gas.
+
+**Heavy contract constructors.** Some contracts initialize large data structures in their constructor. If your deployment transaction was already consuming a substantial fraction of the old block gas limit, it may now fail at the mempool before it is ever mined.
+
+**Bridge relay calls.** Bridges that process incoming messages in bulk — relaying hundreds of cross-chain messages in a single L1 transaction — may exceed the cap when the queue has grown large between relay intervals.
+
+**Multi-call routers with dynamic input.** If your dApp uses a router that accepts an arbitrary-length calldata array, users submitting large batches will hit the cap even if each individual operation is modest.
+
+## How to Refactor Heavy Transactions
+
+The fix is almost always the same: paginate what you batch. The caller — your frontend or backend script — takes responsibility for chunking the input and sending multiple transactions.
+
+```solidity
+// Before: one call, potentially over the cap for large inputs
+function airdrop(address[] calldata recipients, uint256 amount) external onlyOwner {
+    for (uint256 i = 0; i < recipients.length; i++) {
+        token.transfer(recipients[i], amount);
+    }
+}
+
+// After: caller controls how much work each transaction does
+function airdrop(
+    address[] calldata recipients,
+    uint256 amount,
+    uint256 offset,
+    uint256 count
+) external onlyOwner {
+    uint256 end = offset + count > recipients.length ? recipients.length : offset + count;
+    for (uint256 i = offset; i < end; i++) {
+        token.transfer(recipients[i], amount);
+    }
+}
+```
+
+The `offset` and `count` parameters make the operation resumable: if a call fails, you resume from the last committed offset. Emit an event at the end of each chunk so your frontend can track progress and surface it to the user.
+
+For bridge relays and sequencers, impose a maximum message count per relay call in your processing logic rather than processing the full pending queue. For heavy constructors, split initialization into two phases: a minimal constructor that stores only the address or key identifiers, followed by a separate `initialize()` call. This pattern is already standard in upgradeable contract architectures and carries no additional trust assumptions.
+
+## Testing Gas-Bounded Flows Before They Hit Users
+
+Holesky and Sepolia already enforce EIP-7825 — testnet deployment is the obvious first check to verify your contract is under the cap. For local development, running `anvil --fork-url <mainnet-rpc>` forks from the live chain and inherits the active rule set automatically.
+
+If your dApp exposes batch or bulk operations to users — airdrop dashboards, multi-mint UIs, bridge relay interfaces — those flows should have explicit E2E coverage at realistic batch sizes. When testing against a local Anvil fork with @avalix/chroma, a wallet confirmation flow for an over-cap transaction surfaces exactly as it would on mainnet: MetaMask reports a gas estimation failure before the user signs. Writing a test that asserts the dApp surfaces a clear error state when a batch is too large, rather than silently submitting and watching the transaction get dropped, is the kind of coverage that prevents a support queue full of confused users after a mainnet airdrop.
+
+## Where This Leaves You
+
+EIP-7825 is enforced on mainnet. If you have batch-heavy contracts that have not been tested against the 16.78M limit, run them on a forked mainnet, measure the gas, and verify your chunking logic holds under realistic conditions. The refactor is usually a few lines of Solidity and some updated frontend iteration logic — but the window for finding the problem cheaply is before users encounter it.
