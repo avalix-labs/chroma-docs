@@ -1,0 +1,60 @@
+---
+title: "Solana P-Token (SIMD-0266): A 60x Compute Reduction for Token Transfers"
+description: "Solana's SIMD-0266 P-Token program cuts transfer compute units from 4,645 to 76. How it works, what changes for your program, and what stays the same."
+date: 2026-05-12
+author: Chroma Team
+---
+
+Every non-trivial Solana program ends up calling the SPL Token program. Swaps, vaults, lending markets, staking — they all CPI into `spl-token` to move balances. And every one of those CPI calls quietly spends a meaningful slice of the transaction's compute budget before your own instruction logic runs. SIMD-0266, approved by validators on March 14, 2026 and targeted for mainnet activation in late April, rewrites the token program to fix exactly that. A `Transfer` instruction drops from 4,645 compute units to 76. `TransferChecked` drops from roughly 6,200 to 105.
+
+This is not a new token standard. It is the same program, the same instructions, the same account model — re-implemented with a sharper compiler diet. Here is what that actually means.
+
+## Why SPL Token transfers were expensive
+
+The original SPL Token program was written in stock Rust with `std`, structured logging, and the standard Borsh deserialization pipeline. Every `Transfer` instruction pays for the same fixed overhead: bounds-checked account deserialization, panic infrastructure, log message formatting (even when no logs fire), and a generally conservative codegen path.
+
+On Solana that overhead is not free. The compute meter charges per BPF instruction executed, and a few thousand BPF instructions of "just getting set up" before any real work compounds across the network. Token transfers — `TransferChecked` alone is roughly 36% of all instructions executed on mainnet, with `Transfer` adding another 13% — sit on the critical path of most user transactions. Half of Solana's compute is, in effect, paying for token-program prelude.
+
+For your program, the consequence is concrete: a vault instruction that swaps an input, mints an LP token, and sends a fee transfer can easily burn 15,000 CU on token-program bookkeeping before a line of your own logic runs. That headroom is what SIMD-0266 reclaims.
+
+## How P-Token reaches 76 CU
+
+P-Token is a `no_std` reimplementation of the SPL Token program built on the Pinocchio framework. Three design choices do most of the work:
+
+- **Zero-copy account access.** Account data is read directly out of the input buffer instead of deserialized into owned Rust structs. No allocations, no copies, no Borsh.
+- **No logging or panic formatting.** The program returns explicit error codes instead of formatted strings. Release-mode codegen no longer pulls in formatting infrastructure.
+- **Hand-tuned instruction dispatch.** Each instruction handler is a small, inlined function path with no virtual dispatch.
+
+The benchmarks from the SIMD spec:
+
+| Instruction      | SPL Token (CU) | P-Token (CU) |
+|------------------|----------------|--------------|
+| `Transfer`       | 4,645          | 76           |
+| `TransferChecked`| 6,200          | 105          |
+| `MintTo`         | 4,538          | 119          |
+| `Burn`           | 4,753          | 126          |
+| `InitializeMint` | 2,967          | 105          |
+
+Activation is a runtime program replacement. When the feature gate `ptokFjwyJtrwCa9Kgo9xoDS59V4QccBGEaRFnRPnSdP` flips, the executable at the existing token program ID — `TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA` — is swapped via the Upgradable Loader v3 to the Pinocchio build. Every program already CPI-ing into that address picks up the new implementation transparently.
+
+## What stays the same
+
+The instruction layout, discriminators, and account model are unchanged. Every transfer still passes mint, source, destination, and authority as explicit input accounts — the SVM stateless execution model is untouched. Your Anchor `CpiContext`, your `@solana/kit` instruction builders, and your existing IDLs continue to work without recompilation.
+
+Three new instructions are added at the top of the discriminator space:
+
+- `batch` (discriminator 255) — executes multiple Token instructions inside a single invocation, useful when CPI depth or per-transaction CU limits are tight.
+- `withdraw_excess_lamports` (discriminator 38) — recovers stray lamports sitting on mint or multisig accounts.
+- `unwrap_lamports` (discriminator 45) — transfers lamports out of native SOL token accounts without the usual close-account dance.
+
+Token-2022 (Token Extensions) is a separate program and is not touched by SIMD-0266. Confidential transfers, transfer hooks, transfer fees, and other extensions continue to live there at their own program ID and their own compute profile.
+
+## What this changes for your program
+
+The most immediate change is your compute budget math. If you currently call `ComputeBudgetProgram.setComputeUnitLimit(...)` with a value tuned for instructions that did several token transfers, that value is likely 50–100x too high after activation. Wasted CU is wasted priority-fee surface area, especially during congestion. Re-benchmark on a localnet that has the feature gate forced active, then tighten the limit.
+
+The second change is what fits in a v0 transaction. The per-transaction CU cap (1.4M) and the block CU cap (now 60M after SIMD-0256) become much less of a binding constraint on token-heavy flows. Patterns that previously required splitting across two transactions — atomic multi-leg swaps, batched payouts, fee-rebate-on-trade — can collapse into a single signed transaction with address lookup tables doing the account compression.
+
+If you run end-to-end tests that drive a real Phantom extension against your dApp — for instance, with [@avalix/chroma](https://github.com/avalix-labs/chroma) — none of the wallet UX changes. The runtime swap is invisible above the program layer. What is worth re-checking is any test that asserts on a specific compute budget request or a specific simulation result, since those numbers will move.
+
+The takeaway: P-Token is not a migration project. It is a calibration project. Audit your `setComputeUnitLimit` values, re-run your simulations, and reclaim the headroom for your own program logic.
