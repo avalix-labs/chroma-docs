@@ -1,0 +1,83 @@
+---
+title: "BLS12-381 on Ethereum Mainnet: What the EIP-2537 Precompiles Enable for Developers"
+description: "EIP-2537 added seven BLS12-381 precompiles to Ethereum mainnet with Pectra. Here's what developers can build: threshold multisig, ZK verification, and beacon data oracles."
+date: 2026-04-28
+author: Chroma Team
+---
+
+Ethereum's Pectra upgrade in May 2025 added seven new precompiles for BLS12-381 curve operations, defined in EIP-2537. Most developer coverage at the time focused on the more immediately visible changes — EIP-7702's EOA delegation or the blob count increase. BLS precompiles got a paragraph, not a deep dive.
+
+That's worth fixing. The precompiles have been live on Ethereum mainnet for nearly a year, and the gas reduction they deliver makes three previously impractical patterns suddenly viable on L1: threshold signature aggregation, on-chain verification of Ethereum consensus data, and zkSNARK pairing checks without a custom verifier contract.
+
+## Why BLS12-381 Is a Different Primitive from secp256k1
+
+Ethereum accounts sign transactions with secp256k1, the same curve behind Bitcoin. It's well-understood and fast for single-signature verification, but it lacks one property: two secp256k1 signatures don't aggregate cleanly. If you need to verify that 50 of 100 participants signed the same message, you verify 50 separate signatures — 50 `ecrecover` calls, each costing gas and calldata.
+
+BLS12-381 is optimized for aggregation. Any number of BLS signatures over the same message can be combined into a single signature of fixed size. Verifying that single aggregate against the corresponding aggregate public key costs the same as verifying a single BLS signature. A 100-signer committee collapses to one pairing check.
+
+That's not a theoretical advantage. Ethereum's beacon chain has used BLS12-381 for validator signatures since the Merge — every attestation in a block header is an aggregate BLS signature. EIP-2537 makes that same primitive available to smart contracts on the execution layer.
+
+## The Seven Precompiles
+
+EIP-2537 adds precompiles at addresses `0x0b` through `0x11`:
+
+| Precompile | Address | Gas cost |
+|---|---|---|
+| BLS12_G1ADD | 0x0b | 375 |
+| BLS12_G1MSM | 0x0c | ~12,000 per point |
+| BLS12_G2ADD | 0x0d | 600 |
+| BLS12_G2MSM | 0x0e | ~22,500 per point |
+| BLS12_PAIRING_CHECK | 0x0f | 37,700 + 32,600 per pair |
+| BLS12_MAP_FP_TO_G1 | 0x10 | 5,500 |
+| BLS12_MAP_FP2_TO_G2 | 0x11 | 23,800 |
+
+G1 and G2 are two groups on the BLS12-381 curve. G1 points are 128 bytes; G2 points are 256 bytes. For most BLS signature schemes you'll encounter, public keys live in G1 and signatures live in G2 — which is the convention Ethereum's beacon chain uses.
+
+The pairing check at `0x0f` is the core verification primitive. It takes k pairs of (G1 point, G2 point) and returns `0x01` if the pairing product equals 1. That's the mathematical heart of BLS signature verification: `e(pubkey, H(msg)) == e(G1_generator, signature)`.
+
+Before EIP-2537, a BLS signature verify in pure Solidity — using BN254 elliptic curve arithmetic as a workaround — cost 300,000–500,000 gas per verification. With the precompile, a two-pair pairing check (the standard BLS verify call) costs roughly 103,000 gas. That's a 3–5x reduction, and it's the difference between "interesting experiment" and "production-viable."
+
+## Three Patterns Worth Building Now
+
+**Threshold signature aggregation.** A governance contract that requires 7-of-10 multisig approvals currently needs either 10 `ecrecover` calls (expensive, calldata-heavy) or ERC-4337 session key infrastructure (significant deployment complexity). With BLS, each participant signs off-chain with their individual BLS key, a coordinator aggregates the signatures into a single G2 point, and the contract runs one pairing check regardless of signer count:
+
+```solidity
+function verifyAggregate(
+    bytes memory aggrPubkey, // 128-byte G1 point: sum of participant pubkeys
+    bytes memory msgG2,      // 256-byte G2 point: H(message) hashed to curve
+    bytes memory aggrSig     // 256-byte G2 point: sum of individual signatures
+) internal view returns (bool) {
+    // Verify: e(aggrPubkey, msgG2) == e(G1_GENERATOR, aggrSig)
+    bytes memory input = abi.encodePacked(
+        aggrPubkey, msgG2,   // first pair
+        G1_GENERATOR, aggrSig // second pair
+    );
+    (bool ok, bytes memory result) = address(0x0f).staticcall(input);
+    return ok && result.length == 32 && uint256(bytes32(result)) == 1;
+}
+```
+
+The aggregate public key is computed off-chain by summing individual G1 public keys using `BLS12_G1ADD` (0x0b). The aggregate signature is the sum of individual G2 signatures. Only the final check happens on-chain — at fixed cost, regardless of whether you have 7 signers or 70.
+
+**On-chain beacon chain data verification.** Bridges, staking derivative protocols, and liquid restaking contracts often need to trust data about Ethereum validators — whether a validator was slashed, their effective balance, their withdrawal credentials. Today this data typically arrives through trusted oracles. With EIP-2537, a contract can verify the BLS signatures on beacon chain data directly, using the same cryptographic scheme Ethereum's consensus layer uses to sign that data. No external trust assumption required.
+
+This matters most for slashing evidence — a contract that wants to slash a validator needs to verify an attested beacon chain state, and now it can do that without delegating trust to an off-chain reporter.
+
+**zkSNARK pairing checks on L1.** Groth16 proofs — used by many ZK protocols — require two pairing checks and scalar multiplications. The traditional approach was a custom Solidity verifier compiled from circom output, which cost approximately 1 million gas on mainnet. That price made L1 ZK verification impractical for anything other than infrequent batch settlement. With EIP-2537, the pairing operations cost roughly 140,000 gas total, making Groth16 verification an order of magnitude cheaper. Protocols that were restricted to ZK rollups purely on cost grounds now have a credible path to verifying proofs directly on L1.
+
+## One Edge Case to Know
+
+All BLS12-381 precompiles consume their full gas allocation on failure — there's no refund on malformed input. The return value check is load-bearing:
+
+```solidity
+(bool success, bytes memory result) = address(0x0f).staticcall(input);
+require(success, "BLS call failed: malformed input");
+// Then check the result
+require(uint256(bytes32(result)) == 1, "BLS verification failed");
+```
+
+The first `require` catches encoding errors — wrong point encoding, values above the field modulus, empty inputs. The second catches valid but failing verifications. Collapsing them into one check means you can't distinguish between "the proof is wrong" and "you built the input incorrectly."
+
+If you're building a dApp where users submit aggregated BLS proofs via a transaction — a multisig approval UI, for instance — the on-chain submission still goes through MetaMask as a standard transaction. @avalix/chroma handles the confirmation flow for that step, even when the BLS signing itself happens off-chain with separate tooling.
+
+BLS12-381 has been securing Ethereum's beacon chain for three years. EIP-2537 brings the same primitive to the execution layer at costs that make it worth reaching for in production. Threshold multisig that doesn't grow in cost with signer count, trustless consensus data verification, and affordable Groth16 verification on L1 — all of these are available now without waiting for the next upgrade.
