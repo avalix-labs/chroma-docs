@@ -1,0 +1,139 @@
+---
+title: "EIP-6963: How Multi-Wallet Discovery Fixes the window.ethereum Conflict for dApp Developers"
+description: "EIP-6963 replaces broken window.ethereum injection with event-based wallet discovery. Here's how the protocol works and what changes for your dApp tests."
+date: 2026-05-04
+author: Chroma Team
+---
+
+The `window.ethereum` handshake has powered every EVM dApp since MetaMask first shipped a browser extension. Your dApp reads from `window.ethereum`, gets a provider, calls `eth_requestAccounts`, and you have a wallet connection. For years, this worked because most users had exactly one wallet installed.
+
+That assumption no longer holds. Many DeFi users run Rabby alongside MetaMask for its approval management, Coinbase Wallet for institutional accounts, or Frame for hardware wallet access. When multiple wallets inject into `window.ethereum`, they overwrite each other at load time. The last extension to load wins. Your dApp gets whichever provider happened to finish loading most recently — not the one the user intended to use. EIP-6963, now supported by every major wallet and most connection libraries, replaces this broken model with a clean event-based discovery protocol.
+
+## The window.ethereum Race Condition That Breaks Multi-Wallet Users
+
+The traditional injection model is a single mutable slot:
+
+```javascript
+// MetaMask loads, sets its provider
+window.ethereum = metamaskProvider
+
+// Rabby loads 40ms later, overwrites it
+window.ethereum = rabbyProvider
+```
+
+There is no coordination between wallet extensions. They each inject as early as possible to ensure they are the one your dApp finds. Which one your dApp actually connects to depends on extension load order in that browser session — something the user cannot control and your dApp cannot predict.
+
+The result is a class of user reports that are hard to reproduce and easy to dismiss as user error: "I can't connect with MetaMask even though I can see it in my browser." The user has Rabby installed too. Rabby loaded last. Your dApp connected to Rabby, which prompted for a wallet the user didn't expect. They cancelled. They blame your app.
+
+This affects roughly 15–20% of power users in any DeFi community. It manifests silently — no error thrown, no console warning, just the wrong wallet.
+
+## How EIP-6963's Event Protocol Works
+
+EIP-6963 replaces the single mutable slot with a two-way event channel. Wallets announce themselves; your dApp collects all announcements and presents a selection UI.
+
+Wallet extensions dispatch an `eip6963:announceProvider` event as soon as the page loads:
+
+```typescript
+// What each compliant wallet extension dispatches
+window.dispatchEvent(new CustomEvent("eip6963:announceProvider", {
+  detail: {
+    info: {
+      uuid: "f4b99884-...",    // stable, unique identifier
+      name: "MetaMask",
+      icon: "data:image/svg+xml;base64,...",
+      walletId: "io.metamask",
+    },
+    provider: metamaskEIP1193Provider,
+  }
+}))
+```
+
+Your dApp requests announcements from all installed wallets with a single event:
+
+```typescript
+window.dispatchEvent(new Event("eip6963:requestProvider"))
+```
+
+Every EIP-6963-compliant wallet responds immediately. You accumulate one `EIP6963ProviderDetail` entry per wallet, then show users a wallet picker. The provider they select is the one you pass to `eth_requestAccounts` — no more guessing. No load-order dependency.
+
+The timing model is deliberate: wallets emit `eip6963:announceProvider` both proactively on page load and reactively on `eip6963:requestProvider`. Registering your listener before firing the request captures both cases.
+
+## Implementing EIP-6963 Without a Framework
+
+If your dApp uses wagmi v2 or Reown AppKit (formerly WalletConnect), EIP-6963 is handled automatically — the `injected()` connector discovers all compliant providers without any configuration on your side.
+
+For dApps that manage providers directly, here is the minimal implementation:
+
+```typescript
+interface EIP6963ProviderInfo {
+  uuid: string
+  name: string
+  icon: string
+  walletId: string
+}
+
+interface EIP6963ProviderDetail {
+  info: EIP6963ProviderInfo
+  provider: { request: (args: { method: string; params?: unknown[] }) => Promise<unknown> }
+}
+
+const discoveredWallets: EIP6963ProviderDetail[] = []
+
+window.addEventListener(
+  "eip6963:announceProvider",
+  (event: CustomEvent<EIP6963ProviderDetail>) => {
+    // Deduplicate by uuid — wallets can re-announce on page focus
+    if (!discoveredWallets.some(w => w.info.uuid === event.detail.info.uuid)) {
+      discoveredWallets.push(event.detail)
+    }
+  }
+)
+
+window.dispatchEvent(new Event("eip6963:requestProvider"))
+
+// discoveredWallets now contains one entry per installed, compliant wallet.
+// Render a picker, let the user choose, then call:
+// const accounts = await selectedWallet.provider.request({ method: 'eth_requestAccounts' })
+```
+
+For backwards compatibility with wallets that predate EIP-6963, add `window.ethereum` as a fallback entry after the discovery pass — deduplicated by checking if its UUID is already in `discoveredWallets`.
+
+## What EIP-6963 Changes for Your E2E Tests
+
+The switch from `window.ethereum` to EIP-6963 adds a new test surface: the wallet selection UI. Before, a user clicked "Connect Wallet" and your dApp immediately called `eth_requestAccounts` on whatever provider it found. After EIP-6963, the connect flow has an intermediate step — your dApp renders a picker showing all discovered wallets, and the user clicks one before the wallet popup appears.
+
+That picker interaction needs test coverage. If your dApp renders the wrong wallet name, uses the wrong provider when the user selects MetaMask, or fails to close the modal correctly, users hit those bugs before the wallet extension ever gets involved.
+
+When writing tests with `@avalix/chroma`, the wallet extension side stays the same — `metamask.authorize()` handles the MetaMask popup. Your test just needs to navigate the wallet selector your dApp renders:
+
+```typescript
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({ wallets: [{ type: 'metamask' }] })
+
+test('wallet selection → connect flow', async ({ page, wallets }) => {
+  // Import the account before navigating — MetaMask needs it ready
+  await wallets.metamask.importSeedPhrase({
+    seedPhrase: 'test test test test test test test test test test test junk',
+  })
+
+  await page.goto('https://localhost:3000')
+  await page.click('[data-testid="connect-button"]')
+
+  // Your dApp renders a wallet picker — click the MetaMask option
+  await page.click('[data-testid="wallet-option-metamask"]')
+
+  // MetaMask popup appears; authorize the connection
+  await wallets.metamask.authorize()
+
+  await expect(page.locator('[data-testid="connected-address"]')).toBeVisible()
+})
+```
+
+The wallet extension automation (`importSeedPhrase`, `authorize`) is handled by `@avalix/chroma`. The selector UI navigation is plain Playwright. Together they cover the full EIP-6963 connect flow end to end, including the picker that most test suites currently skip.
+
+## Where to Go from Here
+
+EIP-6963 is not aspirational — it shipped in 2023 and by 2025 every major wallet had adopted it. MetaMask, Coinbase Wallet, Rabby, Rainbow, Trust Wallet, and Frame all announce via `eip6963:announceProvider`. If your wallet connection code still reads `window.ethereum` directly as the primary path, users with multiple wallets are hitting a broken experience that no wallet considers its responsibility to fix.
+
+The migration is small for most codebases. wagmi users get it free by upgrading to v2 and using the updated `injected()` connector. For everything else, the event listener pattern above is roughly 20 lines. The testing change — adding coverage for your wallet picker — is worth doing regardless, since that UI is now a meaningful user interaction in every connect flow.
