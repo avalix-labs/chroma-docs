@@ -1,0 +1,75 @@
+---
+title: "EIP-7732 ePBS: How Glamsterdam Moves Block Building Into the Ethereum Protocol"
+description: "EIP-7732 ePBS moves Ethereum block building onchain in Glamsterdam. Here's the new slot timeline and what DeFi developers need to know."
+date: 2026-04-27
+author: Chroma Team
+---
+
+Most Ethereum blocks today are not assembled by validators — they are assembled by a small group of external builders operating through MEV-Boost, a relay network that exists entirely outside the protocol. Validators trust relays, relays trust builders, and the resulting transaction order in every block is the output of private agreements Ethereum itself cannot see or enforce. EIP-7732, the consensus-layer headliner for Glamsterdam, changes that. It moves block building into the protocol: builders stake ETH, bids are verified on-chain, and the slot timeline is restructured accordingly.
+
+## How MEV-Boost Works Today (and Where the Trust Goes)
+
+When a validator is scheduled to propose a block, the dominant path through MEV-Boost runs like this:
+
+1. The validator queries builders for bids via a relay
+2. Builders submit sealed headers — the execution payload hash and a value offer — without revealing contents
+3. The validator commits to the winning bid by signing and broadcasting a beacon block
+4. The relay verifies the commitment, then reveals the full execution payload
+5. The validator publishes the complete block
+
+The relay is the trust pivot. Validators trust it to reveal the payload only after they have committed. Builders trust it to pay correctly. Neither side has protocol enforcement — these are agreements between private parties.
+
+As of recent data, 80–90% of Ethereum blocks go through this pipeline. MEV-Boost works in practice because relays have reputational incentives. But the protocol itself has no visibility into any of it. There is no on-chain record of the builder, no stake at risk, and no enforcement if the relay acts dishonestly.
+
+## What Enshrined PBS Commits Builders To
+
+EIP-7732 brings the builder relationship into Ethereum's consensus layer directly.
+
+**Builders register on-chain.** A builder deposits at least 1 ETH as stake, gaining an on-chain identity. The stake is locked for `MIN_BUILDER_WITHDRAWABILITY_DELAY` (64 epochs, roughly 6.8 hours) after any withdrawal request — creating real financial accountability rather than just reputational risk.
+
+**Bids are protocol-visible.** Each builder bid is a `SignedExecutionPayloadBid` containing:
+- The execution payload hash (a commitment to the block contents)
+- The offered payment value
+- The builder's signature
+
+The proposer includes this signed bid directly in the beacon block. It is public, consensus-layer-visible, and verifiable by every node.
+
+**A new committee enforces payload delivery.** The Payload Timeliness Committee (PTC) — 512 randomly selected validators per slot — attests that the winning builder revealed a payload matching the committed hash on time. If the builder withholds or the revealed payload hash does not match the bid, the slot becomes empty: the proposer keeps the bid payment, and the builder loses the full bid value from their on-chain stake.
+
+The relay disappears from this model. The protocol enforces the exchange directly.
+
+## The New Slot Timeline and What It Changes for Transaction Timing
+
+The internal structure of a slot changes meaningfully under ePBS:
+
+```
+Current slot (MEV-Boost):
+  0s–4s:  Proposer fetches bids, commits, broadcasts full beacon block + execution payload
+  4s+:    Attestation and validation
+
+ePBS slot:
+  0s–3s:  Builder broadcasts signed bid
+  3s–4s:  Proposer includes bid in beacon block (payload not yet revealed)
+  4s–6s:  PTC verifies builder reveals matching execution payload
+  6s+:    Execution validation runs; payload becomes canonical in slot N+1
+```
+
+The execution payload moves off the consensus critical path. Currently, validators must finalize beacon-block agreement and verify the execution state transition in the same ~4 second window. Under ePBS, consensus-layer commitment happens first; full execution validation follows asynchronously, completing in slot N+1.
+
+For most users and most contracts, this is invisible. Transaction confirmation UX does not change. But for anyone building timing-sensitive contracts or infrastructure that distinguishes between "committed" and "fully validated" state, this two-slot execution model is worth knowing. A transaction included in slot N's payload is not attestation-confirmed until slot N+1 processing completes.
+
+## What DeFi and dApp Developers Need to Know
+
+For most Solidity developers, ePBS requires no code changes. Your contracts compile identically. Your deployment workflow does not change. But three areas are worth reviewing if you build MEV-sensitive or timing-sensitive protocols.
+
+**MEV exposure shifts.** With builders holding on-chain stakes and accountable to protocol rules, the dynamics of private order flow change. A builder who risks losing stake for withholding payloads has different incentives than one whose only enforcement is reputation with a relay operator. DeFi protocols that were designed around specific MEV-Boost behaviors — front-running protection, commit-reveal schemes, auction timing — should revisit their assumptions in light of a builder market where stakes are financial and consequences are protocol-enforced.
+
+**Timing-sensitive contracts.** If your contract uses block timestamps or block numbers in ways that assume a specific relationship between block commitment and execution finality, the ePBS two-slot model introduces a subtle shift. The change is unlikely to affect most contracts, but any logic performing time-based calculations against very recent blocks is worth auditing before Glamsterdam ships.
+
+**E2E test assumptions.** If you use `@avalix/chroma` or any Playwright-based wallet testing against Anvil, your local fork won't model ePBS timing — Anvil produces blocks synchronously. That is fine for testing transaction logic and wallet flows. But if you're testing DeFi scenarios where transaction ordering guarantees matter — like slippage bounds, MEV protection flows, or commit-reveal timing — understanding what ePBS changes at the protocol level helps you design test scenarios that reflect what users will experience on mainnet post-Glamsterdam.
+
+## Where Things Stand
+
+The Ethereum Foundation's Checkpoint #9 (April 2026) notes that Glamsterdam's first generalized devnet was targeting the week of the post's publication, pending ePBS stabilization. A Q2 2026 mainnet launch is unlikely given the implementation complexity — ePBS requires coordinating across the entire client stack — but development is progressing. Forkcast is the right place to track feature status as devnets iterate.
+
+The structural change ePBS makes — moving builders from trusted external actors to staked protocol participants — is the kind of shift that tends to be underappreciated until it ships. If you build DeFi protocols, MEV infrastructure, or anything that reasons about Ethereum's block production pipeline, reviewing the EIP-7732 spec now gives you a significant head start.
