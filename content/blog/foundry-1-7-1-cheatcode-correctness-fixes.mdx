@@ -1,0 +1,44 @@
+---
+title: "Foundry 1.7.1's Cheatcode Fixes: What May Have Been Hiding in Your Solidity Tests"
+description: "Foundry 1.7.1 fixes cheatcode bugs in expectEmit, mockCall, and expectRevert. What changes and what to audit before upgrading."
+date: 2026-05-13
+author: Chroma Team
+---
+
+Foundry 1.7.1 shipped on May 8, 2026 as a patch on top of 1.7.0, and the cheatcode line items in its changelog deserve more attention than a typical point release usually gets. The fixes don't just add new behavior — they change which tests pass and which fail against code you've already shipped. If your suite turns red after the upgrade, the new red is the truth. This post walks through the three Foundry 1.7.1 cheatcode correctness fixes most likely to expose hidden bugs in an existing test suite.
+
+## expectEmit no longer swallows reverts
+
+`vm.expectEmit` records a template log, runs the next call, and asserts that the call emitted a matching event. In versions before 1.7.1, the interaction between `expectEmit` and a revert in the underlying call could leave the revert un-surfaced. A test that expected an event from a call that actually reverted before emitting could still pass — the missing event triggered the cheatcode's failure path, but the original revert reason was lost on the way to the test runner.
+
+The 1.7.1 release notes describe the fix as preserving reverts when using `expectEmit`. In practice that means a reverting call under `expectEmit` now fails the test with the revert reason intact, the same way it would without the cheatcode wrapping. This matters most for tests that assert on the happy path of a state-changing function: if a refactor introduced a require-fail or a downstream callee that reverts, an older Foundry build might have masked the regression as "expected event not emitted" — or, worse, surfaced no failure at all in some construction patterns. The fix removes that ambiguity.
+
+The audit question to ask after upgrading: do any of your previously green `expectEmit` tests now fail with a revert reason? If so, the underlying call was reverting all along.
+
+## Payable mockCall now actually transfers value
+
+`vm.mockCall` is the cheatcode that overrides what a target contract returns for a specific call. Before 1.7.1, if you mocked a payable function, the override would intercept the call data and return your specified bytes — but the `msg.value` attached to the call was not transferred to the mocked target. The mock effectively ate the ETH.
+
+That sounds harmless until you remember how many DeFi flows route value through chains of payable calls: depositing into a wrapper, swapping through a router, settling a payment. A test that mocks the swap router's `exactInputSingle` and asserts the user's WETH balance increased would silently pass against a mock that never saw the value. Real flows that depend on the receiving contract's `balance` going up would behave differently on mainnet.
+
+In 1.7.1, payable `mockCall`s transfer value to the mocked target the same way a real call would. Existing tests that relied on the old behavior to "absorb" ETH without a balance change will now show a balance increase on the mocked contract — and any post-condition assertion that the source contract still holds that ETH will start failing. That failure is the bug that was always there.
+
+## expectRevert validates the reverter address inside CREATE frames
+
+`vm.expectRevert(bytes, address reverter)` is the form of the cheatcode that requires the revert to come from a specific address — useful when a transaction touches multiple contracts and you only want to catch reverts from the one under test. Pre-1.7.1, the reverter address argument was not enforced for CREATE frames. A revert during a constructor — from any address inside the CREATE call tree — would satisfy `expectRevert` even if the configured reverter was a different contract entirely.
+
+For most tests this is a non-issue: constructors usually don't make external calls, so a CREATE revert almost always comes from the contract being deployed. The pattern that breaks is deployment flows that fan out — factory contracts whose constructor calls into pre-deployed modules, or upgradeable proxies whose constructors verify implementation state. A test asserting "this proxy deployment reverts from the implementation contract" could pass on a revert from the factory's own assertion check, hiding a bug in the implementation's initializer logic.
+
+After 1.7.1, the reverter address is enforced inside CREATE frames. If you have `expectRevert(reason, address(impl))` wrapping a factory deployment that actually reverts from `address(factory)`, the test will start failing — correctly.
+
+## What to audit before you ship the upgrade
+
+Three quick passes through your test suite catch most of the surface area:
+
+1. Grep for `vm.expectEmit` — any test that wraps a state-changing call should be re-run and inspected for new revert reasons.
+2. Grep for `vm.mockCall` and filter to mocks of payable functions — re-check balance assertions on both sides of the mock.
+3. Grep for `vm.expectRevert(` with two arguments where the call under test is a CREATE — verify the reverter address actually matches the contract you intended.
+
+These are unit-test concerns. The same gaps look different at the wallet boundary, where the user sees a popup that either confirms or cancels — and where E2E coverage with a tool like [@avalix/chroma](https://github.com/avalix-labs/chroma) observes the real `eth_sendTransaction` result rather than a mocked return. The two layers are mostly orthogonal, but a unit suite that quietly misrepresented reverts or mocked away value transfers is exactly the kind of thing that makes downstream E2E failures hard to diagnose.
+
+Upgrade locally first, run your full suite, and treat any new red as a finding to investigate before merging.
