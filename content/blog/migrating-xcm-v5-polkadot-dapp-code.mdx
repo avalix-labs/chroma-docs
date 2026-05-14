@@ -1,0 +1,77 @@
+---
+title: "Migrating to XCM v5: What Changes in Your Polkadot dApp Code"
+description: "XCM v5 ships PayFees, Location renames, and the InitiateTransfer instruction. Here's what changes when you update your Polkadot dApp from v4."
+date: 2026-05-14
+author: Chroma Team
+---
+
+Polkadot's cross-consensus message format is the protocol every cross-chain Polkadot dApp ultimately speaks. If your application moves DOT between the relay chain and Asset Hub, transfers a parachain-native token to Asset Hub for trading, or routes USDT through Snowbridge to Ethereum, you are constructing XCM messages — directly or through a builder.
+
+XCM v5 is now the standard. The relay chain upgraded to runtime v1.5.0 last May, Polkadot and Kusama Asset Hub and BridgeHub advertise it, and Coretime accepts it as the default. If your code still constructs v4 messages, chains accept them through versioning — but you are missing the fee model and transfer instructions v5 was designed around. Here is what changes when you migrate.
+
+## Why XCM v5 Is the Version Your dApp Should Target
+
+Two practical reasons. First, system chains and most major parachains now emit events and accept messages in v5 natively. Reading chain state through v4 types means an extra version conversion that recent tooling does not always handle correctly. Second, the new instructions — particularly `PayFees` and `InitiateTransfer` — encode patterns that previously required workarounds across multiple `BuyExecution` and `DepositReserveAsset` calls.
+
+There is also a security incentive. The `InitiateTransfer` origin leak postmortem disclosed this year traced back to a `let _ = check_origin()` mistake in older code paths — origin failures silenced rather than raised. The fix landed in fellowship runtime updates that ship alongside v5.
+
+## PayFees Replaces BuyExecution
+
+The old fee model: at the start of an XCM program you withdrew assets, then called `BuyExecution { fees, weight_limit }` to pre-pay for execution. The weight limit could be `Unlimited` or a hard cap, and anything left over in the holding register stayed until something else consumed it.
+
+XCM v5 introduces `PayFees`, defined in Fellowship RFC 105:
+
+```rust
+PayFees { asset: Asset }
+```
+
+You specify only the asset — there is no separate weight limit parameter. The chain calculates actual execution weight and charges from the asset you provided. Subsequent `PayFees` calls in the same program are no-ops, which prevents double-charging when a program is composed from sub-programs that each tried to pay their own fees.
+
+The practical difference: with `BuyExecution` you estimated weight upfront to set a sensible `weight_limit`, and that estimate drifted as runtimes changed. With `PayFees` you commit an asset and the chain settles fees against it — composed programs no longer renegotiate weight bounds at every nesting level.
+
+## Location, Asset, and Assets: the Renames
+
+If you generate types from chain metadata — which you almost certainly do if you use [PAPI](https://papi.how/) or `@polkadot/api` — you will see new names for old types:
+
+- `MultiLocation` → `Location`
+- `MultiAsset` → `Asset`
+- `MultiAssets` → `Assets`
+
+The shape is the same: a `parents` count and a `Junctions` interior. Code reading `{ parents: 1, interior: { X1: { Parachain: 1000 } } }` keeps working semantically. What changes is the import path and the wrapper in versioned envelopes — a v5 message uses `XcmVersionedXcm.V5([ ... ])` rather than `V4`.
+
+The rename was deliberate. The "Multi" prefix dated from a time when the format anticipated multi-target messages that did not survive into the final spec. Cleaner names make the API match the model: each `Location` is one place, each `Asset` is one thing.
+
+## InitiateTransfer: Mixed Transfer Types in One Instruction
+
+The v4 transfer story required choosing between `DepositReserveAsset`, `InitiateReserveWithdraw`, and `InitiateTeleport` — each opinionated about how assets move. Combining a teleport and a reserve transfer in a single program was awkward at best, and doing it on a *remote* chain you instructed required a second message round-trip.
+
+`InitiateTransfer` (RFC 100) collapses the three into one instruction parameterised per asset. You can teleport one foreign asset to a parachain while reserve-transferring USDT in the same program, with one fee payment up front. For Asset Hub-routed flows involving foreign assets and stablecoins side by side, this is the instruction that finally makes the message match user intent.
+
+A typical PAPI v5 transfer message structure:
+
+```ts
+import {
+  XcmVersionedXcm,
+  XcmV5Instruction,
+} from '@polkadot-api/descriptors'
+
+const message = XcmVersionedXcm.V5([
+  XcmV5Instruction.WithdrawAsset([asset]),
+  XcmV5Instruction.PayFees({ asset: feeAsset }),
+  XcmV5Instruction.InitiateTransfer({
+    destination,
+    remote_fees: { Teleport: { Wild: 'All' } },
+    preserve_origin: false,
+    assets: [/* per-asset transfer types */],
+    remote_xcm: [/* what runs on the destination */],
+  }),
+])
+```
+
+Three instructions. One fee payment. Mixed transfer types in the third call, plus an optional `remote_xcm` block that runs on the destination chain after assets land. Compare that to the v4 equivalent — typically five or six instructions stitched together with a follow-up message — and the reason for the change becomes clear.
+
+## What This Means for E2E Tests
+
+XCM transfers cross trust boundaries: the user signs an extrinsic on the source chain, expects funds to land elsewhere, and the UI has to surface both halves of that journey. If you drive Polkadot.js extension flows with [@avalix/chroma](https://github.com/avalix-labs/chroma), the existing `polkadotJs.approveTx()` call still works for v5 extrinsics — the wallet sees a signed extrinsic, not the XCM bytes inside. What is worth auditing on the dApp side: success states that previously polled v4 events, error mappings keyed on v4 instruction names, and any place your code constructs the message itself rather than using a builder.
+
+The migration is small by line count, but it touches the hot paths where users hand off value between chains. Doing it now — while v4 still works — is cheaper than doing it the day a chain you depend on stops accepting older messages.
