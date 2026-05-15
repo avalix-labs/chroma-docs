@@ -1,0 +1,54 @@
+---
+title: "Solana's Confidential Balances: The Dual-Balance Model dApp Developers Need to Plan For"
+description: "Solana Confidential Balances put two ciphertexts on every Token-2022 account. Here's the dual-balance model and what changes in your dApp code."
+date: 2026-05-15
+author: Chroma Team
+---
+
+The SPL Token program is byte-level public. Every balance, every transfer amount, every withheld fee is queryable through `getAccountInfo` by anyone with an RPC endpoint. For institutions exploring Solana for payroll, treasury, or B2B settlement, that has always been a non-starter. Application-layer privacy tools existed, but they fragmented liquidity and broke composability the moment a private balance touched a public DEX.
+
+Solana Confidential Balances — three privacy-enabled extensions on the Token-2022 program — change that architecture without abandoning compatibility. Tokens stay SPL-shaped, mints stay public, but balances and transfer amounts can be encrypted at the token-account level. The ZK ElGamal Program that verifies the proofs is currently paused pending a security audit, but the on-chain extensions and off-chain proof libraries are already in production code. If you build any kind of Solana dApp that handles SPL tokens, here is what actually changes.
+
+## The dual-balance model behind Solana Confidential Balances
+
+A Token-2022 account configured for confidential transfers no longer has a single `amount` field. It holds two parallel balances:
+
+- **Public balance** — a plaintext `u64`, the same field a regular SPL account has.
+- **Confidential balance** — an ElGamal ciphertext encrypting the actual amount under the account owner's ElGamal public key.
+
+The confidential side splits further into two ciphertexts:
+
+- **Pending balance** — encrypted incoming amounts not yet "applied"
+- **Available balance** — the spendable encrypted balance
+
+The split is not stylistic. ElGamal additive homomorphism means anyone can credit your account without your signature — they encrypt an amount under your pubkey and the program adds the ciphertext to your pending balance. To prevent griefing where many small inbound transfers force constant proof recomputation, transfers land in pending and only move to available when the owner submits `ApplyPendingBalance`. That gives you explicit control over when your spendable state changes and how often your client decrypts fresh ciphertexts.
+
+## Configure, deposit, apply, transfer, withdraw
+
+Every confidential interaction is one of five Token-2022 instructions:
+
+1. **`ConfigureAccount`** — generates an ElGamal keypair client-side, attaches the public key to the token account, and initializes empty ciphertexts.
+2. **`Deposit`** — moves tokens from the public balance into the confidential pending balance. The amount is plaintext, so no ZK proof is required.
+3. **`ApplyPendingBalance`** — homomorphically adds pending into available and zeros pending. The owner-controlled gating step.
+4. **`Transfer`** — moves an encrypted amount from one account's available balance into another account's pending balance. Carries three ZK proofs: a range proof (amount fits in 64 bits, non-negative), an equality proof (sender and recipient ciphertexts encrypt the same value), and a validity proof (ciphertexts are well-formed).
+5. **`Withdraw`** — converts encrypted available balance back to plaintext public balance. Requires a proof that the requested amount does not exceed the available ciphertext.
+
+The mint side gains an **auditor ElGamal public key** field, set at mint creation. When configured, every transfer ciphertext is also encrypted under the auditor key — a regulated issuer can decrypt amounts without anyone else gaining that capability.
+
+## Where ZK proofs slip into your client code
+
+Proofs are generated on the client before submission. Anza ships `@solana/spl-token-confidential-transfer` for JavaScript and `spl-token-confidential-transfer-proof-generation` for Rust. A range proof runs several hundred bytes; equality and validity proofs are shorter. Inlining everything can exceed the 1232-byte packet limit, so the standard pattern is to write each proof into a separate **context state account** that the `Transfer` instruction references by pubkey.
+
+Because Solana is instruction-based and stateless, every account a transfer touches must be an explicit input. "Send 50 USDC confidentially" compiles into multiple instructions — initialize the proof context account, post each proof, then run `Transfer` — composed into one versioned transaction via `@solana/kit`'s pipeline. Compute-unit budgeting must include proof verification, historically hundreds of thousands of CUs per transfer, so a `SetComputeUnitLimit` instruction rides along.
+
+The status to track: the ZK ElGamal Program is paused on mainnet and devnet pending audit completion. Code paths can be exercised against LiteSVM or surfpool today; on-chain transfers resume once the audit clears.
+
+## What changes for dApp UX and testing
+
+The user-visible side is two balances, not one. Wallets are starting to render this — a public USDC line and a confidential USDC line, with an "apply" action that surfaces pending inbound transfers. If you build the UI yourself, your state model has to track both ciphertexts, decrypt them client-side with the user's ElGamal secret key, and re-decrypt after every `ApplyPendingBalance`.
+
+E2E coverage now spans two flows that did not exist before: an explicit "apply pending" interaction, and a transfer popup preceded by client-side proof generation that runs before the wallet ever sees a `signTransaction` request. If you maintain Solana wallet E2E tests with a tool like @avalix/chroma, that proof-generation step is invisible to the wallet but very visible in the timing of your UI's loading states — the right layer to wire assertions around.
+
+## Closing
+
+Confidential Balances are not a drop-in privacy toggle. They are a different shape for token-account state, with a separate spendable-balance pipeline and a client-side proof step on the critical path. For Solana dApps that will support them — payroll, treasury, B2B settlement, any compliance-sensitive flow — the changes ripple from RPC reads to wallet popups. Designing your state model around two balances now is cheaper than retrofitting it after the ZK ElGamal Program comes back online.
