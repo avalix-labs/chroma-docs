@@ -1,0 +1,106 @@
+---
+title: "wagmi v3 Migration: Hook Renames, Mutation Objects, and What Changes in Your dApp"
+description: "wagmi v3 renames useAccount to useConnection and standardizes write hooks on TanStack Query mutation objects. Here's the practical migration."
+date: 2026-05-16
+author: Chroma Team
+---
+
+wagmi has been the default React hooks library for EVM dApps since 2021. If your codebase has a connect button, an approval flow, or a swap UI, you almost certainly call `useAccount`, `useConnect`, or `useWriteContract`. Wagmi v3 shipped in early 2026, and it touches every one of those hooks. The renames are mechanical, but the mutation API change is the one that needs attention — the shape of what `useWriteContract` returns is different, and if you do not update your components, loading flags and error states will silently stop firing.
+
+Here is the migration most teams need, broken down by the three classes of breaking change, plus the one place a real-browser test catches what TypeScript will not.
+
+## Hook renames: useAccount becomes useConnection
+
+The first set of changes are pure renames. The wagmi team has argued for a while that "account" was misleading — these hooks return the current *connection* (a connector + chain pair), not the underlying account.
+
+- `useAccount` → `useConnection`
+- `useAccountEffect` → `useConnectionEffect`
+- `useSwitchAccount` → `useSwitchConnection`
+
+```tsx
+// v2
+const { address, isConnected } = useAccount()
+
+// v3
+const { address, isConnected } = useConnection()
+```
+
+The returned fields are unchanged. What trips teams up is non-mechanical references: variables literally named `account`, test selectors like `data-testid="useAccount"`, and the action returned by `useSwitchAccount` (now `switchConnection`).
+
+`useConnect().connectors` and `useReconnect().connectors` are also gone. The connectors list is now a standalone `useConnectors()` hook, so a "Choose Your Wallet" UI no longer needs to call `useConnect` just to enumerate options.
+
+## Mutation hooks now return TanStack Query mutations
+
+This is the change most likely to break behavior silently. In v2, `useWriteContract` returned `writeContract` as a function you called directly, alongside flat status fields:
+
+```tsx
+// v2
+const { writeContract, isPending } = useWriteContract()
+writeContract({ address, abi, functionName: 'approve', args: [spender, value] })
+```
+
+In v3, `writeContract` is a TanStack Query mutation object. You call `.mutate()` or `.mutateAsync()` on it, and the status flags live on the same object:
+
+```tsx
+// v3
+const writeContract = useWriteContract()
+writeContract.mutate({ address, abi, functionName: 'approve', args: [spender, value] })
+
+// status flags live on writeContract directly
+if (writeContract.isPending) { /* show spinner */ }
+if (writeContract.isError)   { /* show error toast */ }
+```
+
+The same shape applies to every mutation hook in v3: `useSendTransaction`, `useSignMessage`, `useSignTypedData`, `useConnect`, `useDisconnect`. Each one returns a mutation object with `.mutate()`, `.mutateAsync()`, `.isPending`, `.isSuccess`, `.isError`, `.error`, and `.data`.
+
+The operational risk is subtle: a destructured `isPending` from v2 still typechecks in many configs, but the value never becomes `true` because the new flag lives on the mutation object instead. Your "Submitting…" spinner never appears, your action button never disables, and your error toast never fires. The fix is to search for every destructured mutation action — `writeContract(...)`, `sendTransaction(...)`, `signMessage(...)` — and rewrite it as `<action>.mutate(...)` or `await <action>.mutateAsync(...)`.
+
+## Connector peer dependencies are now optional
+
+In v2, `@wagmi/connectors` bundled MetaMask, WalletConnect, Coinbase Wallet, Safe, and others. v3 demotes those to optional peer dependencies. If your config imports a connector you have not installed, the build fails:
+
+```bash
+npm i wagmi@latest viem
+npm i @walletconnect/ethereum-provider   # only if you use WalletConnect
+npm i @coinbase/wallet-sdk               # only if you use Coinbase Wallet
+```
+
+The minimum supported TypeScript version is also higher in v3 (`5.7.3` vs `5.0.4`), because the new typings rely on `const` type parameters and narrower template literal inference that earlier compilers do not understand.
+
+## What changes for your E2E tests
+
+The wagmi update is a frontend code change, not a wallet API change. Your MetaMask popups behave the same way and the on-chain calls are identical. What changes is how your UI transitions between states during a transaction. Loading flags that no longer fire and error states that never render are invisible to unit tests that mock the wagmi return value — but they are immediately visible to a test that drives a real browser through the real popup.
+
+For tests driving a real MetaMask extension with [@avalix/chroma](https://github.com/avalix-labs/chroma), an approval-then-action flow looks the same after the migration as before:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test('approval re-enables the swap button after confirm', async ({ page, wallets }) => {
+  const metamask = wallets.metamask
+  await metamask.importSeedPhrase({
+    seedPhrase: 'test test test test test test test test test test test junk',
+  })
+
+  await page.goto('http://localhost:3000/swap')
+  await page.getByRole('button', { name: /connect wallet/i }).click()
+  await metamask.authorize()
+
+  await page.getByRole('button', { name: /approve/i }).click()
+  await metamask.confirm()
+
+  await expect(page.getByText('Approving…')).toBeVisible()
+  await expect(page.getByText('Approving…')).toBeHidden({ timeout: 30_000 })
+  await expect(page.getByRole('button', { name: /swap/i })).toBeEnabled()
+})
+```
+
+The test does not care whether the spinner is driven by `writeContract.isPending` or a manually managed `useState` — it asserts that the text appears at the right moment and disappears when the receipt lands. If the "Approving…" assertion fails immediately after your v3 upgrade, the loading state is most likely still wired against a v2-style flat `isPending`. That is a one-line fix to read `writeContract.isPending` instead, and it is exactly the regression a real-popup test catches that a mocked unit test does not.
+
+## Closing
+
+The wagmi v3 migration itself is mechanical for most projects: a codemod for the hook renames, a rewrite of mutation call sites to use `.mutate()` and `.mutateAsync()`, and a few `npm install` lines for connector peer dependencies. The non-obvious work is everywhere your UI implicitly depended on `isPending` or `isError` being flat fields on the hook return. Ship the migration, then run any test that watches a "Submitting…" state or an error toast in a real browser — that is where the silent regressions live.
