@@ -1,0 +1,60 @@
+---
+title: "EIP-7864 and the Post-Quantum Case for Binary State Trees on Ethereum"
+description: "EIP-7864 proposes a binary state tree to replace Ethereum's Merkle Patricia Trie. Why it's beating Verkle on post-quantum security and ZK proving."
+date: 2026-05-17
+author: Chroma Team
+---
+
+The Ethereum Foundation's May 2026 protocol cluster update reshuffled the long-term roadmap in a quiet way that matters more than the headline numbers suggest: Verkle Trees moved from Glamsterdam into Hegota, and the state-tree conversation that had felt settled is open again. The leading alternative under discussion is **EIP-7864**, a proposal for a unified binary state tree using BLAKE3 as the hash function. For developers tracking long-term Ethereum architecture — bridges, light clients, ZK rollups — this is the change worth understanding now, before the spec freezes.
+
+## Why Verkle Trees Are Being Reconsidered
+
+Verkle Trees were always presented as the migration path for stateless Ethereum. They reduce per-account witnesses from roughly 3 KB on the Merkle Patricia Tree (MPT) down to a few hundred bytes, which is what made stateless clients tractable in the first place. Two pressures have eroded that consensus.
+
+The first is post-quantum security. Verkle commitments use the IPA polynomial scheme over an elliptic curve. Elliptic curve assumptions are not post-quantum safe. The Ethereum Foundation has set a target of "128-bit provable security" by year-end 2026, and any structural component resting on EC hardness becomes a long-term liability under that target.
+
+The second is proving cost. ZK rollups and any system that wraps Ethereum's state in a SNARK need the state tree's hash function to be cheap inside a circuit. Verkle's commitment scheme is small in bytes but expensive in constraints. A binary tree built on a SNARK-friendly hash (or even BLAKE3 with hardware acceleration) cuts the per-proof cost by an estimated 3-100x, depending on which hash is chosen.
+
+Binary trees rely only on hash functions, which makes them quantum-safe by construction and easier to prove.
+
+## How EIP-7864 Encodes Ethereum State
+
+The MPT today is a tree of trees: accounts, storage, and code each live in separate structures linked by hashes. EIP-7864 collapses all three into one unified binary tree with 32-byte keys and 32-byte values. Every piece of state is reached by the same lookup.
+
+A tree key is derived by hashing `(address, tree_index)` with BLAKE3 and taking the first 31 bytes as the **stem**; the final byte is a sub-index into a 256-slot subtree per address. That sub-index layout, from the reference Python spec, is:
+
+| Sub-index | Field |
+|-----------|-------|
+| 0 | Basic data (balance + nonce, packed) |
+| 1 | Code hash |
+| 64-127 | Header storage slots (the first 64 storage slots) |
+| 128-255 | Code chunks (31-byte chunks) |
+| 256+ | Main storage (further hashed) |
+
+Walking from the root, each step consumes one bit of the stem. Crucially, EIP-7864 does not encode the full 248-bit depth that a true Sparse Merkle Tree would; it inserts only the minimum number of internal nodes needed to disambiguate stems that share a prefix. Extension nodes — the awkward optimisation pattern in the MPT — are gone entirely. The result is a tree whose proofs are flat lists of sibling hashes plus a leaf value, all hashed with BLAKE3.
+
+The arity is fixed at two because two minimises proof size. The Python spec is short enough to read end-to-end — three files: `tree.py`, `embedding.py`, `test_*.py` — which is a useful signal that the design is intentionally simple.
+
+## What Changes for Bridges, Light Clients, and ZK Rollups
+
+If your bridge contract hardcoded an MPT verifier — and most production bridges do, because they predate EIP-7545 — that code breaks at the post-Hegota fork. MPT proofs are RLP-encoded variable-length paths of Keccak-hashed nodes. Binary tree proofs are flat 32-byte sibling lists hashed with BLAKE3. Nothing about the parsing logic survives.
+
+EIP-7545's version-aware proof verification precompile at address `0x21` is the migration path. A bridge that calls the precompile rather than inlining verification can handle both formats through one interface. If you are running anything that calls `eth_getProof` and parses the response in Solidity, the audit task is to route those calls through `0x21` before the format change ships.
+
+Light clients face the same parser-rewrite work, but the upside is meaningful: per-account witness size drops roughly 75% on the binary tree, which puts in-browser and mobile validation comfortably within budget.
+
+ZK rollup teams stand to gain the most. A SNARK-friendly hash inside the state tree itself collapses the proving cost of any state-grounded design — exactly the bottleneck that today forces rollups to maintain their own state commitments rather than proving against L1 state directly.
+
+## Timeline and What to Audit Now
+
+EIP-7864 is still draft. The hash function is not finalised — BLAKE3 is the conservative option, with Poseidon2 under active cryptographic review. The Foundation's May 2026 update pushed Verkle Trees from Glamsterdam to Hegota, which is the window in which a binary-tree alternative could plausibly land instead.
+
+Three audits are worth doing now regardless of which tree wins:
+
+1. Grep your contracts for hand-rolled MPT verifiers or RLP proof parsers. Those are migration debt in every scenario.
+2. Note every place a hash function is assumed to be Keccak in your verification path — a binary-tree migration breaks that assumption.
+3. If you mock `eth_getProof` responses in server-side tests, those fixtures will need regenerating once the format settles.
+
+E2E coverage at the wallet boundary is mostly insulated from this — a tool like @avalix/chroma still drives the same `eth_sendTransaction` flow whether state lives in an MPT, a Verkle tree, or a binary tree — but anything below the JSON-RPC surface that touches proof bytes is in scope.
+
+The tree migration is no longer settled. The trees being weighed today are different enough that the choice will affect contract code, not just node internals.
