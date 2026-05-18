@@ -1,0 +1,72 @@
+---
+title: "Polkadot Hub's XCM Precompile: Calling Cross-Chain Messages From Solidity"
+description: "Polkadot Hub's new XCM precompile lets Solidity contracts dispatch cross-chain messages directly. Here's the IXcm interface and how to use it."
+date: 2026-05-18
+author: Chroma Team
+---
+
+When Polkadot Hub shipped Solidity support in January 2026, the most common reaction from EVM developers was relief: Foundry works, MetaMask works, ERC-20 contracts deploy unchanged. What was still missing was the part of Polkadot that makes Polkadot interesting in the first place — XCM, the cross-consensus message format every parachain speaks. Until recently, reaching XCM from a Solidity contract meant building or trusting a bridge. A new precompile on Polkadot Hub's testnet collapses that path: your Solidity contract can now construct an XCM message and call into the protocol directly, no relayer, no wrapper contract, no separate chain.
+
+This post walks through the IXcm precompile interface, the `weighMessage` → `execute` pattern that the API forces you into, and what changes for the kind of cross-chain dApp you can ship from a single Solidity codebase.
+
+## Why Bridges Were the Workaround
+
+Until this precompile shipped, the realistic path from a Solidity contract to another parachain looked like one of three options. You could deploy on a parachain that already exposed Substrate primitives to Solidity through chain-specific precompiles — Moonbeam's approach for years. You could route through a third-party bridge — which inherits the bridge's trust assumptions and adds latency. Or you could split your app: a Solidity contract for the EVM side, a separate pallet or off-chain worker to construct the XCM, glued together with events.
+
+None of those compose well. A bridge call from inside an atomic transaction is not actually atomic across chains. And a chain-specific precompile only helps if you happen to deploy on that chain. The promise of Polkadot Hub was that EVM tooling targets one EVM environment — but reaching the rest of the ecosystem still required leaving that environment.
+
+The new XCM precompile is the answer to that gap. It is a low-level interface to `pallet_xcm`, exposed at a fixed address so any Solidity contract on Polkadot Hub can call it.
+
+## The IXcm Interface, Address, and Three Functions
+
+The precompile lives at the fixed address `0x00000000000000000000000000000000000a0000` (decimal 655360, often written `0xA0000`). It implements an interface called `IXcm` with three functions:
+
+- **`execute(bytes message, Weight weight)`** — runs an XCM program locally on Polkadot Hub with `msg.sender` as the origin. Use this to perform actions the Hub itself can carry out: withdraw assets from your account, initiate a transfer to another chain, or compose any sequence of XCM instructions whose effects start locally.
+- **`send(bytes destination, bytes message)`** — dispatches an XCM message to a remote chain identified by `destination`. Use this when the work has to happen on a different parachain — calling a function on a parachain's runtime, opening an HRMP channel, or triggering remote-execute patterns.
+- **`weighMessage(bytes message) → Weight`** — estimates the `refTime` and `proofSize` your message needs. You must call this (or otherwise know the weight) before `execute`, because `execute` charges and bounds against the weight you pass in.
+
+`Weight` is a two-field struct: `refTime` (the compute time used, in picoseconds against reference hardware) and `proofSize` (the size in bytes of the state proof the message will produce). Both fields are `uint64`. This is the same Weight v2 model that Substrate uses internally — exposed to Solidity for the first time.
+
+All `bytes` parameters are SCALE-encoded. SCALE is Polkadot's compact serialization format; it is not ABI-encoded and not RLP. You build the message bytes off-chain or with a helper library, then pass the resulting buffer as `bytes calldata`.
+
+## The weighMessage → execute Pattern
+
+Because Polkadot meters execution by weight rather than gas, the call pattern feels different from a normal EVM precompile. You almost always do two steps: ask the precompile how heavy your program is, then run it with that weight.
+
+```solidity
+interface IXcm {
+    struct Weight {
+        uint64 refTime;
+        uint64 proofSize;
+    }
+
+    function weighMessage(bytes calldata message) external view returns (Weight memory);
+    function execute(bytes calldata message, Weight calldata weight) external;
+    function send(bytes calldata destination, bytes calldata message) external;
+}
+
+address constant XCM_PRECOMPILE = 0x00000000000000000000000000000000000A0000;
+
+contract HubBridge {
+    IXcm constant xcm = IXcm(XCM_PRECOMPILE);
+
+    function teleportToParachain(bytes calldata message) external {
+        IXcm.Weight memory w = xcm.weighMessage(message);
+        xcm.execute(message, w);
+    }
+}
+```
+
+Three things to note from this shape. First, `weighMessage` is a view call — you can simulate it cheaply from a frontend before asking the user to sign. Second, the weight returned is the *exact* weight the program needs; passing it back as the bound means a benign program never gets cut off, while a malicious or buggy one cannot run away with the gas budget. Third, the caller's origin matters: anything inside `execute` that consumes assets is consuming `msg.sender`'s assets on Polkadot Hub. Reentrancy and approval patterns from the EVM world still apply — the precompile does not change `msg.sender` semantics.
+
+`send` is the same shape minus the weight argument, because remote execution is metered on the destination chain rather than locally. You pay only for the message dispatch on Polkadot Hub; the actual work is paid by whatever origin the receiving chain assigns to your message.
+
+## What This Changes for Cross-Chain dApps
+
+The practical shift is that a single Solidity contract can now coordinate flows that previously required at least two systems. A vault on Polkadot Hub can teleport DOT to Asset Hub as part of the same transaction that emits its `Deposit` event. A DEX router can route a swap on Hub and a follow-up reserve transfer to a parachain in one user click. A governance contract can vote on a remote parachain's referendum without a relayer.
+
+For testing, the surface that matters most is the wallet popup. The user signs a single `eth_sendTransaction` call to your contract, which then calls into `0xA0000`. From a Playwright perspective driving MetaMask with [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/metamask), nothing about that confirmation flow is special — the cross-chain effects happen on Polkadot's side after the transaction lands. The assertions worth writing are about state changes that depend on those effects: an event emitted on confirmation, a balance change once the destination chain has finalized.
+
+Two cautions worth knowing before you ship. The precompile is currently a Polkadot Hub testnet feature; the mainnet activation timeline is not yet final. And SCALE encoding is unforgiving — a single off-by-one in your versioned XCM envelope (`V5` vs `V4`) means the precompile rejects the message before any of your Solidity logic runs. If you are not already generating XCM bytes through PAPI or a Rust helper, treat that encoder as the riskiest part of the integration, not the precompile call itself.
+
+The EVM and Polkadot have spent years as parallel ecosystems with bridges in between. A precompile at a fixed address is a small piece of code, but it is the seam where those two models finally meet on the same call stack.
