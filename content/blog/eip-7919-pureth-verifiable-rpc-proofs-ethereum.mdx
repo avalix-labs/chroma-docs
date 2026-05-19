@@ -1,0 +1,52 @@
+---
+title: "EIP-7919 Pureth: How Glamsterdam Plans to Make Ethereum RPC Data Cryptographically Verifiable"
+description: "EIP-7919 Pureth is Glamsterdam's third headliner. Here's how it bundles 10 EIPs to add cryptographic proofs to Ethereum RPC responses."
+date: 2026-05-19
+author: Chroma Team
+---
+
+Every dApp you have ever shipped trusts its RPC provider implicitly. Your frontend asks Infura, Alchemy, or your own node for a balance, a log, or a receipt, and whatever JSON comes back is what your users see. If the provider has a stale replica, a buggy client release, or a compromised operator, your app surfaces wrong state and there is no protocol-level way to catch it. EIP-7919, known as **Pureth**, is the Glamsterdam headliner that intends to close that gap by attaching cryptographic proofs to RPC responses. It is less headline-friendly than ePBS or block-level access lists, but it is the change most likely to alter how you read chain state in production.
+
+## The hidden trust assumption in every RPC call
+
+Today's JSON-RPC contract is "trust the provider." `eth_getBalance` returns a number. `eth_getLogs` returns an array. Nothing in the response lets the client verify that the number matches the canonical state root, or that no logs were omitted between two block heights. Light clients can do better — but writing a light client into a dApp frontend has been impractical because the underlying data formats were never optimized for partial verification.
+
+Three failure modes drive the proposal:
+
+- **Faulty software.** A buggy execution client release can serve wrong receipts to every dApp pointing at it until someone notices.
+- **Malicious or compromised operators.** A provider that omits a log or replays an older state can target individual users without ever lying on-chain.
+- **Cost and privacy.** Most teams pay third-party indexers because direct RPC reads are not expressive enough for things like ERC-20 history. That centralization re-introduces the same trust assumption one layer up.
+
+Pureth aims to make every response a thing you can check, not a thing you have to believe.
+
+## How Pureth turns RPC responses into provable data
+
+EIP-7919 is a meta-EIP — it does not specify a new opcode, it bundles ten supporting EIPs that together reshape how Ethereum serializes and indexes data. The core moves:
+
+- **SSZ for transactions and receipts** (EIP-6404, EIP-6466). RLP-encoded transactions and receipts get re-encoded into SSZ (Simple Serialize), the format already used on the consensus layer. SSZ uses tree-based hashing, so any leaf — a single log, a single field — can be proved against a known root with a logarithmic-size Merkle path.
+- **A binary, REST-style API.** The new transport layer mirrors the beacon API: REST endpoints, SSZ payloads, Snappy compression. Responses include the proof path; clients verify against a header they already trust.
+- **On-chain log indexing** (EIP-7745). Bloom filters in block headers are replaced with a 2D log index that is verifiable end-to-end. EIP-7668 then removes the legacy bloom filter entirely.
+- **ETH transfers emit logs** (EIP-7708). Native ETH movement currently produces no log, which forces indexers to re-execute traces to track balance changes. After 7708, native transfers and ERC-20 transfers can be observed through the same log-subscription primitive.
+
+The result: a dApp can pull a balance, a log range, or a receipt from any provider, and a small client library can confirm the response matches what is committed under a block header it already verified.
+
+## What changes for dApps, indexers, and bridge verifiers
+
+The practical surface area is narrower than it sounds, but real:
+
+- **Receipt parsers must understand SSZ.** Anything that decodes raw receipts — bridge verifiers, on-chain proof contracts, off-chain workers — needs an SSZ-aware path alongside the existing RLP one. The legacy format does not disappear overnight, but new tooling will assume SSZ.
+- **ETH transfers join the log model.** Code that listens for `Transfer` events on ERC-20s and tracks native ETH out of band can be simplified once 7708 lands. Tax tooling, analytics dashboards, and wallet activity feeds are the obvious beneficiaries.
+- **Indexers become checkable, not authoritative.** A subgraph or a custom indexer can keep its query ergonomics, but its outputs become verifiable against on-chain proofs. That is the part that quietly shifts the trust model.
+- **Bloom-filter shortcuts are deprecated.** Backends that scan `logsBloom` to skip blocks need to migrate to the new index. The new index is faster and verifiable; the migration is mechanical but mandatory.
+
+If you are testing wallet flows end-to-end with [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/metamask), this does not change the wallet API itself — Pureth lives below the RPC boundary. What it does change is which endpoint you point your dev stack at: testing against an RPC that already speaks the SSZ format is the cleanest way to catch parsing assumptions before Glamsterdam ships.
+
+## What to audit before Glamsterdam ships
+
+You do not need to wait for activation to prepare:
+
+- Grep your codebase for `logsBloom`, hard-coded RLP receipt offsets, and any bespoke transaction hashing. These are the cracks Pureth widens.
+- If you maintain a bridge or a fraud-proof system that verifies receipts in a smart contract, plan an SSZ-receipt verification path now. Glamsterdam timelines slip, but the format will land.
+- Check whether your indexer dependency could be replaced by direct, verifiable RPC reads for hot paths like balance queries and recent log scans. Those calls become both cheaper and trustless after Pureth.
+
+Pureth will not be the upgrade your users notice. It is the upgrade that makes "trust your RPC provider" stop being a load-bearing assumption — and the migration is small if you start auditing now, before SSZ becomes the only thing new tooling supports.
