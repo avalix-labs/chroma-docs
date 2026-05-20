@@ -1,0 +1,70 @@
+---
+title: "Extrinsic Signing in Polkadot dApps: The Test That Outlives Your SDK"
+description: "@polkadot/api is in maintenance mode. As your Polkadot dApp migrates to PAPI or Dedot, an E2E test of the extrinsic signing flow catches what changed."
+date: 2026-05-20
+author: Chroma Team
+---
+
+Polkadot dApp developers are in the middle of an SDK transition. `@polkadot/api` — the library most Polkadot frontends were built on — is now in maintenance mode, and the official docs point new projects at Polkadot-API (PAPI) or Dedot. A migration is on your roadmap whether you have scheduled it or not, and it rewrites how your code builds and submits a transaction. The part it does not change is **extrinsic signing**: the moment a user reviews a call in the Polkadot.js extension and approves it. That boundary is exactly what an end-to-end test should pin down before you touch the SDK.
+
+## What an extrinsic actually is
+
+On an EVM chain a transaction has a fixed shape: a `to` address, a `value`, a `data` blob, and a gas limit. Polkadot does not work that way, and the difference matters the moment you write a test.
+
+A Polkadot transaction is an **extrinsic** — a call into a specific pallet's dispatchable function. `balances.transferKeepAlive`, `staking.bond`, `utility.batch`: each is a runtime function with typed arguments. The dApp encodes the call, then wraps it with **signed extensions** — the account nonce, a mortality era, an optional tip, and on recent runtimes a metadata hash. The wallet signs that SCALE-encoded payload, returns the signature, and the dApp submits the assembled extrinsic.
+
+Two consequences follow. There is no gas limit to set; fees come from the call's **weight** and length, so the user sees an estimate rather than choosing one. And the popup shows a *decoded call* — pallet, method, arguments — not an opaque hex blob. Your test verifies that the dApp put the right call in front of the user and handled the signature it got back.
+
+## Why the signing flow survives the SDK migration
+
+Here is the useful part for anyone facing a PAPI or Dedot migration. `@polkadot/api`, PAPI, and Dedot disagree on almost everything — class-based versus functional design, type generation, bundle size, light-client support. They do not disagree on what an extrinsic is or how a browser wallet signs one.
+
+All three construct the same runtime call, apply the same signed extensions, and hand a payload to the **injected extension** through the signer interface the Polkadot.js and Talisman wallets expose. How the bytes are produced differs; the bytes, the popup, and the returned signature do not.
+
+That is why an end-to-end test is the right safety net here. A unit test that asserts on `@polkadot/api` call objects is coupled to the SDK and has to be rewritten on the move to PAPI. A test that drives the real extension and asserts on what your dApp *displays and does* is coupled to behavior instead. Swap the SDK underneath it: green means users see no difference, red means the migration changed something real.
+
+## Writing the extrinsic signing test with @avalix/chroma
+
+[@avalix/chroma](https://github.com/avalix-labs/chroma) was built for the Polkadot ecosystem first. It drives the real Polkadot.js extension inside a Playwright test, so the connect and signing popups are the ones your users see. After `npx chroma download-extensions`, a transfer test reads like this:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'polkadot-js' }],
+})
+
+test('signs a balance transfer extrinsic', async ({ page, wallets }) => {
+  const polkadotJs = wallets['polkadot-js']
+
+  // Import a funded test account before the dApp loads
+  await polkadotJs.importMnemonic({
+    seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk',
+  })
+
+  await page.goto('http://localhost:3000')
+  await page.click('button:has-text("Connect")')
+  await polkadotJs.authorize()
+
+  // The dApp builds the extrinsic; the extension shows the decoded call
+  await page.fill('input[name="amount"]', '1.0')
+  await page.click('button:has-text("Transfer")')
+  await polkadotJs.approveTx()
+
+  await expect(page.locator('.tx-status')).toHaveText('Confirmed', {
+    timeout: 30000,
+  })
+})
+```
+
+`createWalletTest` returns a Playwright `test` extended with a `wallets` fixture. `importMnemonic` runs the extension's onboarding so the account exists before your dApp queries it. `authorize()` approves the connection popup. `approveTx()` signs the extrinsic in the real signing popup; `rejectTx()` is its mirror — the case where the user declines and your UI has to recover. Because the test only touches your dApp's UI and the extension, none of it is tied to whichever SDK built the extrinsic.
+
+## The gotchas that surface only at the wallet boundary
+
+Three extrinsic-specific behaviors are invisible to mocked tests, and each deserves a dedicated case:
+
+- **Mortality.** Extrinsics are mortal by default — valid for an era of roughly 64 blocks. A signing popup left open too long, or a slow CI runner, yields a signature the chain rejects as expired. A real-extension test that pauses between building the call and `approveTx()` exercises this.
+- **Fees are charged on failure.** Weight-based fees are deducted once the extrinsic is *included*, even when the inner call fails. A UI that claims "failed, no cost" is wrong, and only a test that submits a genuinely failing call proves it.
+- **Included is not succeeded.** A `system.ExtrinsicSuccess` event means the extrinsic dispatched, not that the call did what the user wanted — a `utility.batch` can land on-chain with one inner call reverted. Assert on the pallet events your dApp surfaces, not just block inclusion.
+
+An SDK migration is a good forcing function: it makes you look hard at code you have not touched in a year. Before swapping `@polkadot/api` for PAPI or Dedot, write the extrinsic signing test first. It costs an afternoon, runs against the real extension, and turns "I think the migration is behavior-neutral" into something you can actually verify.
