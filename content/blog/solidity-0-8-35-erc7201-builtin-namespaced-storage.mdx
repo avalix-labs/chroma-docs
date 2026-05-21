@@ -1,0 +1,70 @@
+---
+title: "Solidity 0.8.35's erc7201 Builtin: No More Hardcoded Namespaced Storage Slots"
+description: "Solidity 0.8.35 adds an erc7201 builtin that derives ERC-7201 namespaced storage slots at compile time — no more pasting a hardcoded constant."
+date: 2026-05-21
+author: Chroma Team
+---
+
+Upgradeable contracts have a quiet failure mode that no unit test reliably catches: storage collisions. A proxy keeps its state at fixed slots while the logic contract behind it changes, so the moment a new implementation lays out its variables differently, old data gets reinterpreted as something else. **Namespaced storage** — formalized as ERC-7201 — is the pattern that prevents this, and Solidity 0.8.35, released April 29, 2026, finally lets the compiler do the slot math for you with a new `erc7201` builtin.
+
+## Why Upgradeable Contracts Collide in Storage
+
+A proxy contract holds state; an implementation contract holds code. Every call `DELEGATECALL`s into the implementation, which executes against the proxy's storage. That split is what makes upgrades possible — point the proxy at new code, keep the data.
+
+The catch is how Solidity assigns storage. State variables go into slots `0, 1, 2, …` in declaration order, and with inheritance, in the linearized order of base contracts. Slot numbers are positional, not named. Insert a variable in the middle of a contract, reorder two fields, or add a member to a shared base, and every slot after that point now refers to different data than the previous implementation wrote there. A `uint256 balance` can start reading what used to be an `address owner`.
+
+The long-standing mitigation was reserved-gap arrays — `uint256[50] private __gap` — plus a strict rule to only ever append. It works, but it is manual bookkeeping that an audit has to re-verify on every upgrade.
+
+## How ERC-7201 Namespaced Storage Works
+
+ERC-7201 stops fighting the sequential layout and steps outside it. Instead of declaring loose state variables, you group related fields into a struct and place that struct at a *pseudorandom* slot derived from a namespace string:
+
+```solidity
+/// @custom:storage-location erc7201:example.main
+struct MainStorage {
+    uint256 x;
+    uint256 y;
+}
+
+function _getMainStorage() private pure returns (MainStorage storage $) {
+    assembly { $.slot := MAIN_STORAGE_LOCATION }
+}
+```
+
+`MAIN_STORAGE_LOCATION` is the namespace's base slot, and it comes from the ERC-7201 formula:
+
+`keccak256(abi.encode(uint256(keccak256(bytes(id))) - 1)) & ~bytes32(uint256(0xff))`
+
+Two design choices matter here. The double hash and the `- 1` keep the result clear of slots that other contracts reach by hashing a single value, such as mapping and dynamic-array entries. The `& ~0xff` mask zeroes the last byte, aligning every namespace to a 256-slot boundary — so a struct can grow by appending fields without ever crossing into a neighbour. Each module, mixin, or upgrade-era feature gets its own collision-resistant region, and the `@custom:storage-location` annotation records which string produced it.
+
+## What the erc7201 Builtin Changes
+
+Until now there was a gap in this workflow. The compiler has parsed the `@custom:storage-location` annotation into the AST since 0.8.20, but it could not *compute* the slot. You ran the formula yourself — a one-off script, `cast keccak`, or OpenZeppelin's tooling — and pasted the 32-byte result in as a constant:
+
+```solidity
+// before 0.8.35: computed off-chain, pasted in by hand
+bytes32 private constant MAIN_STORAGE_LOCATION =
+    0x183a6125c38840424c4a85fa12bab2ab606c4b6d0e7cc73c0c06ba5300eab500;
+```
+
+Nothing connects that literal to the `example.main` string in the annotation above it. Rename the namespace and forget to recompute, copy a constant from another contract, or fat-finger a digit — the contract still compiles, still deploys, and now reads and writes the wrong region.
+
+Solidity 0.8.35 closes the gap with the `erc7201` builtin. It takes the namespace string and returns the base slot, evaluated at compile time:
+
+```solidity
+// 0.8.35+: the compiler derives the slot
+bytes32 private constant MAIN_STORAGE_LOCATION =
+    bytes32(erc7201("example.main"));
+```
+
+`erc7201(string memory id)` returns a `uint` and runs only in a compile-time context, so you wrap it in `bytes32(...)` to match the slot type the standard uses. The result is identical to the formula — the builtin *is* `keccak256(keccak256(id) - 1) & ~0xff` — so the constant, and the deployed bytecode, do not change. What changes is that the slot and the namespace name are now derived from one source instead of two that can silently disagree.
+
+## Adopting It Without a Migration
+
+Because the builtin reproduces the formula exactly, replacing a correct literal with `bytes32(erc7201("..."))` is a no-op at runtime: same slot, same layout, no storage migration. It removes a transcription-error class, not a behaviour.
+
+A few things to keep in mind. The builtin needs compiler 0.8.35 or later. Keep the `@custom:storage-location` annotation — it is what external tools read, including OpenZeppelin's upgrade-safety checks and block explorers, and the builtin does not replace it. And use the same string in both places; the compiler will not cross-check the annotation against the argument for you.
+
+One layer up, the reason any of this matters is that an upgrade swaps the code behind a fixed address while the data stays put — the storage layout is the contract that must hold across that swap. Layout tooling guards the contract side; on the dApp side, an end-to-end test that drives the real wallet against the deployed proxy — the layer [@avalix/chroma](https://github.com/avalix-labs/chroma) covers — is what confirms the user-facing flow still behaves after you ship the new implementation.
+
+If you maintain upgradeable or modular contracts, the path is short: move to Solidity 0.8.35, find every hardcoded namespaced-storage constant, and replace it with `erc7201(...)`. The slot stays the same; the magic number stops being something a reviewer has to take on faith.
