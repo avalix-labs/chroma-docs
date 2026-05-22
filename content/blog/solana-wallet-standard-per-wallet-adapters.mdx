@@ -1,0 +1,55 @@
+---
+title: "The Solana Wallet Standard: Why Your dApp No Longer Needs Per-Wallet Adapters"
+description: "The Solana Wallet Standard lets installed wallets self-register, so your dApp can drop most wallet-adapter packages. Here's what changes and why."
+date: 2026-05-22
+author: Chroma Team
+---
+
+Open the wallet config file in almost any Solana dApp and you'll find the same thing: a list of imports — `@solana/wallet-adapter-phantom`, `-solflare`, `-backpack`, `-coinbase` — each one a separate package, each one a dependency you bump, audit, and hope is current. Add a wallet and you add a package. Miss one and a user with that wallet installed sees nothing in your connect modal. The Solana Wallet Standard changes that contract, and the official `wallet-adapter` project has already stopped accepting new per-wallet adapters because of it. If you maintain a Solana dApp, this is a config file you can shrink today.
+
+## Why Solana dApps Ship a Folder of Adapter Packages
+
+The wallet-adapter ecosystem grew up when every wallet injected itself into the page differently. Each adapter package is a small shim: it knows the quirks of one wallet's injected object and presents it through a uniform interface your dApp can call. You import the shims, pass them to `WalletProvider`, and they become the selectable list in your connect UI.
+
+That worked, but the cost compounds. Every supported wallet is an explicit dependency in your `package.json`. Your list of wallets is only as current as your last release — a wallet that ships after your build is invisible to your users until you publish an update. And a growing share of those packages do nothing more than forward calls to a window object that now follows a shared protocol.
+
+## How the Solana Wallet Standard Registers Wallets
+
+The Wallet Standard inverts the model. Instead of your app importing a shim per wallet, the wallet announces itself to the page.
+
+When a wallet extension loads, it dispatches a `wallet-standard:register-wallet` window event. Your app dispatches `wallet-standard:app-ready`. A small registry — `getWallets()` from the `@wallet-standard/app` package — collects every wallet that has registered and exposes `on('register', ...)` and `on('unregister', ...)` callbacks, so a wallet that loads *after* your app still appears without a page reload. No import, no load-order race.
+
+Every registered wallet implements the same two interfaces, `Wallet` and `WalletAccount`, and exposes named capabilities your dApp checks by string. The chain-agnostic features cover the lifecycle — `standard:connect`, `standard:disconnect`, `standard:events` — and the Solana extension features cover signing: `solana:signTransaction`, `solana:signAndSendTransaction`, `solana:signMessage`, and `solana:signIn`. Your code asks "does this wallet support `solana:signAndSendTransaction`?" instead of asking "is this Phantom?"
+
+That feature split respects the SVM model. `solana:signTransaction` returns a signed transaction — a versioned (v0) transaction your dApp assembled from its instructions — for you to submit yourself. `solana:signAndSendTransaction` signs and submits in one wallet round-trip. Your dApp still composes the instructions, the address lookup tables, and the compute budget; the wallet's job is narrowly to sign or send what you hand it.
+
+## What You Can Delete From Your Wallet Config
+
+Here's the actionable part. The `wallet-adapter` maintainers put it plainly: for any wallet injected into the window in a browser, extension, or mobile app, you no longer need an adapter at all. `WalletProvider` from `@solana/wallet-adapter-react` already discovers Standard wallets through that registry, so the explicit list collapses:
+
+```tsx
+// Before — every wallet is a hand-maintained dependency
+import { PhantomWalletAdapter } from '@solana/wallet-adapter-phantom'
+import { SolflareWalletAdapter } from '@solana/wallet-adapter-solflare'
+
+const wallets = [new PhantomWalletAdapter(), new SolflareWalletAdapter()]
+```
+
+```tsx
+// After — Standard wallets register themselves; the list stays current
+const wallets = []  // WalletProvider still discovers every installed Standard wallet
+```
+
+The first block names two wallets and pins two package versions; anything not listed is unreachable. The second block passes an empty array — `WalletProvider` merges in every wallet that registered through the Wallet Standard, so Phantom, Solflare, Backpack and others appear without being named.
+
+The `wallets` array doesn't disappear — it becomes the exception list. It's there only for wallets that genuinely can't self-register: SDK-based wallets that aren't window-injected, or mobile cases routed through the Mobile Wallet Adapter protocol. Everything else maintains itself. A wallet you've never integrated shows up in your connect modal the day a user installs it.
+
+## What This Means for Your Connect-Flow Tests
+
+There's a testing consequence worth naming. When discovery moves from a static import array to runtime registration, the contents of your connect modal depend on what's actually installed in the browser — not on a value you can assert against in a unit test. A test that checks your `wallets` array no longer proves a user can pick Phantom and connect.
+
+An end-to-end test that loads the real Phantom extension does. That's the seam [@avalix/chroma](https://github.com/avalix-labs/chroma) covers: it runs a genuine wallet extension inside a Playwright browser, so the extension registers through the Wallet Standard exactly as it would for a user, and your test confirms it appears in the modal and completes the connect and signing flow.
+
+## Where to Start
+
+Open your wallet config file. Every per-wallet adapter import for a window-injected wallet is now a line you can remove. The payoff isn't only a shorter `package.json` — it's that your list of supported wallets becomes a property of what your users install, not of your dependency tree. That's one fewer file to revisit every time the ecosystem ships a new wallet.
