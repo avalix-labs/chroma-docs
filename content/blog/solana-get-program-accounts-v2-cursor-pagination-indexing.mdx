@@ -1,0 +1,94 @@
+---
+title: "Solana's getProgramAccountsV2: How Cursor Pagination and changedSinceSlot Replace Custom Indexers"
+description: "getProgramAccountsV2 ships cursor pagination and changedSinceSlot for incremental Solana indexing. Here's how the v2 API replaces custom indexer infrastructure."
+date: 2026-05-23
+author: Chroma Team
+---
+
+For years, building a Solana dApp that displayed live program state at scale meant building your own indexer. `getProgramAccounts` was the only first-class RPC method for "give me every account owned by program X" — and once your program crossed a few hundred thousand accounts, it started timing out, eating bandwidth, and pushing teams onto Geyser plugins, Yellowstone gRPC, or a self-hosted Postgres mirror. **getProgramAccountsV2**, now shipping as part of the Solana RPC 2.0 rollout, gives that workload a real first-class API: cursor pagination, incremental polling via `changedSinceSlot`, and configurable response limits.
+
+## Why getProgramAccounts has been a scaling cliff
+
+A traditional `getProgramAccounts` call asks an RPC node to walk every account owned by a program, apply optional `memcmp` or `dataSize` filters, and return everything that matches in a single response. On a program with millions of accounts — a popular AMM, an NFT marketplace, a perpetual DEX — this means:
+
+- Full table scans on the account database for every request, with no shared work across calls
+- One response body that can balloon past 100 MB before encoding
+- Frequent 429s or timeouts when filtering does not narrow the result enough
+- No way to ask for *just what changed* since your last poll — every request reads the entire program
+
+The accounts-module redesign in [Solana RPC 2.0](https://blog.triton.one/announcing-rpc-2-0-with-solana-foundation-rethinking-solanas-read-layer-from-the-ground-up/) — a joint effort by Triton One, the Solana Foundation, Helius, Jupiter, and Anza — replaces those scans with adaptive indexes that build themselves from incoming query traffic. `getProgramAccountsV2` is the developer-facing surface of that work: the method dApps actually call.
+
+## What v2 adds to the API
+
+The shape looks familiar, but three parameters change how the method behaves:
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "method": "getProgramAccountsV2",
+  "params": [
+    "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+    {
+      "encoding": "base64",
+      "limit": 1000,
+      "changedSinceSlot": 285119400,
+      "paginationKey": null
+    }
+  ]
+}
+```
+
+`limit` caps the accounts returned in a single response — configurable up to 10,000. The response now carries a `paginationKey`; pass it back on the next call to continue from where the previous response stopped. The end of pagination is signalled by a null `paginationKey`, **not** by a short page. A page can come back shorter than `limit` because filters were applied after the index walk, so always loop until the key is null.
+
+`changedSinceSlot` is the bigger shift. Pass the slot you last polled at, and the RPC returns only accounts whose write-slot is greater. Combined with cursor pagination, it turns full sweeps into bounded, incremental reads. The first call you make for a program is still a full snapshot. After that, you poll deltas — typically two orders of magnitude smaller — and merge them into your in-memory state.
+
+`memcmp` and `dataSize` filters still apply the same way they did in v1. They run *after* the index walk, so a tight `memcmp` on a 32-byte account discriminator stays the most effective way to keep payloads small.
+
+## A practical polling pattern
+
+For a UI that wants near-live program state without operating a Geyser pipeline, the loop looks like this in TypeScript:
+
+```ts
+let cursor: string | null = null
+let lastSlot = 0
+const accounts = new Map<string, AccountData>()
+
+// 1. initial snapshot: paginate until paginationKey is null
+do {
+  const res = await rpc.getProgramAccountsV2(PROGRAM_ID, {
+    encoding: "base64",
+    limit: 5000,
+    paginationKey: cursor,
+  })
+  for (const a of res.value) accounts.set(a.pubkey, decode(a))
+  cursor = res.paginationKey
+  lastSlot = Math.max(lastSlot, res.context.slot)
+} while (cursor !== null)
+
+// 2. incremental poll: only fetch what changed since lastSlot
+setInterval(async () => {
+  let next: string | null = null
+  do {
+    const res = await rpc.getProgramAccountsV2(PROGRAM_ID, {
+      encoding: "base64",
+      limit: 1000,
+      changedSinceSlot: lastSlot,
+      paginationKey: next,
+    })
+    for (const a of res.value) accounts.set(a.pubkey, decode(a))
+    next = res.paginationKey
+    lastSlot = Math.max(lastSlot, res.context.slot)
+  } while (next !== null)
+}, 2000)
+```
+
+The snapshot fills the map once. The interval pulls only the slots that produced new writes, which is what makes this loop cheap enough to run from a browser tab or a serverless function. Because Solana programs are stateless and accounts are explicit inputs to every instruction, you can rebuild your local view of program state from this stream alone — no need to replay transactions, simulate instruction logic, or talk to a sidecar database.
+
+Two caveats worth knowing. First, **closed accounts will not appear in the changed set** if the account has been garbage-collected (lamports went to zero, account removed). A periodic full resync is the simplest way to reconcile deletions. Second, `paginationKey` is opaque and tied to the index snapshot at the time of the first call — treat it as a short-lived token, not a stable identifier you persist across restarts.
+
+## What this means for testing and the rest of RPC 2.0
+
+If your dApp uses cursor-based polling, your local test setup needs to match. A test that mocks `getProgramAccounts` with a static array no longer reflects how the real client iterates: it will not exercise the cursor loop, the partial-page case, or the changed-set merge. Run tests against a real RPC surface — Surfpool, LiteSVM with an RPC shim, or a forked Surfnet — so the pagination path is covered. End-to-end tests that drive a real Phantom wallet against this stack — the layer where tools like @avalix/chroma operate — are unaffected at the wallet boundary, but the dApp's loading and reconciliation states under cursor pagination *are* observable in the UI and worth asserting on.
+
+`getProgramAccountsV2` is the first method to land on RPC 2.0's accounts module, but it will not be the last. The historical module — a columnar engine sitting in front of the full ledger — is the next piece, and read methods like `getSignaturesForAddress` and `getTransaction` are expected to move onto it next. If you maintain custom Solana indexing infrastructure today, this is the upgrade where some of it stops earning its keep.
