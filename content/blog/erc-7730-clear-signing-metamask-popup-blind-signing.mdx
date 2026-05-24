@@ -1,0 +1,102 @@
+---
+title: "ERC-7730 Clear Signing: Ending Blind Signing in Your dApp's MetaMask Popup"
+description: "ERC-7730 Clear Signing turns hex calldata in MetaMask into human-readable intent. Here's the descriptor format and how to publish one."
+date: 2026-05-24
+author: Chroma Team
+---
+
+On May 12, 2026, the Ethereum Foundation launched the Clear Signing standard. The change is small in surface area — a JSON file format — but if your dApp asks users to sign anything more complex than an ETH transfer, it changes how you think about wallet UX. **ERC-7730** defines a structured descriptor that wallets like MetaMask, Ledger, and Trezor can fetch to translate raw calldata into plain language: "Send 10 USDC to alice.eth" instead of a function selector followed by ten unlabelled integers.
+
+The Bybit incident last year was the most-cited reason. A 1.5 billion dollar hack traced back to a multisig signer who could not tell, from what their wallet showed them, that the transaction they were approving was hostile. ERC-7730 is the part of the fix that lives in your dApp, not in the wallet.
+
+## Why Blind Signing Is Still the Default
+
+A dApp builds a calldata blob, hands it to MetaMask, and MetaMask renders what it can. For an `approve(address, uint256)` against a known token, you may see "Spending cap: unlimited" — some help. For anything else — a routed swap, a permit, a batched ERC-4337 user operation — what users get is "Contract interaction" and a byte sequence the wallet refuses to interpret.
+
+That is not a wallet bug. A contract ABI tells the wallet that a function takes a `uint256`, but not that the integer is a token amount in 6-decimal units, or which `address` parameter is the recipient versus the spender. The wallet does not have the context to format the call safely. ERC-7730 supplies that context — once, in a public file — so every wallet that reads it renders the same human-readable popup.
+
+## What an ERC-7730 Descriptor Actually Contains
+
+A descriptor has three sections. `context` binds the file to specific contract deployments, `metadata` carries protocol-level information, and `display.formats` maps each function signature to a human-readable intent plus per-field formatting rules.
+
+Here is a minimal descriptor for USDC's `transfer`:
+
+```json
+{
+  "context": {
+    "contract": {
+      "abi": "https://api.etherscan.io/api?module=contract&action=getabi&address=0xA0b8...",
+      "deployments": [
+        { "chainId": 1, "address": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48" }
+      ]
+    }
+  },
+  "metadata": {
+    "owner": "Circle",
+    "token": { "ticker": "USDC", "decimals": 6 }
+  },
+  "display": {
+    "formats": {
+      "transfer(address _to, uint256 _value)": {
+        "intent": "Send USDC",
+        "fields": [
+          { "path": "_to",    "label": "To",     "format": "addressOrName" },
+          { "path": "_value", "label": "Amount", "format": "tokenAmount",
+            "params": { "tokenPath": "@.to" } }
+        ],
+        "required": ["_to", "_value"]
+      }
+    }
+  }
+}
+```
+
+Three details catch developers off guard the first time through:
+
+- `format: "tokenAmount"` asks the wallet to divide by the token's decimals before rendering. The descriptor never includes the literal `1000000` — that is the wallet's job once it knows the units.
+- `tokenPath: "@.to"` tells the wallet which account in the call determines the token's identity. For a simple ERC-20 transfer it is the contract itself.
+- `required` lists the fields the wallet must show. There is also an `excluded` list for noise like deadline timestamps that a user does not need to read.
+
+EIP-712 typed-data messages use the same file with an `eip712.schemas` block instead of the ABI binding. The display rules apply equally to a Permit2 signature and a swap call.
+
+## Publishing a Descriptor to the Registry
+
+Descriptors live in a public, curated registry: [`ethereum/clear-signing-erc7730-registry`](https://github.com/ethereum/clear-signing-erc7730-registry) on GitHub. The flow is not permissionless. You open a pull request with your JSON file under `registry/<your-protocol>/`, validate it against `specs/erc7730-v2.schema.json`, and community curators review the strings before merging. Wallet vendors then ingest the registry and ship the descriptor to their users.
+
+Two things worth knowing about the curation step:
+
+- Strings are reviewed for accuracy, not marketing. "Send USDC" passes review; "Securely send USDC with Acme Finance" does not.
+- Wallets verify on their side before trusting. The spec is explicit that a wallet "SHOULD do additional verifications on the ERC-7730 file itself and the corresponding dApp." A merged descriptor reaches users when each wallet vendor's pipeline picks it up — there can be a lag of days or weeks.
+
+For internal iteration while you wait for review, both MetaMask and Ledger's developer tools accept a locally-pinned descriptor so you can validate strings against your live contracts before submitting.
+
+## What This Means for Your E2E Tests
+
+Once a descriptor is live, the MetaMask popup your tests drive is the same popup your users see — and it now contains text **you** control. The popup body becomes worth asserting on, because a regression in your descriptor (a wrong path, a missing field, an incorrect token mapping) silently degrades the user experience without any contract change.
+
+If you test with [@avalix/chroma](https://chroma.avalix.dev), the existing `metamask.confirm()` and `metamask.reject()` calls still drive the popup correctly. What changes is what is on screen during `metamask.confirm()`:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({ wallets: [{ type: 'metamask' }] })
+
+test('user can confirm the clear-signed transfer', async ({ page, wallets }) => {
+  const metamask = wallets.metamask
+  await metamask.importSeedPhrase({
+    seedPhrase: 'test test test test test test test test test test test junk',
+  })
+
+  await page.goto('http://localhost:3000')
+  await page.click('button:has-text("Send 10 USDC")')
+  await metamask.confirm()
+
+  await expect(page.locator('.success')).toBeVisible()
+})
+```
+
+The mechanics of driving the popup do not change. What changes is the meaning of the moment between the click and the `confirm()` — and whether the descriptor you shipped put the right words there.
+
+## A Single JSON File, a Different Wallet
+
+The infrastructure behind clear signing is substantial — a community-curated registry, a wallet ingestion pipeline, multiple supporting hardware vendors. The developer surface area is a single JSON file. Publish a descriptor for the entry points users see most often, validate it against the schema, open the pull request. The next time your contract appears in a MetaMask popup, the hex is gone.
