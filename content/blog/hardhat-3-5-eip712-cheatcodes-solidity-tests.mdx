@@ -1,0 +1,73 @@
+---
+title: "Hardhat 3.5's EIP-712 Cheatcodes: Stop Hardcoding Permit Type Hashes in Solidity Tests"
+description: "Hardhat 3.5's eip712HashType and eip712HashStruct cheatcodes derive canonical type hashes from your Solidity sources, so permit tests fail when a struct changes."
+date: 2026-05-25
+author: Chroma Team
+---
+
+Every Solidity codebase that touches `permit`, `Permit2`, `EIP-2612`, or any EIP-712 message eventually grows a wall of `bytes32 constant _TYPEHASH = keccak256("...")` lines. Those literals live inside the contract, then get copy-pasted into the unit tests so the test can recompute the digest and sign it. The copy is silent — until somebody renames a field or reorders an argument and only one of the two strings gets updated. The contract still compiles, the tests still pass against the stale literal, and the bug ships behind a green CI run. Hardhat 3.5 added a small but meaningful pair of cheatcodes, `eip712HashType` and `eip712HashStruct`, that let your Solidity tests compute the canonical hash the way a wallet would — straight from your contract sources, with no hand-typed string in sight.
+
+## Why hardcoded EIP-712 type strings drift from your contracts
+
+EIP-712 hashes are defined by an exact ASCII encoding of the struct: name, parens, each field's `type name` joined by commas, no spaces. The encoding is unforgiving — swap two fields, add a missing referenced struct, drop a `uint256` for a `uint160`, and the resulting `typeHash` is completely different. Wallets, relayers, and on-chain verifiers all rebuild that string from the type definition they hold. If your contract holds one version and your test holds another, the test happily signs a different message than the contract will accept in production.
+
+The traditional workaround is a comment that says "keep in sync with `PermitTypehash` in the contract." That comment ages badly. Foundry users have asked for a canonical EIP-712 hashing cheatcode for years — there is a [tracking issue](https://github.com/foundry-rs/foundry/issues/4818) going back to 2023 — and Hardhat 3.5 shipped one first.
+
+## What `eip712HashType` and `eip712HashStruct` actually compute
+
+The two cheatcodes split the EIP-712 hash into the two halves the spec defines.
+
+```solidity
+// Hash of the encoded type string, per EIP-712 §4
+bytes32 typeHash = vm.eip712HashType(
+    "PermitDetails(address token,uint160 amount,uint48 expiration,uint48 nonce)"
+);
+
+// Hash of (typeHash || encoded struct data)
+PermitDetails memory details = PermitDetails({
+    token: token,
+    amount: 1000e6,
+    expiration: uint48(block.timestamp + 1 days),
+    nonce: 0
+});
+bytes32 structHash = vm.eip712HashStruct(
+    "PermitDetails",
+    abi.encode(details)
+);
+```
+
+`eip712HashType` takes the type string and returns its `keccak256`. `eip712HashStruct` takes the struct name plus the ABI-encoded struct data and returns `keccak256(typeHash ‖ encodedData)`, which is the value you feed into the EIP-712 digest alongside the domain separator. The point is not that these are operations you couldn't do with raw `keccak256` — you obviously could. The point is that the cheatcode pulls the type string from a single source of truth that you configure, so the literal next to your test stops being authoritative.
+
+## Wiring the `eip712Types` config to your contract sources
+
+The cheatcodes are off by default. You enable them by pointing Hardhat at the source files that declare your EIP-712 structs:
+
+```ts title="hardhat.config.ts"
+export default {
+  solidity: {
+    profiles: {
+      default: { version: "0.8.30" },
+    },
+  },
+  test: {
+    solidity: {
+      eip712Types: {
+        include: ["contracts/permit/**/*.sol"],
+        exclude: ["contracts/permit/legacy/**/*.sol"],
+      },
+    },
+  },
+};
+```
+
+`include` is required and accepts glob patterns; `exclude` is optional. Hardhat walks the matching files, collects every struct that appears in an EIP-712 context, and makes the type strings available to the cheatcodes by name. If you rename a field in `PermitDetails.sol`, the next `eip712HashStruct("PermitDetails", ...)` call returns a different hash — and any test that compares it against a stale literal fails immediately, with a stack trace pointing at the line that needs updating.
+
+## What this changes for end-to-end signature testing
+
+These cheatcodes belong inside the Solidity unit and fuzz tests where you verify the contract's view of the digest. They do not replace the wallet-side half of the loop: the user opens MetaMask, sees the typed-data popup, decides whether to sign. That layer is where EIP-712 bugs become user-visible — a wrong `chainId` in the domain, a missing `verifyingContract`, a struct rename that makes the popup show "Permit(address,uint160,uint48,uint48)" instead of the prettified field labels.
+
+If you run EIP-712 flows through [@avalix/chroma](https://chroma.avalix.dev), the test drives a real MetaMask Flask instance: `metamask.confirm()` only succeeds when the popup actually appears, which means a domain mismatch surfaces as a hung wallet rather than a passing assertion. Pairing Hardhat's canonical type-hash cheatcodes on the contract side with a real-wallet E2E run on the dApp side closes the loop — the hash the contract expects and the hash the wallet signs are both pinned to your contract sources, not to a literal that nobody remembers updating.
+
+## What to do this week
+
+If you have a contract that defines an EIP-712 struct, upgrade to Hardhat 3.5, add an `eip712Types.include` glob, and grep your tests for `keccak256("...(`. Every match is a hardcoded type string that the new cheatcodes can replace. The migration takes minutes per test and removes a class of regression that unit tests have historically waved through.
