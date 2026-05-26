@@ -1,0 +1,46 @@
+---
+title: "Solana's Constellation Proposal: How Multiple Concurrent Proposers Change Block Production"
+description: "Anza's Constellation proposes 16 concurrent proposers on a 50ms cycle and deterministic priority-fee ordering. What changes for Solana dApp developers."
+date: 2026-05-26
+author: Chroma Team
+---
+
+On March 25, 2026, Anza published Constellation — a protocol design that replaces Solana's single-leader-per-slot block production with multiple concurrent proposers running on a 50-millisecond cycle. It is a structural change to how transactions enter blocks, who decides their order, and how an honest minority of validators is enough to make inclusion non-negotiable. For Solana dApp developers, this is the proposal most likely to alter the assumptions baked into how your application submits, prioritizes, and lands transactions.
+
+## Why a Single Leader Is the Problem Worth Solving
+
+Today, Solana rotates a single leader every four consecutive slots. For that ~1.6-second window, one validator decides — alone — which transactions land in the block and in what order. That gives them a temporary but absolute monopoly over transaction inclusion and ordering, and it is the structural source of two long-standing complaints.
+
+The first is censorship surface. A leader can drop, delay, or reorder any transaction in its window with no protocol obligation to include a paying user's transaction. The second is value extraction. The same monopoly that lets a leader pick what to include also lets them choose the order — the precise lever MEV searchers pay for. Patches around this have all been application-layer: private order flow, off-chain auctions, validator-side reordering markets. None of them remove the underlying monopoly. Constellation does.
+
+## The 50ms Cycle: Proposers, Attesters, and the Leader
+
+Constellation sits on top of Alpenglow's consensus and divides each ~400ms slot into roughly eight **50-millisecond cycles**, indexed deterministically from UTC wall-clock time. Three protocol roles operate inside each cycle:
+
+- **Proposers (16 per slot).** Validators who collect user transactions, erasure-code them into fragments called **pshreds** using Reed-Solomon (the same scheme Turbine already uses), and distribute the pshreds to attesters.
+- **Attesters (256 per slot).** Validators who timestamp the pshreds they receive and sign cryptographic attestations of receipt. An attestation is a binding commitment that those bytes existed at that time.
+- **Leader (1 per slot range).** The validator who assembles the final block. The leader compiles transactions whose pshreds gathered enough attestations within the cycle, applies a protocol-defined ordering, and emits a batch per cycle. The slot's block is the concatenation of all eight batches.
+
+The censorship-resistance threshold is the key number: if **25% of attesters (64 of 256)** signed for a proposer's pshreds, that data is required in the block. A leader cannot omit it without producing an invalid block. The whole design only needs one non-colluding proposer per cycle and an honest minority of attesters — the leader's monopoly is gone by construction, not by reputation.
+
+## Deterministic Priority-Fee Ordering: What Actually Changes for Your dApp
+
+Inside each cycle, the leader does not choose ordering. The protocol fixes it: transactions are sorted by **priority fee per compute unit**, with deterministic tiebreakers from CU limits and transaction hash. If a leader rearranges this order, the block itself fails validation.
+
+That has three concrete implications when you build on Solana:
+
+- **Priority fees become the only ordering signal that exists.** Today, a savvy user might pay a private relay or rely on a builder relationship; under Constellation, those paths do not affect intra-cycle ordering. Your dApp's compute-budget instructions — `SetComputeUnitPrice` and `SetComputeUnitLimit` — are the entire interface to ordering. Fee estimation libraries that quietly under-estimate will land later than they did before.
+- **Sandwich attacks within a single user's transaction get harder.** A leader can no longer position a hostile transaction immediately before and after yours when the order is determined by fee per CU across the whole cycle. MEV does not disappear — pools, oracles, and inter-cycle effects remain — but the cheapest intra-block sandwich path closes.
+- **Inclusion is bounded by 50ms, not by leader luck.** Once your transaction reaches one of the 16 cycle proposers and clears the 25% attestation threshold, the leader is obligated to include it. Retry logic that today assumes "missed this leader, wait for the next slot" should re-anchor on the cycle, not the slot.
+
+This is also worth accounting for in your E2E tests. Solana's instruction-based, stateless execution model is unchanged — accounts are still explicit inputs, versioned transactions are still v0 with address lookup tables — but the timing of when a signed transaction becomes a confirmed transaction shortens by roughly an order of magnitude. If you drive a real Phantom popup through a tool like [@avalix/chroma](https://github.com/avalix-labs/chroma) and your assertions encode "wait a few seconds after sign," those assertions will outlive the timing they were written for.
+
+## Timeline and What to Audit Now
+
+Constellation builds on Alpenglow, which Anza targets for Q3 2026 mainnet. The initial MCP version is expected shortly after. Before then, three audits pay for themselves:
+
+- Grep your codebase for hardcoded slot-time assumptions (400ms, 800ms, 1600ms). Anything that treats a Solana slot as the unit of transaction visibility will mis-fit a 50ms cycle.
+- Re-check your priority fee strategy. If you set a static `microLamports` value or rely on `getRecentPrioritizationFees` without per-account context, you are leaving ordering on the table that Constellation will increasingly make the only ordering that matters.
+- Identify the places your product depended — even implicitly — on validator-level reordering deals. Those paths are about to stop existing, and the safe default is to assume your fee per CU is your seat number.
+
+The chain's execution model is the same; the queue that feeds it is being rebuilt. Code that hardcoded the old queue will not age well.
