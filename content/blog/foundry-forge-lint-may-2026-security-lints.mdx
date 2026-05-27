@@ -1,0 +1,84 @@
+---
+title: "Foundry's New Security Lints: What forge Now Catches Before You Deploy"
+description: "Foundry's May 2026 nightlies added 11 forge lint rules covering reentrancy, locked ether, unsafe initializers, and more. Here's what each catches and how to wire it into CI."
+date: 2026-05-27
+author: Chroma Team
+---
+
+Slither has been the de-facto Solidity static analyzer for years. If your audit workflow runs in CI, there is a near-certain chance it shells out to a separately installed Python tool, parses the output, and either prints a report or fails the build. That separation made sense historically — `forge` was a fast Rust compiler-and-test runner, and static analysis was somebody else's problem.
+
+That changed quietly when `forge lint` first shipped, but it started to matter in May 2026: eleven new lints landed in the Foundry nightlies, most of them direct equivalents of patterns Slither has been catching for years. The pitch is no longer "install another tool." It is "set a severity threshold and the toolchain you already have flags the bug at `forge build` time."
+
+## What forge lint is, and what it is not
+
+`forge lint` is a Solidity static analyzer built on Solar — Paradigm's Rust-native Solidity compiler frontend — and shipped inside the same binary as `forge build`, `forge test`, and `forge fmt`. Every lint has an ID in kebab-case, a severity in `{high, med, low, info, gas}`, and a description that documents what it flags. The analyzer runs against the same AST the compiler is already building, so the cost of an additional check is the cost of one extra AST walk, not the cost of starting a separate Python process.
+
+It is not a replacement for a full audit. It is also not a fuzzer — `forge test --fuzz` and `forge test --invariant` still cover that surface. What `forge lint` is good at is the class of issues where the bug pattern is local enough that a compiler-level AST can recognise it: a missing initializer modifier, an `emit` after an external call, a divide-then-multiply rounding mistake.
+
+## The May 2026 batch, grouped by what they protect
+
+Eleven lints landed across the nightlies between May 20 and May 26. Grouped by category:
+
+**Reentrancy and external-call discipline**
+
+- `reentrancy-events` — flags `emit` statements reachable after an external call on any control-flow path. Matches Slither's `reentrancy-events`. Low severity, but a reliable signal that a function violates checks-effects-interactions ordering.
+- `delegatecall-loop` — flags `delegatecall` inside a loop. Almost always a bug: each delegatecall can mutate the caller's storage, and a loop multiplies the blast radius if the target is attacker-controlled.
+- `return-bomb` — flags external calls that do not bound the returned data size. A malicious callee can return a multi-megabyte payload that exhausts the caller's gas during ABI decoding.
+
+**Initializer and upgradeability hygiene**
+
+- `unprotected-initializer` — flags `initialize`-style functions missing the `onlyInitializing` / `initializer` modifier. This is the exact mistake behind several upgradeable-proxy compromises.
+- `uninitialized-state` — flags state variables that are read before they are written. In upgradeable contracts where constructors do not run, this is the typical path to a `address(0)` admin owner.
+
+**State and value safety**
+
+- `locked-ether` — flags `payable` entry points with no withdrawal path. Funds that go in cannot come out.
+- `assert-state-change` — flags `assert` used with side-effectful expressions. `assert` is meant to be a pure invariant check; state changes inside one silently break testing assumptions.
+- `weak-prng` — flags use of `block.timestamp`, `block.number`, or `blockhash` as a randomness source.
+
+**Code-quality and gas cleanups**
+
+- `unused-return` — return values from external calls discarded without a check.
+- `external-function` — `public` functions that are never called internally and could be `external` (saves a memory-to-calldata copy).
+- `could-be-constant` — state variables only ever read, never written.
+
+The split matters because severity drives CI behaviour. A reasonable starting policy is to fail builds on `high` and `med`, surface `low` as warnings in the PR, and treat `gas` and `info` as advisory.
+
+## Configuring lint severity in foundry.toml
+
+The `[lint]` table accepts three keys that cover the common cases:
+
+```toml
+[profile.default.lint]
+severity = ["high", "med"]
+exclude_lints = ["divide-before-multiply"]
+ignore = ["test/**", "script/**", "lib/**"]
+```
+
+`severity` is the allow-list of severities `forge lint` will report. `exclude_lints` drops specific IDs without lowering the global threshold — useful when one lint produces noise specific to your codebase. `ignore` is glob-based; the example above keeps tests, scripts, and dependencies out of the report.
+
+For per-line suppression, the linter respects inline directives so you do not have to disable a rule project-wide for a single intentional case:
+
+```solidity
+// forge-lint: disable-next-line(reentrancy-events)
+emit Withdrawn(msg.sender, amount);
+```
+
+## Wiring forge lint into CI
+
+Run `forge lint` as its own step before `forge test`. Failing the build on a new finding catches the regression at the PR boundary, which is the cheapest place to fix it. A typical job step:
+
+```bash
+forge lint --severity high,med
+forge test
+```
+
+`--severity` accepts a comma-separated list and overrides the `foundry.toml` setting for that invocation. `--only-lint <id>` runs a single rule, which is useful when triaging a noisy upgrade across a large repo before turning the full gate on.
+
+## Where this leaves your end-to-end tests
+
+Static analysis at this level catches bug *patterns*. It does not catch bug *behaviours* — a contract that passes `forge lint` cleanly can still ship a wallet UX bug that only surfaces when a real user hits the MetaMask popup, declines a permit, or switches chains mid-flow. Forge lint, fuzzing, and end-to-end browser tests are non-overlapping layers: if you run real-wallet Playwright coverage with a tool like [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/metamask) — which drives the actual MetaMask, Phantom, and Polkadot.js extensions through your dApp — adding `forge lint` does not reduce that need. It does mean fewer of the bugs your E2E tests catch are bugs Slither would have caught for free.
+
+## What to do this week
+
+If you upgrade to a recent Foundry nightly, run `forge lint --severity high,med` once against your repo and read the output. Treat the first pass as a survey, not a CI gate — pin or exclude any rule that produces noise specific to your codebase, then turn the gate on in your workflow. The eleven new lints all derive from patterns that have caused real losses in production. Most teams will find at least one finding worth fixing before the next deployment.
