@@ -1,0 +1,82 @@
+---
+title: "x402 on Solana: The Anatomy of a Stablecoin-Gated API Request"
+description: "What actually moves between an HTTP 402 response and a settled USDC transaction on Solana — headers, facilitator endpoints, and the SVM details that matter."
+date: 2026-05-28
+author: Chroma Team
+---
+
+If you have looked at AI agent infrastructure in the past month, you have probably seen **x402 on Solana** mentioned alongside the Pay.sh launch. The pitch is short — agents pay for APIs with stablecoins — and it skips most of what developers actually need to know: what an x402-gated request looks like on the wire, and which pieces sit on the Solana network versus in your HTTP middleware. This post walks through one round trip end to end, so you can decide whether to use it for an API you ship or a pay-per-action feature in your dApp.
+
+## The 402 Handshake: From HTTP Status to Solana Transaction
+
+The protocol resurrects an HTTP status code that has been reserved-for-future-use since the 90s. The first request to a paid endpoint is ordinary — a GET or POST. If the server requires payment, it responds with `402 Payment Required` and a JSON body describing the price, the accepted network, the asset, and the destination:
+
+```json
+{
+  "x402Version": 2,
+  "accepts": [{
+    "scheme": "exact",
+    "network": "solana-mainnet",
+    "asset": "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v",
+    "payTo": "9xQeWvG816bUx9EPjHm...",
+    "maxAmountRequired": "1000"
+  }]
+}
+```
+
+A few SVM-specific details to read carefully. `maxAmountRequired` is atomic units — `1000` is `0.001 USDC` because USDC has six decimals on Solana. `asset` is the SPL token mint, not an ERC-20 contract address. `scheme: "exact"` means the client must pay that amount, no more, no less.
+
+The client then constructs a Solana transaction containing a single SPL Token `transferChecked` instruction (or the Token-2022 equivalent if the asset uses the newer program), signs it, base64-encodes the wire payload, and retries the original request with an `X-PAYMENT` header carrying the encoded payment plus the protocol version. On success, the server returns the gated content plus an `x-payment-response` header containing the settled transaction signature.
+
+This is a meaningful divergence from x402 on EVM. There, the payment is an EIP-3009 `transferWithAuthorization` signed message — typed-data only, no transaction — that the server later submits itself. SPL tokens have no equivalent off-chain authorization primitive, so on Solana the client signs the full transaction up front and the facilitator broadcasts it. Accounts (the payer's token account, the recipient's associated token account, the token program ID) are explicit inputs to the instruction, as they always are under the SVM execution model.
+
+## Why the Facilitator Exists and What It Actually Settles
+
+Your API server does not need to talk to Solana directly. That job belongs to the **facilitator** — a small service that exposes three endpoints: `/verify`, `/settle`, and `/supported`. The middleware on your server reads the incoming `X-PAYMENT` header, hands the base64 blob to `/verify` to confirm the signature, amount, recipient, and mint all match the price you advertised, and then calls `/settle` to broadcast the transaction.
+
+The settle step is where SVM specifics surface. The facilitator simulates the transaction first, attaches a `ComputeBudgetProgram` instruction sized for an SPL transfer (well under the 200k default, but explicit is safer), sets a priority fee if recent congestion warrants it, and submits. On confirmation it returns the signature, which your middleware echoes back in `x-payment-response`. If simulation fails — wrong mint, missing associated token account, insufficient balance — the facilitator returns an error and your middleware returns another 402 instead of the content.
+
+The Solana Foundation's reference uses Kora as the facilitator, calling Kora's `signAndSendTransaction` under the hood. You can self-host `x402-rs` or write your own as long as you implement the three endpoints honestly. Either way, your API server stays HTTP-only.
+
+## Server-Side: Pricing an Endpoint With the Middleware
+
+In practice the wiring looks like this. The shape mirrors the reference Solana implementation:
+
+```ts
+import express from 'express'
+import { paymentMiddleware } from 'x402-solana'
+
+const app = express()
+
+app.use(paymentMiddleware(
+  PAYEE_ADDRESS,
+  {
+    'GET /v1/forecast': {
+      price: '$0.001',
+      network: 'solana-mainnet',
+    },
+  },
+  { url: FACILITATOR_URL },
+))
+
+app.get('/v1/forecast', (_req, res) => res.json({ tempC: 22.1 }))
+```
+
+`price: "$0.001"` is converted to atomic USDC by the middleware. `network` selects the cluster and the canonical USDC mint for that cluster. `PAYEE_ADDRESS` is a base58 wallet public key — not a token account — because the middleware derives the associated token account from the mint at verify time.
+
+A client-side fetch wrapper handles the retry symmetrically. It accepts whatever Solana signer you provide — a `Keypair` for a backend agent, a wallet-adapter signer for a browser dApp:
+
+```ts
+import { wrapFetchWithPayment } from 'x402-solana'
+
+const fetchPaid = wrapFetchWithPayment(fetch, signer)
+const res = await fetchPaid('https://api.example.com/v1/forecast')
+```
+
+The wrapper sees the 402, builds and signs the SPL transfer, and retries — all inside a single `await`.
+
+## Testing the User-Facing Flow
+
+If x402 lives in a user-facing path in your dApp — for example, "pay $0.10 to unlock this report" with a browser wallet rather than a backend keypair — the request still cascades into a wallet approval prompt. End-to-end tests for that flow have to drive the wallet itself, not just the page. This is the kind of seam where mocked wallets quietly lie: the 402 retry timing, the popup, the rejection branch. @avalix/chroma drives the real Solana wallet extension under Playwright, so the test asserts what an actual user sees when the second request lands.
+
+The takeaway: x402 is small in spec but opinionated about who signs and who settles. On Solana, the client signs a full transaction, the facilitator broadcasts it, and SVM details — explicit accounts, SPL versus Token-2022, atomic units, compute budget — show up in the payload you would otherwise hand-wave past. Read the response body before you write the client; the rest is plumbing.
