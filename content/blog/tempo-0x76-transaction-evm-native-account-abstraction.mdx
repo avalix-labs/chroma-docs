@@ -1,0 +1,74 @@
+---
+title: "Tempo's 0x76 Transactions: Native Account Abstraction on a Live EVM L1"
+description: "Tempo's 0x76 transaction bakes passkeys, batching, and fee sponsorship into one EVM envelope. Here's the spec and what changes for dApp devs."
+date: 2026-05-29
+author: Chroma Team
+---
+
+Ethereum's account abstraction story has been a procession of bolt-ons. ERC-4337 runs a parallel mempool with bundlers. EIP-7702 lets EOAs delegate to a smart contract for the lifetime of a transaction. EIP-8141 Frame Transactions, proposed for Hegotá, would finally make authorization a first-class step at the protocol level — but Hegotá is still a target, not a shipping chain. Tempo, the Stripe- and Paradigm-backed payments L1 that launched on mainnet March 18, 2026, ships that latter shape today. Its native transaction type, EIP-2718 type byte `0x76`, encodes passkey signatures, fee sponsorship, call batching, scheduled execution, and parallelizable nonces directly in the envelope. No bundler. No delegation contract. No wrapper.
+
+Tempo is EVM-compatible, targets the Osaka hardfork, and runs at chain ID `4217`. Standard Solidity bytecode compiles and deploys without changes, and viem, ethers, Foundry, and Hardhat all speak the same JSON-RPC. What is different is the new `0x76` transaction type the chain treats as first-class alongside the standard EIP-1559 (`0x02`), EIP-2930 (`0x01`), and EIP-7702 (`0x04`) types.
+
+## What the 0x76 Envelope Carries
+
+A Tempo Transaction is not a single call. It is an envelope that carries:
+
+- A **`calls` array** — multiple `(to, value, data)` tuples executed atomically. A revert in any call rolls back the whole batch.
+- **Two signature slots** — a sender signature over the type byte `0x76`, and an optional fee payer signature over the magic byte `0x78`. The two domains are separated so neither signature can be replayed under the other role.
+- **2D nonces** — a `(lane, sequence)` pair instead of a single integer. Different lanes are independent of each other, so two transactions on different lanes can land in any order while sequential ordering still holds within a lane.
+- An optional **`feeToken`** — the ERC-20 mint to deduct the fee from. Pay gas in USDC or another stablecoin instead of holding the network's native asset.
+- **WebAuthn / P-256 signature validation** — passkey accounts authorize transactions with the same P-256 key the user's phone or laptop already holds. No on-chain helper contract is needed.
+- **Scheduled execution windows** — a `(notBefore, notAfter)` pair the runtime enforces.
+- **Access keys** — scoped secondary keys, signed off by the primary account, with spending limits.
+
+Each of these is a real field on the envelope, not a feature implemented inside a contract the user has to deploy and trust. The runtime parses the envelope and dispatches accordingly.
+
+## How Native Fee Sponsorship Works
+
+Sponsored gas is the feature with the most useful architectural detail. An ERC-4337 paymaster works by routing a `UserOperation` through a bundler, which assembles a regular transaction whose `tx.origin` is the bundler's EOA. The user signs a `UserOperation` hash; the bundler signs the actual transaction. Two layers, two mempools, two trust assumptions.
+
+On Tempo, both signatures sit inside one envelope:
+
+- The user signs a payload prefixed with type byte `0x76`. That signature authorizes the calls.
+- The fee payer signs a payload prefixed with magic byte `0x78`. That signature authorizes paying the gas — and only paying the gas.
+
+The chain validates both before executing. The fee payer's account is debited; the user's is not. There is no bundler-side trust assumption that a user op will land, and no off-chain ordering coordination. The wallet sees one transaction; the chain enforces both halves of the agreement directly. The dual-domain split is what makes it safe to share a partially-signed transaction with a sponsor service over HTTP — the sponsor can add the `0x78` half and broadcast without ever holding authority to act as the user.
+
+## Testing a Tempo Transaction End-to-End
+
+The wallet UX changes. A user signing a Tempo Transaction sees one popup that describes a batched intent ("Swap 50 USDC for USDT, then deposit to vault") and, when a sponsor is in the path, shows "Gas paid by Acme.app" instead of a native-asset debit. The popup is no longer for a single EVM call — it is for a unit of work the chain will execute atomically.
+
+For E2E coverage, the wire shape changes but the wallet integration boundary does not. MetaMask and other EVM wallets that have added Tempo support still expose the same JSON-RPC methods; the difference is what the dApp builds before handing the payload over. If you drive MetaMask through [@avalix/chroma](https://github.com/avalix-labs/chroma), the `metamask.confirm()` call works the same way it does against an EIP-1559 transaction:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test('signs a sponsored batch on tempo', async ({ page, wallets }) => {
+  const metamask = wallets.metamask
+
+  await metamask.importSeedPhrase({
+    seedPhrase: 'test test test test test test test test test test test junk',
+  })
+
+  await page.goto('http://localhost:3000')
+  await page.click('button:has-text("Connect")')
+  await metamask.authorize()
+
+  await page.click('button:has-text("Swap and Deposit")')
+  // The dApp builds a 0x76 envelope; the sponsor signs the 0x78 half server-side.
+  // The user sees one popup describing the batched intent.
+  await metamask.confirm()
+
+  await expect(page.locator('[data-testid="status"]')).toContainText('Sponsored')
+})
+```
+
+Three test-shape additions are worth making when a dApp moves to Tempo Transactions. First, assert the connect modal advertises chain ID `4217` before the rest of the flow — a wallet that only knows EIP-1559 will reject the unknown type byte before MetaMask ever shows a popup. Second, cover the batched-revert path explicitly: the whole point of `calls` is atomicity, so a test where call 2 fails should observe that call 1 did not commit either. Third, cover the sponsored-vs.-self-paid branches separately, because a Tempo Transaction without a `0x78` signature is a legal envelope and your sponsor-quote endpoint can be rate-limited or ineligible — the dApp should fall back to user-paid gas without forcing a re-sign.
+
+## Where 0x76 Sits Among 4337, 7702, and 8141
+
+Tempo's envelope is closest in spirit to EIP-8141 Frame Transactions — authorization is part of the transaction shape, not bolted on by a contract — but it ships now on a live chain instead of waiting on a hardfork. EIP-7702 still applies on Ethereum mainnet for delegating an EOA to a smart account; ERC-4337 still applies anywhere a paymaster-bundler pipeline is already deployed. None of those go away because Tempo exists. What Tempo demonstrates is what the application layer looks like when batching, sponsorship, and passkey auth are envelope-level concerns rather than contract-level workarounds: less code on the contract side, fewer round-trips at the wallet, and a smaller blast radius when any piece of the sponsor pipeline misbehaves. If your roadmap touches stablecoin payments or agentic commerce, the chain meets you halfway — the cost is treating the transaction type as a real boundary in both the code that composes the envelope and the test that confirms what your user actually sees.
