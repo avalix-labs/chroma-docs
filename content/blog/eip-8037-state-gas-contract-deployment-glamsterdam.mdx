@@ -1,0 +1,56 @@
+---
+title: "Glamsterdam Finalizes EIP-8037: The State-Gas Dimension That Reshapes Contract Deployment"
+description: "EIP-8037 is finalized with a fixed CPSB of 1530. State creation now meters in its own gas dimension, raising contract deployment cost by 8x."
+date: 2026-05-30
+author: Chroma Team
+---
+
+The May 2026 Ethereum protocol cluster update quietly finalized the proposal that will change smart contract economics the most when Glamsterdam ships. EIP-8037, **State Creation Gas Cost Increase**, was the last large unresolved piece of the Glamsterdam repricing bundle (EIP-8007). At the Soldøgn Interop week and confirmed in the May 11 protocol update, the dynamic per-state-byte pricing earlier drafts proposed was dropped in favor of a fixed value, and state creation moved into its own gas dimension. The result: new contract deployments, new accounts, and first storage writes get materially more expensive, while everything else stays roughly where it was.
+
+If you deploy contracts for a living — factories, L2 bootstraps, paymaster authorizations — this is the EIP worth reading end-to-end before you target a Glamsterdam release.
+
+## Why state creation needed its own gas dimension
+
+Every byte of state Ethereum nodes hold is paid for once at write time and stored forever. Compute is the opposite: paid for once and discarded. The old gas schedule conflated them. At a 30M block limit that was tolerable — a single block could not write enough new state to move the needle on node disk growth.
+
+Glamsterdam targets a 200M gas floor, with 300M under discussion. At that ceiling, raising block throughput without repricing state shifts the centralization cost to whoever runs the node. EIP-8037 fixes the mismatch by introducing **CPSB** — cost per state byte — and metering state creation separately from regular gas. CPSB is calibrated to keep average annual state growth at roughly 120 GiB under a 150M reference block limit.
+
+## The fixed-vs-dynamic pivot
+
+Earlier drafts let CPSB float with the block gas limit, so the per-byte cost would adjust automatically as the limit changed. Clean on paper. In practice, multi-client testing exposed the cost: every client needs to agree on the cost decision for every block, and a floating parameter created fork-boundary edge cases that doubled the test matrix. The pivot during Soldøgn Interop was to drop the floating model and pin CPSB at **1530**. Future recalibrations happen at fork boundaries, not within a fork.
+
+## What the 5x, 7x, and 8x multipliers actually hit
+
+EIP-8037 charges state-gas as `state_bytes × CPSB`, with `state_bytes` constants for each operation:
+
+| Operation | Before | After EIP-8037 | Increase |
+|---|---|---|---|
+| New account creation (120 bytes × 1530) | 25,000 | 183,600 | ~7x |
+| New storage slot, SSTORE 0→x (64 × 1530) | 20,000 | 97,920 | ~5x |
+| Code deposit, per byte | 200 | 1,530 | ~7.5x |
+| 24 KiB contract deployment | 4,947,200 | 37,784,880 | ~8x |
+| EIP-7702 authorization base (23 × 1530) | negligible | 35,190 | new |
+
+Two things to read carefully. **Updating** an already-written storage slot still costs the same as before — state-gas applies only the first time a slot moves from zero. And **CREATE2** doesn't get a discount: the bytecode-byte charge is on code deposited to a new address, regardless of how the address is derived.
+
+A 24 KiB contract deployment now sits at roughly 37.8M gas — above EIP-7825's 16.78M per-transaction cap. Any deployment of a near-maximum contract has to split bytecode across libraries (or rely on EIP-7954's new 32 KiB ceiling and corresponding initcode work). Factory contracts that today deploy near-maximum implementations need a redesign, not just a higher gas limit.
+
+## Multidimensional metering and the state-gas reservoir
+
+The architectural change is more subtle than the multipliers. Transactions now meter two dimensions in parallel: **regular-gas** (compute, calldata, memory, slot updates) and **state-gas** (every byte that grows the state database).
+
+At execution start, EIP-8037 splits the transaction's gas budget into two reservoirs. Regular charges draw from one; state charges draw from the other. Block validity checks both dimensions independently, and the transaction's total spend is the maximum of the two.
+
+A deployment with abundant compute gas can still revert if its state-gas reservoir runs dry mid-CREATE. Gas estimation libraries (`eth_estimateGas`, `viem.estimateGas`, ethers' `provider.estimateGas`) need to report both dimensions, and your simulator needs to budget against the larger of the two — not the sum.
+
+## What to audit before Glamsterdam ships
+
+Three sweeps catch most of the surface area:
+
+- **Hard-coded deployment gas limits.** Anywhere your scripts pass a fixed gas value for a contract deployment — Foundry's `forge create --gas-limit`, Hardhat Ignition deploy modules, Safe transaction proposals constructed off-chain — needs a recalculation against 1530 gas/byte plus the 183,600-gas account-creation surcharge.
+- **CREATE2 factory contracts.** If a factory deploys near-maximum implementations on demand and the call path is gas-bounded by an outer contract, that bound will fail under EIP-8037 unless you split the implementation across libraries or reduce its size below the new effective per-tx limit.
+- **EIP-7702 paymaster economics.** Sponsorship flows that pay gas for many users now carry a 35,190-gas state-gas base per authorization. Batch sponsors should recompute subsidies before the fork.
+
+If you run E2E coverage against a local Glamsterdam-devnet, deployment flows are where the new schedule shows up first — a real wallet popup driven by a tool like [@avalix/chroma](https://github.com/avalix-labs/chroma) surfaces the higher estimate in MetaMask, and the test that asserts the deployment succeeds is the right place to catch a budget tuned for the pre-Glamsterdam world.
+
+Glamsterdam mainnet is targeted for H2 2026. The schedule has been moving, but the EIP-8037 numbers are now fixed. The sooner you have a deploy script that respects both dimensions, the less interesting fork day will be.
