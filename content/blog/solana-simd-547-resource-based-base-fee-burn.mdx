@@ -1,0 +1,50 @@
+---
+title: "Solana's Base Fee Is About to Track Compute: What SIMD-547 Changes for dApps"
+description: "SIMD-547 replaces Solana's flat 5,000-lamport base fee with a per-compute-unit burn. Here's the formula, the dApp impact, and what to audit before it ships."
+date: 2026-05-31
+author: Chroma Team
+---
+
+On May 30, Anatoly Yakovenko publicly backed **SIMD-547**, a proposal from @cavemanloverboy that replaces Solana's flat 5,000-lamport-per-signature base fee with a charge that scales with the compute work a transaction asks the runtime to do. The proposal is short and the implication is large: every transaction's base cost stops being a fixed number and starts tracking the resources it consumes. If you build on Solana, this is the protocol economics change most likely to affect how you budget, estimate, and display fees this year.
+
+## Why the Flat 5,000-Lamport Base Fee Isn't Pulling Its Weight
+
+Today, every Solana transaction pays a base fee of 5,000 lamports per signature, fully burned. That base is fixed regardless of whether the transaction is a one-instruction SOL transfer that uses 200 compute units or a heavy DEX router that fans out across a dozen CPIs and uses 1.2M. Across the whole chain, base fees burn roughly 648 SOL per day.
+
+The number is small enough to be largely cosmetic on the supply side — Solana mints roughly 60,000 SOL per day at current inflation, so the base-fee burn is a rounding error against issuance. More importantly for developers, the fee carries no signal about resource cost. A wallet signing a one-CPI transfer pays the same per-signature base as a router doing a multi-hop swap. Two transactions with very different impact on validator hardware pay the same flat rate.
+
+Priority fees, set per-CU via `SetComputeUnitPrice`, do scale with resource usage — but since SIMD-0096 took effect, 100% of priority fees go to validators, not to the burn. The pricing signal exists; it just doesn't reach the supply side, and it doesn't influence what the base fee charges.
+
+## How SIMD-547 Re-Prices the Base Fee
+
+The proposal's mechanism is one line: **base fee = compute units requested × 0.1 lamport**, fully burned.
+
+A transaction that sets `SetComputeUnitLimit` to 200,000 CUs pays 20,000 lamports in base fee. One that requests 1,000,000 CUs pays 100,000 lamports. The fee is computed off the *requested* limit, not what the transaction actually consumes — so generous CU limits become generous burns rather than free padding.
+
+The proposal calls these "cost units" but the unit is the same compute-unit budget your transaction already declares. The 0.1 lamport constant is calibrated so that under recent mainnet traffic, daily burns rise from ~648 SOL to between 10,800 and 64,800 SOL, with ~21,600 SOL as the more realistic median. That sits comfortably below the ~60,000 SOL daily inflation rate, which is what keeps the change from quietly turning into a monetary policy shift.
+
+The proposal hasn't been through a governance vote. Yakovenko's backing puts it in front of validators; the formula and the exact constants could still move before it ships. The shape — resource-priced base fee, fully burned — is the part most likely to survive editorial passes.
+
+## What Changes for Your dApp
+
+For most Solana dApps, the engineering surface is fee estimation, transaction construction, and the cost preview your UI shows users.
+
+**Compute unit limits stop being free hints.** Today, `SetComputeUnitLimit` is mostly a ceiling — set it too high and you don't pay extra, set it too low and you risk a `ComputeBudgetExceeded`. Under SIMD-547, padding the limit costs real lamports. The discipline that priority-fee setting already requires — request what you'll actually use — extends to the limit itself.
+
+**Fee estimation gains a second resource-priced term.** Today, fee math is roughly `base = 5000 × signers; priority = price × limit`. Under SIMD-547 it becomes `base = 0.1 × limit; priority = price × limit`. Both halves scale with the CU limit, off the same number. Wallets and dApp UIs that surface a "Network fee" line before a user signs need to recompute both terms from a single budget, not two.
+
+**Transaction simulation matters more.** `simulateTransaction` already reports the actual CU usage of a transaction. Today, feeding that number back into `SetComputeUnitLimit` is best practice mostly because of priority-fee tuning. Under SIMD-547, the same simulation cycle directly reduces the base fee. The pattern moves from "polite" to "load-bearing for cost."
+
+The execution model itself doesn't change. Solana programs remain stateless and instruction-based, accounts are still explicit inputs to every instruction, and versioned transactions (v0) with address lookup tables remain the building block. What changes is the price tag on the work, and that price tag finally tracks the work.
+
+If you maintain Solana E2E coverage by driving a Phantom popup with [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom), assertions that hardcoded the old 5,000-lamport base into an expected-fee check, or that exercised only one CU configuration, will start drifting once the new formula lands. The fee preview your UI renders is now a function of the transaction shape, not a constant — which is exactly the kind of UI assertion an end-to-end test is well-placed to pin down before the runtime moves underneath it.
+
+## What to Audit Before It Ships
+
+Three quick passes catch most of the surface area:
+
+- **Hardcoded base-fee assumptions.** Grep for `5000` in fee-estimation code, fee displays, and any test that asserts on transaction cost. Replace literal constants with values derived from the cluster's current fee parameters, so the math updates automatically when the formula flips.
+- **Generous `SetComputeUnitLimit` calls.** Anywhere your code pads CUs by 50% "just to be safe" becomes anywhere your users overpay base fees by 50%. Tighten limits to roughly 1.1–1.2× simulated usage, and make simulation a step in the construction pipeline rather than an optional optimisation.
+- **Wallet-side fee preview integrations.** If you compute and display a fee separately from what the wallet shows, the two values need to stay in sync as the formula changes. Centralise the calculation in one place, then read from it in every surface.
+
+The proposal is still moving. But the parts of your codebase that quietly assumed a flat 5,000 lamports per signature are the parts worth surfacing now, while the change is cheap to make. Once the formula lands, the cost of every unchanged literal shows up on a user's screen.
