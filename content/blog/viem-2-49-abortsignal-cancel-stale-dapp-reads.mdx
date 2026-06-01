@@ -1,0 +1,89 @@
+---
+title: "viem 2.49's AbortSignal Support: Cancelling Stale dApp Reads Before They Clobber Your UI"
+description: "viem 2.49 adds AbortSignal to request options and the call action. Cancel stale dApp reads before late RPC responses clobber your UI."
+date: 2026-06-01
+author: Chroma Team
+---
+
+Every dApp eventually hits the same bug. A user types into a swap input, your code fires an RPC read to fetch a quote, the user edits the input again before the first response lands, and your UI flickers as the stale quote briefly overwrites the fresh one. Or the user clicks a token row in a list, you fetch its balance, the user clicks a different row, both balance reads come back in non-deterministic order — and the wrong one is the one displayed. These are not network bugs. They are cancellation bugs, and JavaScript has had the standard primitive for years: `AbortController` and `AbortSignal`. Until **viem 2.49.0** shipped on May 14, 2026, that primitive simply did not reach the wire when you called a viem action. The fix landed quietly in the changelog — "Added AbortSignal support to request options and `call` action" — and it is the change worth wiring through your read paths now.
+
+## The problem viem readers had before 2.49
+
+A typical balance lookup in a dApp looks like a single line:
+
+```ts
+const balance = await publicClient.readContract({
+  address: usdc,
+  abi: erc20Abi,
+  functionName: 'balanceOf',
+  args: [user],
+})
+```
+
+Under the hood, that produces an `eth_call` HTTP request to your RPC endpoint. Before 2.49, the promise that line returns had no way to be cancelled from the outside. You could ignore the response in userland — track a request ID and discard stale results when they resolved — but the HTTP request still ran to completion against your RPC quota, the deserialization still happened, and the late resolution still ran your `.then` callback. For a swap quote that fires on every keystroke, you were paying for every keystroke's request regardless of whether the user already typed past it.
+
+The `useEffect` cleanup pattern in React assumes the work an effect started can be cancelled when the component unmounts. With viem before 2.49, it couldn't — at the transport layer, viem held no signal.
+
+## What viem 2.49's AbortSignal support actually added
+
+The 2.49 release notes describe two changes that together close the loop:
+
+- **`AbortSignal` in request options.** Viem actions that accept request options now forward a `signal` field through to the transport. The HTTP transport observes it and aborts the underlying `fetch` when the signal fires.
+- **`AbortSignal` on the `call` action.** `publicClient.call(...)` accepts a `signal` directly — useful for the lowest-level read path, including the one `readContract` builds on.
+
+The pattern is the same one you would use against `fetch`:
+
+```ts
+const controller = new AbortController()
+
+publicClient
+  .readContract(
+    {
+      address: usdc,
+      abi: erc20Abi,
+      functionName: 'balanceOf',
+      args: [user],
+    },
+    { signal: controller.signal },
+  )
+  .catch((err) => {
+    if (err.name === 'AbortError') return
+    throw err
+  })
+
+// Later, when input changes or the component unmounts:
+controller.abort()
+```
+
+If the signal fires before the response lands, the underlying request is dropped at the transport, the promise rejects with an `AbortError`, and your `.then` chain never runs. The catch above is the conventional shape: swallow the abort, rethrow anything else.
+
+## Three patterns to wire into your read paths
+
+**Per-input debounced quotes.** Replace the manual "latest request ID" bookkeeping with an `AbortController` that the input-change handler refreshes on every keystroke. Abort the previous controller, create a new one, fire the read against its signal. The race is gone because the loser is cancelled before it can publish.
+
+**React `useEffect` cleanup.** Create the controller inside the effect, pass its signal to the viem read, return a cleanup that calls `controller.abort()`. Reads now respect unmount the way the rest of React's data layer does.
+
+```ts
+useEffect(() => {
+  const controller = new AbortController()
+
+  publicClient
+    .readContract({ ...args }, { signal: controller.signal })
+    .then(setBalance)
+    .catch((err) => {
+      if (err.name !== 'AbortError') console.error(err)
+    })
+
+  return () => controller.abort()
+}, [account, token])
+```
+
+**Timeouts for unreliable RPCs.** `AbortSignal.timeout(ms)` is part of the standard now; pass it directly to a viem action and the action rejects deterministically after `ms` milliseconds, regardless of what the RPC does. For dApps with a public-RPC fallback, this is the cleanest way to fail over: `readContract({ ... }, { signal: AbortSignal.timeout(2000) })`, catch the timeout, retry against the next transport.
+
+Wallet calls — the ones that pop a MetaMask window — accept the same `signal` option through request options, but the wallet popup itself does not close when the signal aborts. The popup is the wallet's UI, not yours. Aborting only frees your code from waiting on the response; the user still has to dismiss the popup. Treat wallet cancellation as a UI concern, not a transport one.
+
+## What this changes for end-to-end tests
+
+If you drive MetaMask through [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/metamask), the wallet half of your flow does not change — `metamask.confirm()` and `metamask.reject()` still drive the popup the same way they did before. What changes is the surface around it: tests that previously had to wait for a stale read to resolve before asserting on a fresh value can now assume your dApp cancels the loser cleanly, and assertion timing tightens accordingly. UIs that emit no spinner because the cancelled read never resolved are testable directly instead of via "wait for the loader to disappear" workarounds.
+
+The change in 2.49 is small in surface area. The follow-through — replacing every `try { await readContract(...) } catch` block that quietly accepted clobber, threading an `AbortController` through your data layer, and treating cancellation as a first-class state alongside loading and error — is the part that takes a week and pays for itself the first time a quote stops flickering.
