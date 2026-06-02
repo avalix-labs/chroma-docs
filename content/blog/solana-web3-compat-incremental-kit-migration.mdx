@@ -1,0 +1,58 @@
+---
+title: "Migrate Solana dApps to Kit Without Rewriting: How @solana/web3-compat Works"
+description: "@solana/web3-compat lets existing solana-web3.js code run on the Kit runtime by swapping one import. Here's the incremental Solana Kit migration pattern."
+date: 2026-06-02
+author: Chroma Team
+---
+
+Most Solana frontends still import from `@solana/web3.js`. The library is in maintenance mode, the recommended SDK is now `@solana/kit`, and the published benchmarks make the case for moving — Anza measured ~10x faster signing once Ed25519 routes through the browser's native Web Crypto APIs, and the Solana Explorer landing bundle dropped 26% (311 KB → 226 KB) when its imports moved off v1. The argument that has stalled most teams is the migration itself: every `new Connection`, every `new Transaction`, every `Keypair.fromSecretKey` is a touchpoint. **`@solana/web3-compat`**, the compatibility layer Anza ships alongside Kit, is the change that makes a Solana Kit migration stop being an all-or-nothing decision.
+
+## Why a compat layer was needed at all
+
+Kit is a tree of small, focused packages built around pure functions. `@solana/rpc` handles network calls; `@solana/transaction-messages` and `@solana/transactions` handle building and signing; `@solana/signers` handles key material. The new shape is the entire point — it is what makes Kit tree-shakable, browser-native, and easier to mock — but it is also what makes a direct migration painful. A v1 line like:
+
+```ts
+const balance = await connection.getBalance(new PublicKey(addr))
+```
+
+does not map to one Kit line. It splits into deriving an `Address` from a string, building a typed RPC request, and `.send()`-ing it. Doing that across every file of a real dApp is a project, not a chore.
+
+`@solana/web3-compat` solves this by re-exporting the v1 surface — `Connection`, `PublicKey`, `Transaction`, `Keypair`, `LAMPORTS_PER_SOL`, `SystemProgram`, `sendAndConfirmTransaction` — while internally delegating to Kit packages. Your code reads the same; the runtime underneath does not.
+
+## What changes when you swap the import
+
+For most files, the migration is a single line:
+
+```ts
+// before
+import { Connection, PublicKey } from '@solana/web3.js'
+
+// after
+import { Connection, PublicKey } from '@solana/web3-compat'
+```
+
+The `Connection` class still exposes `getLatestBlockhash`, `getBalance`, `getAccountInfo`, `getProgramAccounts`, `getSignatureStatuses`, `sendRawTransaction`, `confirmTransaction`, and `simulateTransaction`. Reads and writes forward through `@solana/client` underneath, so you pick up Kit's RPC pipelining and Web Crypto signing without changing a call site.
+
+What you do not get from compat alone is the bundle-size win. The compat package re-exports the v1 shape, so a build that imports `Connection` from it pulls a similar amount of code into the bundle as the original library did. The performance win is real (signing path, network handling, RPC plumbing); the size win arrives later, when individual files have moved off compat to direct Kit imports.
+
+## The file-by-file pattern
+
+The migration pattern the Anza docs recommend is to swap the import source globally first, run your suite, then migrate feature folders one at a time. A useful checkpoint sequence:
+
+1. Replace `@solana/web3.js` with `@solana/web3-compat` across the codebase. Run your tests. Anything that breaks depended on a v1 runtime detail compat does not preserve — that is the surface area to inspect before going further.
+2. Pick one feature folder — say, `src/features/swap` — and rewrite its imports to point at Kit packages directly: `@solana/rpc`, `@solana/transaction-messages`, `@solana/transactions`. The rest of the codebase still uses compat.
+3. When a folder no longer references compat, the imports inside it are pure Kit. The bundle splits along those module boundaries, so the size reduction lands folder by folder rather than as one large diff.
+
+Files that need to share state across the boundary — a v1 `PublicKey` produced by compat code that needs to flow into a Kit-typed `Address` parameter, or a `VersionedTransaction` constructed with v1 helpers that a Kit signer should sign — go through `@solana/compat`, a separate package of conversion helpers between the legacy classes (`VersionedTransaction`, `PublicKey`, `Keypair`) and the Kit types (`Address`, `Transaction`, `CryptoKeyPair`). It is the seam where the two shapes meet without one of them having to be rewritten first.
+
+## The SVM model is unchanged underneath
+
+Both libraries describe the same execution model. A Solana program is stateless; every account it touches is an explicit input to the instruction. Transactions are versioned (v0) with optional address lookup tables. Compute units, priority fees, and the instruction discriminator layout are properties of the SVM runtime, not properties of the SDK. Migrating to Kit does not change what a transaction is — only how your code assembles, signs, and sends one.
+
+That matters for tests. If you drive a Phantom popup with [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom), the wallet sees the same versioned transaction bytes whether the dApp built them with v1, compat, or Kit. An end-to-end test of the connect-and-sign flow stays valid across the migration, which is what gives you the safety net to do the swap incrementally — the dApp's wire-level behavior is what the test pins down, and that behavior is what compat preserves.
+
+## When to drop compat
+
+Compat is meant to be temporary. The signal to retire it from a module is when every call site in that module uses only the v1 helpers that compat re-implements — at that point, the file is also a candidate for a clean Kit rewrite, because the v1 ergonomics you preserved no longer cover anything the file actually needs. Treat compat as a runway, not a destination: it makes the migration possible to start, but the parts of Kit that justify the move — small modules, functional composition, native crypto, tree-shaken bundles — only fully arrive once each file imports directly from Kit packages.
+
+The migration stops being a single PR and starts being a sequence of folder-sized PRs your team can ship across normal sprints. That is the point of shipping a compat layer at all.
