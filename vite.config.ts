@@ -1,14 +1,16 @@
+import { cloudflare } from '@cloudflare/vite-plugin';
 import react from '@vitejs/plugin-react';
 import { tanstackStart } from '@tanstack/react-start/plugin/vite';
 import tailwindcss from '@tailwindcss/vite';
 import mdx from 'fumadocs-mdx/vite';
-import { nitro } from 'nitro/vite';
 import { defineConfig } from 'vite';
+
 export default defineConfig({
   server: {
     port: 3000,
   },
   plugins: [
+    cloudflare({ viteEnvironment: { name: 'ssr' } }),
     mdx(),
     tailwindcss(),
     tanstackStart({
@@ -17,9 +19,6 @@ export default defineConfig({
       },
     }),
     react(),
-    nitro({
-      preset: 'vercel',
-    }),
   ],
   resolve: {
     tsconfigPaths: true,

@@ -9,6 +9,8 @@
     "build": "vite build",
     "start": "vite preview",
     "preview": "vite preview",
+    "deploy": "npm run build && wrangler deploy",
+    "cf-typegen": "wrangler types",
     "types:check": "fumadocs-mdx && tsc --noEmit",
     "postinstall": "fumadocs-mdx",
     "lint": "eslint"
@@ -27,6 +29,7 @@
     "vite": "^8.0.16"
   },
   "devDependencies": {
+    "@cloudflare/vite-plugin": "^1.39.2",
     "@tailwindcss/vite": "^4.3.0",
     "@types/mdx": "^2.0.13",
     "@types/node": "^25.2.3",
@@ -34,8 +37,8 @@
     "@types/react-dom": "^19.2.3",
     "@vitejs/plugin-react": "^6.0.2",
     "eslint": "^10.0.0",
-    "nitro": "3.0.260603-beta",
     "tailwindcss": "^4.3.0",
+    "wrangler": "^4.97.0",
     "typescript": "^6.0.3",
     "typescript-eslint": "^8.56.1"
   }
