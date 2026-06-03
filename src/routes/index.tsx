@@ -1,209 +1,432 @@
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { HomeLayout } from 'fumadocs-ui/layouts/home';
-import { ArrowRight, Blocks, FlaskConical, Terminal, Zap } from 'lucide-react';
+import {
+  ArrowRight,
+  Check,
+  Clipboard,
+  Code2,
+  Cuboid,
+  Database,
+  Grid2X2,
+  MonitorCheck,
+  Play,
+  Sparkles,
+  Terminal,
+} from 'lucide-react';
+import { useState, type ReactNode } from 'react';
 import { baseOptions } from '@/lib/layout.shared';
 
 export const Route = createFileRoute('/')({
   component: HomePage,
 });
 
+const terminalLines = [
+  { kind: 'cmd', text: 'npx chroma download-extensions' },
+  { kind: 'ok', text: 'polkadot-js   v0.62.6' },
+  { kind: 'ok', text: 'talisman      v3.1.13' },
+  { kind: 'ok', text: 'metamask      v13.28.0' },
+  { kind: 'space', text: '' },
+  { kind: 'cmd', text: 'npx playwright test' },
+  { kind: 'dim', text: 'Running 3 tests using 1 worker' },
+  { kind: 'ok', text: 'wallet connects and authorizes   2.4s' },
+  { kind: 'ok', text: 'approves a transaction           3.1s' },
+  { kind: 'ok', text: 'rejects a transaction            1.6s' },
+  { kind: 'space', text: '' },
+  { kind: 'pass', text: '3 passed (7.4s)' },
+];
+
+const codeExamples = {
+  pjs: {
+    label: 'polkadot-js',
+    code: `import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'polkadot-js' }],
+})
+
+test('connects and signs', async ({ page, wallets }) => {
+  const pjs = wallets['polkadot-js']
+
+  await pjs.importMnemonic({
+    seed: 'bottom drive obey lake curtain smoke...',
+  })
+
+  await page.goto('http://localhost:3000')
+  await pjs.authorize()
+  await pjs.approveTx()
+})`,
+  },
+  mm: {
+    label: 'metamask',
+    code: `import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test('confirms an EVM flow', async ({ page, wallets }) => {
+  const mm = wallets.metamask
+
+  await mm.importSeedPhrase({
+    seedPhrase: 'test test test ... junk',
+  })
+  await mm.unlock()
+
+  await page.goto('http://localhost:3000')
+  await mm.approve()
+})`,
+  },
+  tal: {
+    label: 'talisman',
+    code: `import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'talisman' }],
+})
+
+test('authorizes a substrate dApp', async ({ page, wallets }) => {
+  const talisman = wallets.talisman
+
+  await talisman.importPolkadotMnemonic({
+    seed: 'bottom drive obey lake curtain...',
+    name: 'Alice',
+  })
+
+  await page.goto('http://localhost:3000')
+  await talisman.authorize()
+  await talisman.approveTx()
+})`,
+  },
+};
+
+type CodeTab = keyof typeof codeExamples;
+
 function HomePage() {
+  const [copied, setCopied] = useState(false);
+  const [activeCode, setActiveCode] = useState<CodeTab>('pjs');
+
+  async function copyInstallCommand() {
+    await navigator.clipboard?.writeText('npm install @avalix/chroma @playwright/test');
+    setCopied(true);
+    window.setTimeout(() => setCopied(false), 1400);
+  }
+
   return (
     <HomeLayout {...baseOptions()}>
-      <main className="flex min-h-[calc(100vh-64px)] flex-col">
-        <section className="relative flex flex-col items-center justify-center overflow-hidden px-6 py-24 md:py-32">
-          <div
-            className="absolute inset-0 -z-10 opacity-[0.03]"
-            style={{
-              backgroundImage: `url("data:image/svg+xml,%3csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32' width='32' height='32' fill='none' stroke='currentColor'%3e%3cpath d='M0 .5H31.5V32'/%3e%3c/svg%3e")`,
-            }}
-          />
+      <main className="chroma-landing">
+        <section className="chroma-hero" aria-labelledby="chroma-hero-title">
+          <div className="chroma-wrap chroma-hero-grid">
+            <div className="chroma-hero-copy">
+              <p className="chroma-eyebrow">End-to-end wallet testing</p>
+              <h1 id="chroma-hero-title">
+                Test real wallet flows across <span>every chain</span>.
+              </h1>
+              <p className="chroma-lede">
+                Chroma drives Polkadot, Ethereum and Solana wallet extensions inside real
+                Playwright tests. Import seeds, authorize dApps, approve or reject transactions,
+                and keep the whole flow in code.
+              </p>
 
-          <div className="mb-8 inline-flex items-center gap-2 rounded-full border border-fd-border bg-fd-secondary px-4 py-1.5 text-sm font-medium">
-            <span className="relative flex h-2 w-2">
-              <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-75" />
-              <span className="relative inline-flex h-2 w-2 rounded-full bg-emerald-600" />
-            </span>
-            Now supporting EVM chains
-          </div>
-
-          <h1 className="max-w-4xl text-center text-4xl font-bold tracking-tight md:text-6xl lg:text-7xl">
-            E2E Testing for{' '}
-            <span className="underline decoration-4 decoration-emerald-500 underline-offset-4">
-              Wallet Interactions
-            </span>
-          </h1>
-
-          <p className="mt-6 max-w-2xl text-center text-lg text-fd-muted-foreground md:text-xl">
-            Test your dApps with real wallet extensions. Built on Playwright for reliable, automated
-            testing across Polkadot, EVM, and more.
-          </p>
-
-          <div className="mt-10 flex flex-col gap-4 sm:flex-row">
-            <Link
-              to="/docs/$"
-              params={{ _splat: '' }}
-              className="inline-flex items-center justify-center gap-2 rounded-lg bg-fd-foreground px-6 py-3 text-base font-medium text-fd-background transition-opacity hover:opacity-90"
-            >
-              Get Started
-              <ArrowRight className="h-4 w-4" />
-            </Link>
-            <a
-              href="https://github.com/avalix-labs/chroma"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="inline-flex items-center justify-center gap-2 rounded-lg border border-fd-border bg-fd-background px-6 py-3 text-base font-medium transition-colors hover:bg-fd-secondary"
-            >
-              <GitHubIcon className="h-4 w-4" />
-              View on GitHub
-            </a>
-          </div>
-
-          <div className="mt-16 w-full max-w-2xl">
-            <div className="overflow-hidden rounded-xl border border-fd-border bg-fd-card shadow-lg">
-              <div className="flex items-center gap-2 border-b border-fd-border bg-fd-secondary/50 px-4 py-3">
-                <div className="flex gap-1.5">
-                  <div className="h-3 w-3 rounded-full bg-fd-muted-foreground/30" />
-                  <div className="h-3 w-3 rounded-full bg-fd-muted-foreground/30" />
-                  <div className="h-3 w-3 rounded-full bg-fd-muted-foreground/30" />
-                </div>
-                <span className="ml-2 font-mono text-xs text-fd-muted-foreground">wallet.spec.ts</span>
-              </div>
-              <pre className="overflow-x-auto p-4 text-sm">
-                <code className="font-mono text-fd-foreground">
-                  <span className="text-fd-muted-foreground">import</span> {'{'} test {'}'}{' '}
-                  <span className="text-fd-muted-foreground">from</span>{' '}
-                  <span className="text-emerald-600 dark:text-emerald-400">&apos;@avalix/chroma&apos;</span>
-                  {'\n\n'}
-                  <span className="text-fd-muted-foreground">test</span>(
-                  <span className="text-emerald-600 dark:text-emerald-400">&apos;connect wallet&apos;</span>,{' '}
-                  <span className="text-fd-muted-foreground">async</span> {'({'} page, wallets {'}'}) {'=>'}{' '}
-                  {'{\n'}
-                  {'  '}
-                  <span className="text-fd-muted-foreground">const</span> wallet = wallets[
-                  <span className="text-emerald-600 dark:text-emerald-400">&apos;polkadot-js&apos;</span>]
-                  {'\n\n'}
-                  {'  '}
-                  <span className="text-fd-muted-foreground">await</span> wallet.importMnemonic({'{ '}seed
-                  {'}'}){';\n'}
-                  {'  '}
-                  <span className="text-fd-muted-foreground">await</span> page.goto(
-                  <span className="text-emerald-600 dark:text-emerald-400">
-                    &apos;http://localhost:3000&apos;
+              <div className="chroma-actions">
+                <div className="chroma-install-command">
+                  <span>
+                    <b>$</b> npm i @avalix/chroma
                   </span>
-                  ){'\n'}
-                  {'  '}
-                  <span className="text-fd-muted-foreground">await</span> wallet.authorize(){'\n'}
-                  {'  '}
-                  <span className="text-fd-muted-foreground">await</span> wallet.approveTx(){'\n'}
-                  {'}'});
-                </code>
-              </pre>
-            </div>
-          </div>
-        </section>
-
-        <section className="border-t border-fd-border px-6 py-20">
-          <div className="mx-auto max-w-6xl">
-            <h2 className="mb-4 text-center text-3xl font-bold md:text-4xl">Why Chroma?</h2>
-            <p className="mx-auto mb-16 max-w-2xl text-center text-fd-muted-foreground">
-              Built specifically for Web3 developers who need reliable wallet testing
-            </p>
-
-            <div className="grid gap-8 md:grid-cols-3">
-              <FeatureCard
-                icon={<FlaskConical className="h-6 w-6" />}
-                title="Real Wallet Testing"
-                description="Test with actual wallet extensions like Polkadot.js, Talisman, and MetaMask. No mocks, no stubs."
-              />
-              <FeatureCard
-                icon={<Zap className="h-6 w-6" />}
-                title="Playwright Powered"
-                description="Built on top of Playwright for reliable, fast, and maintainable browser automation."
-              />
-              <FeatureCard
-                icon={<Blocks className="h-6 w-6" />}
-                title="Multi-Chain Ready"
-                description="Support for Polkadot ecosystem, EVM (including MetaMask), and SVM chains coming soon."
-              />
-            </div>
-          </div>
-        </section>
-
-        <section className="border-t border-fd-border bg-fd-secondary/30 px-6 py-20">
-          <div className="mx-auto max-w-3xl text-center">
-            <h2 className="mb-4 text-3xl font-bold md:text-4xl">Get Started in Seconds</h2>
-            <p className="mb-8 text-fd-muted-foreground">Install Chroma and start testing your dApp</p>
-
-            <div className="overflow-hidden rounded-xl border border-fd-border bg-fd-card text-left">
-              <div className="flex items-center gap-2 border-b border-fd-border bg-fd-secondary/50 px-4 py-3">
-                <Terminal className="h-4 w-4 text-fd-muted-foreground" />
-                <span className="font-mono text-xs text-fd-muted-foreground">Terminal</span>
+                  <button type="button" onClick={copyInstallCommand} aria-label="Copy install command">
+                    {copied ? <Check aria-hidden className="size-4" /> : <Clipboard aria-hidden className="size-4" />}
+                  </button>
+                </div>
+                <Link to="/docs/$" params={{ _splat: 'installation' }} className="chroma-button chroma-button-secondary">
+                  Read the docs
+                  <ArrowRight aria-hidden className="size-4" />
+                </Link>
               </div>
-              <pre className="overflow-x-auto p-4 text-sm">
-                <code className="font-mono text-fd-foreground">
-                  <span className="text-fd-muted-foreground"># Install package</span>
-                  {'\n'}
-                  npm install @avalix/chroma{'\n\n'}
-                  <span className="text-fd-muted-foreground"># Download wallet extensions</span>
-                  {'\n'}
-                  npx chroma download-extensions{'\n\n'}
-                  <span className="text-fd-muted-foreground"># Run tests</span>
-                  {'\n'}
-                  npm test
-                </code>
-              </pre>
+
+              <div className="chroma-proof-row" aria-label="Supported chains">
+                <span>Built on <strong>Playwright</strong></span>
+                <i aria-hidden />
+                <ChainDot color="pink" label="Polkadot" />
+                <ChainDot color="blue" label="Ethereum" />
+                <ChainDot color="green" label="Solana" />
+              </div>
             </div>
 
-            <Link
-              to="/docs/$"
-              params={{ _splat: 'installation' }}
-              className="mt-8 inline-flex items-center gap-2 text-fd-foreground hover:underline"
-            >
-              View full installation guide
-              <ArrowRight className="h-4 w-4" />
-            </Link>
+            <TerminalShowcase />
           </div>
         </section>
 
-        <footer className="mt-auto border-t border-fd-border px-6 py-8">
-          <div className="mx-auto flex max-w-6xl flex-col items-center justify-between gap-4 md:flex-row">
-            <div className="text-sm text-fd-muted-foreground">
-              Built by{' '}
-              <a
-                href="https://github.com/avalix-labs"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-fd-foreground hover:underline"
-              >
-                Avalix Labs
-              </a>
+        <section className="chroma-section chroma-section-light" aria-labelledby="why-chroma">
+          <div className="chroma-wrap">
+            <SectionHeader
+              eyebrow="Why Chroma"
+              title="Wallet automation that behaves like a user."
+              description="No stubbed providers or injected globals. Chroma loads real browser extensions and drives their popups, side panels and confirmation screens."
+            />
+
+            <div className="chroma-feature-grid">
+              <FeatureCard
+                icon={<Cuboid aria-hidden />}
+                title="Real extensions, real popups"
+                description="Polkadot-JS, Talisman and MetaMask run as actual Chromium extensions in the same browser context your tests control."
+              />
+              <FeatureCard
+                icon={<Grid2X2 aria-hidden />}
+                title="Multi-wallet by design"
+                description="Declare one wallet or several. The typed fixture exposes only the wallets you configure, with wallet-specific methods."
+              />
+              <FeatureCard
+                icon={<Sparkles aria-hidden />}
+                title="Persistent profiles"
+                description="Import an account once, reuse it across the worker, and clone prepared profiles for fast isolated parallel runs."
+              />
+              <FeatureCard
+                icon={<MonitorCheck aria-hidden />}
+                title="Drop-in Playwright"
+                description="createWalletTest() returns a familiar test object, so locators, assertions, traces and reporters keep working."
+              />
+              <FeatureCard
+                icon={<Database aria-hidden />}
+                title="One CLI for fixtures"
+                description="npx chroma download-extensions pulls pinned wallet builds into .chroma for reproducible local and CI runs."
+              />
+              <FeatureCard
+                icon={<Terminal aria-hidden />}
+                title="Headless and Docker-ready"
+                description="Run headed while developing, then ship the same suite headless in CI with the same wallet fixtures."
+              />
             </div>
-            <div className="flex items-center gap-6 text-sm">
-              <Link to="/docs/$" params={{ _splat: '' }} className="text-fd-muted-foreground transition-colors hover:text-fd-foreground">
-                Documentation
+          </div>
+        </section>
+
+        <section className="chroma-section chroma-code-section" aria-labelledby="code-showcase">
+          <div className="chroma-wrap chroma-show-grid">
+            <div>
+              <p className="chroma-eyebrow">From zero to signed tx</p>
+              <h2 id="code-showcase">A whole wallet flow, in a few lines.</h2>
+              <p className="chroma-section-copy">
+                Configure the wallets you need, import an account, then walk the dApp exactly like
+                a user. The browser trace tells the same story your product team sees on screen.
+              </p>
+
+              <ol className="chroma-steps">
+                <Step number="1" title="Configure" description="Pass wallets to createWalletTest() and get a typed test fixture." />
+                <Step number="2" title="Import" description="Seed an account through the real extension onboarding flow." />
+                <Step number="3" title="Authorize and sign" description="Connect to the dApp, then approve or reject the transaction popup." />
+              </ol>
+            </div>
+
+            <div className="chroma-code-card">
+              <div className="chroma-card-head">
+                <Dots />
+                <span>wallet.spec.ts</span>
+                <div className="chroma-code-tabs" role="tablist" aria-label="Wallet code examples">
+                  {(Object.keys(codeExamples) as CodeTab[]).map((key) => (
+                    <button
+                      key={key}
+                      type="button"
+                      role="tab"
+                      aria-selected={activeCode === key}
+                      className={activeCode === key ? 'is-active' : ''}
+                      onClick={() => setActiveCode(key)}
+                    >
+                      {codeExamples[key].label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+              <pre>
+                <code>{codeExamples[activeCode].code}</code>
+              </pre>
+            </div>
+          </div>
+        </section>
+
+        <section className="chroma-section chroma-section-light" aria-labelledby="coverage">
+          <div className="chroma-wrap">
+            <SectionHeader
+              eyebrow="Coverage"
+              title="Wallets and chains, accounted for."
+              description="The matrix grows with every release. Here is the current surface area for real wallet automation."
+            />
+
+            <div className="chroma-matrix">
+              <MatrixCard
+                title="Wallets"
+                rows={[
+                  ['P', 'Polkadot JS Extension', 'v0.62.6', 'supported', 'pink'],
+                  ['T', 'Talisman', 'v3.1.13', 'supported', 'red'],
+                  ['M', 'MetaMask', 'v13.28.0', 'supported', 'orange'],
+                  ['S', 'SubWallet', 'roadmap', 'planned', 'violet'],
+                ]}
+              />
+              <MatrixCard
+                title="Chains"
+                rows={[
+                  ['', 'Polkadot', 'substrate flows', 'supported', 'pink'],
+                  ['', 'Ethereum', 'EVM flows', 'supported', 'blue'],
+                  ['', 'Solana', 'SVM flows', 'supported', 'green'],
+                  ['', 'More chains', 'roadmap', 'planned', 'stone'],
+                ]}
+              />
+            </div>
+          </div>
+        </section>
+
+        <section className="chroma-section chroma-final-cta" aria-labelledby="final-cta">
+          <div className="chroma-wrap">
+            <div className="chroma-cta-panel">
+              <p className="chroma-eyebrow">Ready for CI</p>
+              <h2 id="final-cta">Ship wallet features without the manual QA loop.</h2>
+              <p>Install the package, download the extensions, and write your first test in minutes.</p>
+              <div className="chroma-actions">
+                <Link to="/docs/$" params={{ _splat: 'quick-start' }} className="chroma-button chroma-button-primary">
+                  Get started
+                  <Play aria-hidden className="size-4" />
+                </Link>
+                <a
+                  href="https://github.com/avalix-labs/chroma"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="chroma-button chroma-button-secondary chroma-button-on-dark"
+                >
+                  <GitHubIcon className="size-4" />
+                  View on GitHub
+                </a>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <footer className="chroma-footer">
+          <div className="chroma-wrap chroma-footer-grid">
+            <div>
+              <Link to="/" className="chroma-wordmark">
+                Chroma<span>_</span>
               </Link>
-              <a
-                href="https://github.com/avalix-labs/chroma"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-fd-muted-foreground transition-colors hover:text-fd-foreground"
-              >
-                GitHub
-              </a>
-              <a
-                href="https://www.npmjs.com/package/@avalix/chroma"
-                target="_blank"
-                rel="noopener noreferrer"
-                className="text-fd-muted-foreground transition-colors hover:text-fd-foreground"
-              >
-                npm
-              </a>
+              <p>End-to-end testing for Polkadot, Ethereum and Solana wallet interactions.</p>
             </div>
+            <nav aria-label="Footer navigation">
+              <Link to="/docs/$" params={{ _splat: '' }}>Docs</Link>
+              <Link to="/blog">Blog</Link>
+              <a href="https://www.npmjs.com/package/@avalix/chroma" target="_blank" rel="noopener noreferrer">npm</a>
+              <a href="https://github.com/avalix-labs/chroma" target="_blank" rel="noopener noreferrer">GitHub</a>
+            </nav>
           </div>
         </footer>
       </main>
     </HomeLayout>
+  );
+}
+
+function TerminalShowcase() {
+  return (
+    <div className="chroma-terminal" aria-label="Chroma Playwright terminal output">
+      <div className="chroma-card-head">
+        <Dots />
+        <span>chroma - playwright test</span>
+        <Code2 aria-hidden className="ml-auto size-4" />
+      </div>
+      <div className="chroma-terminal-body">
+        {terminalLines.map((line, index) => (
+          <div
+            key={`${line.text}-${index}`}
+            className={`chroma-terminal-line is-${line.kind}`}
+            style={{ animationDelay: `${index * 90}ms` }}
+          >
+            {line.kind === 'cmd' && <span className="chroma-prompt">$</span>}
+            {line.kind === 'ok' && <Check aria-hidden className="size-4" />}
+            {line.text}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SectionHeader({
+  eyebrow,
+  title,
+  description,
+}: {
+  eyebrow: string;
+  title: string;
+  description: string;
+}) {
+  return (
+    <div className="chroma-section-head">
+      <p className="chroma-eyebrow">{eyebrow}</p>
+      <h2>{title}</h2>
+      <p>{description}</p>
+    </div>
+  );
+}
+
+function FeatureCard({ icon, title, description }: { icon: ReactNode; title: string; description: string }) {
+  return (
+    <article className="chroma-feature-card">
+      <div className="chroma-feature-icon">{icon}</div>
+      <h3>{title}</h3>
+      <p>{description}</p>
+    </article>
+  );
+}
+
+function Step({ number, title, description }: { number: string; title: string; description: string }) {
+  return (
+    <li>
+      <span>{number}</span>
+      <div>
+        <h3>{title}</h3>
+        <p>{description}</p>
+      </div>
+    </li>
+  );
+}
+
+function MatrixCard({
+  title,
+  rows,
+}: {
+  title: string;
+  rows: Array<[string, string, string, string, string]>;
+}) {
+  return (
+    <div className="chroma-matrix-card">
+      <h3>{title}</h3>
+      {rows.map(([initial, name, detail, status, color]) => (
+        <div className="chroma-matrix-row" key={name}>
+          <span className="chroma-matrix-name">
+            {initial ? (
+              <b className={`chroma-logo-mark is-${color}`}>{initial}</b>
+            ) : (
+              <i className={`chroma-chain-mark is-${color}`} aria-hidden />
+            )}
+            {name}
+          </span>
+          <span>{detail}</span>
+          <em className={status === 'supported' ? 'is-supported' : 'is-planned'}>{status}</em>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ChainDot({ color, label }: { color: string; label: string }) {
+  return (
+    <span className="chroma-chain-label">
+      <i className={`chroma-chain-mark is-${color}`} aria-hidden />
+      {label}
+    </span>
+  );
+}
+
+function Dots() {
+  return (
+    <span className="chroma-dots" aria-hidden>
+      <i />
+      <i />
+      <i />
+    </span>
   );
 }
 
@@ -212,23 +435,5 @@ function GitHubIcon({ className }: { className?: string }) {
     <svg className={className} fill="currentColor" viewBox="0 0 24 24" aria-hidden>
       <path d="M12 .297c-6.63 0-12 5.373-12 12 0 5.303 3.438 9.8 8.205 11.385.6.113.82-.258.82-.577 0-.285-.01-1.04-.015-2.04-3.338.724-4.042-1.61-4.042-1.61C4.422 18.07 3.633 17.7 3.633 17.7c-1.087-.744.084-.729.084-.729 1.205.084 1.838 1.236 1.838 1.236 1.07 1.835 2.809 1.305 3.495.998.108-.776.417-1.305.76-1.605-2.665-.3-5.466-1.332-5.466-5.93 0-1.31.465-2.38 1.235-3.22-.135-.303-.54-1.523.105-3.176 0 0 1.005-.322 3.3 1.23.96-.267 1.98-.399 3-.405 1.02.006 2.04.138 3 .405 2.28-1.552 3.285-1.23 3.285-1.23.645 1.653.24 2.873.12 3.176.765.84 1.23 1.91 1.23 3.22 0 4.61-2.805 5.625-5.475 5.92.42.36.81 1.096.81 2.22 0 1.606-.015 2.896-.015 3.286 0 .315.21.69.825.57C20.565 22.092 24 17.592 24 12.297c0-6.627-5.373-12-12-12" />
     </svg>
-  );
-}
-
-function FeatureCard({
-  icon,
-  title,
-  description,
-}: {
-  icon: React.ReactNode;
-  title: string;
-  description: string;
-}) {
-  return (
-    <div className="flex flex-col rounded-xl border border-fd-border bg-fd-card p-6 transition-colors hover:border-fd-foreground/20">
-      <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-lg bg-fd-secondary">{icon}</div>
-      <h3 className="mb-2 text-lg font-semibold">{title}</h3>
-      <p className="text-sm text-fd-muted-foreground">{description}</p>
-    </div>
   );
 }
