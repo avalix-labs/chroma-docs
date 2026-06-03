@@ -40,6 +40,14 @@ npm run build
 npm run preview
 ```
 
+### Deploy (Cloudflare Workers)
+
+```bash
+npm run deploy
+```
+
+Requires `wrangler login` once locally. The project uses `@cloudflare/vite-plugin` with `wrangler.jsonc` (not the Vercel/Nitro output).
+
 ## Project Structure
 
 | Path | Description |
