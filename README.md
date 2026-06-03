@@ -10,24 +10,25 @@ Initially designed for the Polkadot ecosystem, Chroma is expanding to support EV
 
 ## Development
 
-This documentation site is built with [Next.js](https://nextjs.org) and [Fumadocs](https://fumadocs.dev).
+This documentation site is built with [TanStack Start](https://tanstack.com/start) and [Fumadocs](https://fumadocs.dev).
 
 ### Prerequisites
 
-- [Bun](https://bun.sh) 1.0+
+- Node.js 22+
+- npm, pnpm, yarn, or bun
 
 ### Getting Started
 
 Install dependencies:
 
 ```bash
-bun install
+npm install
 ```
 
 Run development server:
 
 ```bash
-bun dev
+npm run dev
 ```
 
 Open http://localhost:3000 with your browser to see the result.
@@ -35,7 +36,8 @@ Open http://localhost:3000 with your browser to see the result.
 ### Build
 
 ```bash
-bun run build
+npm run build
+npm run preview
 ```
 
 ## Project Structure
@@ -43,9 +45,9 @@ bun run build
 | Path | Description |
 | --- | --- |
 | `content/docs` | Documentation MDX files |
-| `app/(home)` | Landing page |
-| `app/docs` | Documentation layout and pages |
-| `lib/source.ts` | Content source adapter |
+| `content/blog` | Blog MDX posts |
+| `src/routes` | TanStack Start file-based routes |
+| `src/lib/source.ts` | Content source adapter |
 
 ## Links
 
