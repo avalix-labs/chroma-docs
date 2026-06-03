@@ -1,0 +1,92 @@
+---
+title: "Polkadot's Bulletin Chain Is Live: A Developer's Guide to On-Chain Storage Without IPFS Pinning"
+description: "Polkadot's Bulletin Chain launched Phase 0 with runtime v2.2.1. Here's how transactionStorage extrinsics and authorization budgets replace IPFS pinning."
+date: 2026-06-03
+author: Chroma Team
+---
+
+For years, "decentralized" dApps have shipped a small lie: the contract lives on-chain, but the JSON metadata, the image, the static HTML — that all lives on Pinata, Filebase, or some other IPFS pinning provider. If the pinning subscription lapses, the asset disappears from the network even though its CID still resolves on paper. The Polkadot Bulletin Chain, whose Phase 0 went live with the v2.2.1 runtime upgrade in April 2026, is the protocol-level answer to that storage problem — with proof-of-storage guarantees, IPFS-compatible CIDs, and an authorization model that doesn't require a credit card.
+
+This is a new primitive for Polkadot dApp developers. Here is what it actually does, how to write to it, and what the retention model means for your application.
+
+## What the Bulletin Chain Actually Is
+
+The Bulletin Chain is a Polkadot system chain dedicated to content-addressed storage. Its core module is the `transactionStorage` pallet, which indexes user-submitted data and exposes it via two channels: a Substrate node interface and, when started with `--ipfs-server`, an IPFS-compatible gateway. Every chunk of stored data is addressable by an IPFS CID, so existing tooling — `ipfs cat`, browser IPFS clients, public gateways — works against Bulletin nodes without changes.
+
+The data plane is intentionally ephemeral. Stored bytes are kept for roughly fourteen days by default, after which they're pruned unless someone calls `renew` against the storage proof. That choice matters: it lets the chain offer real storage guarantees without committing to permanent state growth. If a dApp wants asset permanence, it pays the cost of re-anchoring rather than the network paying it forever.
+
+A single `transactionStorage.store` call accepts up to about 8 MiB. Files larger than that are split into chunks tied together by a DAG-PB manifest — the same Merkle DAG format IPFS uses for UnixFS files. The SDK handles chunking for you up to a practical ceiling around 64 MiB.
+
+## The Authorization Model That Gates Storage
+
+You can't just submit a `store` extrinsic from any account. Authorization is gated at the runtime level by two root-origin extrinsics:
+
+- `authorize_account` grants a specific account a budget of bytes and transactions.
+- `authorize_preimage` pre-authorizes a specific content hash, regardless of who submits it. This is the path the People Chain uses to admit data via XCM.
+
+Each authorization carries an `AuthorizationExtent` with three counters that share a single bytes allowance: `bytes` and `transactions` are soft limits — exceeding them only deprioritizes the transaction — and `bytes_permanent` is a hard limit that `renew` calls strictly reject past. A global `MaxPermanentStorageSize` caps the network's total renewable footprint, and a `PermanentStorageNearCap` event fires at 80% so governance can raise the ceiling before applications start failing.
+
+For dApp developers, the practical implication is that any onboarding flow needs an upstream step where users (or a sponsor account) are granted an authorization budget through governance or an XCM message from the People Chain. There's no equivalent of "sign up for an API key."
+
+## Storing and Renewing Data
+
+The official `@parity/bulletin-sdk` ships an `AsyncBulletinClient` with chunking and DAG-PB manifest building included. A minimal write looks like this:
+
+```ts
+import { AsyncBulletinClient, FixedSizeChunker } from '@parity/bulletin-sdk'
+
+const client = await AsyncBulletinClient.connect('wss://bulletin-rpc.polkadot.io')
+
+const { cid } = await client.store({
+  data: assetBytes,
+  signer: alice,
+  chunker: new FixedSizeChunker({ size: 1 * 1024 * 1024 }), // 1 MiB chunks
+})
+
+console.log(`Pinned at ${cid.toString()}`)
+```
+
+`store` signs and submits one `transactionStorage.store` extrinsic per chunk, then returns the IPFS CID for the assembled manifest. Reads happen out of band — any IPFS client can fetch `cid` from a Bulletin node over Bitswap, so your frontend never needs a Substrate dependency to display the asset.
+
+To keep an asset alive past the retention window, watch the expiry block of each stored chunk and call `renew`:
+
+```ts
+await client.renew({ cid, signer: alice })
+```
+
+The SDK exposes an auto-renewal helper that polls expiries and renews on a schedule — useful for NFT collections or static frontends that need to outlive the default fourteen-day window. If you skip renewal, the data drops off the network and the CID becomes unresolvable on Bulletin nodes (other IPFS hosts may still have copies, but the protocol-level guarantee is gone).
+
+## What This Changes for Your dApp E2E Tests
+
+For dApps storing user-submitted content — profile images, collection metadata, off-chain governance posts — the upload flow is now a wallet-signed extrinsic, not a POST to a pinning API. That moves a critical failure point into the wallet popup: a user can reject the `transactionStorage.store` signature, an authorization can be exhausted mid-upload, or a chunked submission can partially succeed and leave half a DAG on-chain.
+
+These are exactly the boundaries that benefit from real-wallet end-to-end tests. With `@avalix/chroma` driving Polkadot.js, the upload flow is a Playwright test like any other extrinsic path:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'polkadot-js' }],
+})
+
+test('uploads asset to bulletin chain', async ({ page, wallets }) => {
+  const polkadotJs = wallets['polkadot-js']
+  await polkadotJs.importMnemonic({
+    seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk',
+  })
+
+  await page.goto('http://localhost:3000/upload')
+  await page.setInputFiles('input[type="file"]', './fixtures/cover.png')
+  await page.click('button:has-text("Pin")')
+
+  await polkadotJs.approveTx()
+
+  await expect(page.locator('[data-cid]')).toBeVisible()
+})
+```
+
+The same shape with `polkadotJs.rejectTx()` covers the cancellation path, which often matters more than the happy path: users who run out of authorization budget or change their mind mid-flow will see a popup, and what your dApp does after rejection is a product decision your tests should pin down before users encounter it.
+
+## Where to Start
+
+Phase 0 is intentionally narrow — it ships the storage and authorization plumbing, not consumer-grade UX. If you build on Polkadot, the question to ask is whether your dApp's storage assumptions still match: are you relying on a pinning provider that's about to become redundant infrastructure? Are your CID references going to outlive a fourteen-day window without a renewal job? Read your storage path against the retention model now, before Phase 1 starts adding higher-level abstractions on top.
