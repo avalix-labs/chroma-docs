@@ -1,0 +1,48 @@
+---
+title: "Solana's New Subscriptions Program: How the Delegation Authority Replaces Ad-Hoc Approve Patterns"
+description: "Solana's Subscriptions program is live on mainnet. Here's the Subscription Authority PDA model and three delegation patterns it enables."
+date: 2026-06-04
+author: Chroma Team
+---
+
+For years, anything resembling a recurring payment on Solana has been a workaround — a transfer signed up front, an SPL Token `Approve` to a custom escrow, an off-chain scheduler reading subscription state from a database. Each team rebuilt the same patterns, and each pattern absorbed the same audit cost. On June 2, 2026, the Solana Foundation shipped a shared answer: the **Solana Subscriptions and Allowances** program, live on mainnet, audited by Cantina and Spearbit, and designed to make on-chain delegated billing a primitive rather than a project.
+
+If you build payroll flows, AI-agent payments, merchant subscriptions, or any UI where a user pre-authorizes a delegate to pull funds later, this is the change worth reading end-to-end.
+
+## Why the SPL Token Approve Path Stopped Scaling
+
+The SPL Token program already supports delegation: `Approve` sets a single delegate address and an allowance on a token account. It is the same primitive every Solana wallet has used since 2020. The constraints are familiar to anyone who has tried to build a real recurring product on top of it.
+
+A token account can only have **one delegate at a time**. Authorizing a second merchant overwrites the first. There is no per-period reset, no on-chain billing terms a subscriber can re-validate later, and no way for a merchant to enforce that a charge matches its advertised price. Every team that wanted "Netflix on USDC" ended up shipping a custom program that wrapped the user's approval and reimplemented accounting and revoke paths from scratch.
+
+The Solana Subscriptions and Allowances program turns those patterns into one audited surface that early integration partners — Helius, Confirmo, Dynamic, Majority, Mesh, Meow — and any team building behind them can share.
+
+## The Subscription Authority PDA: One Delegate, Many Delegations
+
+The architectural trick is small and clean. Solana programs are stateless and accounts are explicit inputs to every instruction, so the program leans into that model rather than fighting it.
+
+For each `(user, mint)` pair, the program derives a **Subscription Authority (SA)** PDA from `["subscription_authority", delegator]`. The user calls `initSubscriptionAuthority` once per mint, which sets the SA PDA as the single delegate on their associated token account with `u64::MAX` approval. From SPL Token's perspective, the account now has exactly one delegate — same as before — but that delegate is a program-controlled PDA rather than a merchant address.
+
+The program then layers its own authorization on top. Every transfer the SA executes must be backed by a separate **Delegation PDA** that defines who can pull, how much, and when. A user can hold many delegations against the same token account simultaneously: a recurring subscription to one merchant, a fixed allowance for an AI agent, a payroll pull from an employer — each with its own record, its own limit, its own expiry. Revoking one does not touch the others.
+
+The SVM execution model rewards this design. Each `transfer_*` instruction takes the SA PDA, the relevant Delegation PDA, source and destination token accounts, and the SPL Token (or Token-2022) program as explicit inputs — everything the program needs to authorize the pull is on the instruction.
+
+## The Three Delegation Models You Can Build Against
+
+The program exposes three patterns through its TypeScript SDK (`SubscriptionsClient`) and Rust client, all generated from the same Codama IDL:
+
+- **Fixed Delegation** — `createFixedDelegation` authorizes a delegatee to spend up to a total amount, with an optional expiry timestamp. Useful for an AI agent paying for API calls until it hits its budget, or a one-shot escrow that can be pulled once and is then exhausted. The puller calls `transferFixed`.
+- **Recurring Delegation** — `createRecurringDelegation` authorizes a per-period amount that resets each period, with a configurable period length and an overall expiry. This is the primitive behind allowances: "my agent can spend up to 100 USDC per day, for 30 days." The puller calls `transferRecurring`.
+- **Subscription Plan** — `createPlan` lets a merchant publish immutable billing terms on-chain: mint, amount, period, destination addresses, and up to four whitelisted pullers. A subscriber accepts those terms with `subscribe`, which snapshots the plan into a `SubscriptionDelegation` PDA. Authorized pullers then call `transferSubscription` each billing period.
+
+Plan subscribers can `cancelSubscription` (grace period through period-end) or `resumeSubscription` before expiry. The `SubscriptionDelegation` stores the plan's `created_at` timestamp, so if a merchant deletes and recreates a plan at the same PDA, existing subscribers detect the mismatch and the delegation expires immediately.
+
+The program works with both SPL Token and Token-2022 — including the confidential transfers extension — and was integration-tested against Squads multisig and Swig smart wallet flows.
+
+## What This Means for Your dApp
+
+The most important shift is what you no longer have to build. The custom escrow, the merchant-specific approval contract, the off-chain accounting that reconciled "did the user actually authorize this charge?" — those collapse into instructions on a shared, audited program. Indexers can subscribe to the program's events (`SubscriptionCreatedEvent`, `SubscriptionTransferEvent`, `SubscriptionCancelledEvent`) instead of parsing every merchant's bespoke logs.
+
+The user-facing flow gains a pattern your dApp tests have not exercised before: a one-time wallet popup that authorizes future pulls, then nothing for weeks while the merchant charges silently. Asserting that your UI accurately reflects an existing on-chain delegation — not just the moment it was signed — becomes the interesting test surface, and the `subscribe` versioned transaction is where an E2E tool like [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom) can drive the real Phantom popup.
+
+The primitive is here. The patterns you shipped around it are about to look like the workarounds they always were.
