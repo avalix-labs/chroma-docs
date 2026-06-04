@@ -1,13 +1,14 @@
 import { createFileRoute, Link, notFound } from '@tanstack/react-router';
 import { createServerFn } from '@tanstack/react-start';
 import { useFumadocsLoader } from 'fumadocs-core/source/client';
-import { InlineTOC } from 'fumadocs-ui/components/inline-toc';
-import { HomeLayout } from 'fumadocs-ui/layouts/home';
 import { Suspense } from 'react';
 import browserCollections from 'collections/browser';
+import { ChromaFooter, ChromaNav } from '@/components/chroma-chrome';
 import { useMDXComponents } from '@/components/mdx';
-import { baseOptions } from '@/lib/layout.shared';
+import { CATEGORY_LABEL, categorize } from '@/lib/blog-categories';
 import { blog } from '@/lib/source';
+import chromaBlogCss from '@/styles/chroma-blog.css?url';
+import chromaHomeCss from '@/styles/chroma-home.css?url';
 
 export const Route = createFileRoute('/blog/$slug')({
   component: BlogPostPage,
@@ -16,21 +17,24 @@ export const Route = createFileRoute('/blog/$slug')({
     await clientLoader.preload(data.path);
     return data;
   },
-  head: ({ loaderData }) => {
-    if (!loaderData) return {};
-    return {
-      meta: [
-        { title: `${loaderData.title} | @avalix/chroma` },
-        { name: 'description', content: loaderData.description ?? '' },
-        { property: 'og:title', content: loaderData.title },
-        { property: 'og:description', content: loaderData.description ?? '' },
-        { property: 'og:type', content: 'article' },
-        { name: 'twitter:card', content: 'summary_large_image' },
-        { name: 'twitter:title', content: loaderData.title },
-        { name: 'twitter:description', content: loaderData.description ?? '' },
-      ],
-    };
-  },
+  head: ({ loaderData }) => ({
+    meta: loaderData
+      ? [
+          { title: `${loaderData.title} | @avalix/chroma` },
+          { name: 'description', content: loaderData.description ?? '' },
+          { property: 'og:title', content: loaderData.title },
+          { property: 'og:description', content: loaderData.description ?? '' },
+          { property: 'og:type', content: 'article' },
+          { name: 'twitter:card', content: 'summary_large_image' },
+          { name: 'twitter:title', content: loaderData.title },
+          { name: 'twitter:description', content: loaderData.description ?? '' },
+        ]
+      : [],
+    links: [
+      { rel: 'stylesheet', href: chromaHomeCss },
+      { rel: 'stylesheet', href: chromaBlogCss },
+    ],
+  }),
 });
 
 const serverLoader = createServerFn({ method: 'GET' })
@@ -56,68 +60,74 @@ const serverLoader = createServerFn({ method: 'GET' })
   });
 
 const clientLoader = browserCollections.blog.createClientLoader({
-  component({ toc, default: MDX }) {
-    return (
-      <article className="prose prose-neutral dark:prose-invert min-w-0 max-w-none prose-headings:font-semibold prose-p:text-fd-foreground/90 prose-a:text-fd-foreground prose-a:underline prose-pre:bg-fd-secondary">
-        <InlineTOC items={toc} />
-        <MDX components={useMDXComponents()} />
-      </article>
-    );
+  component({ default: MDX }) {
+    return <MDX components={useMDXComponents()} />;
   },
 });
 
 function BlogPostPage() {
+  const { slug } = Route.useParams();
   const data = useFumadocsLoader(Route.useLoaderData());
 
+  const dateLabel = data.date
+    ? new Date(data.date).toLocaleDateString('en-US', {
+        year: 'numeric',
+        month: 'short',
+        day: 'numeric',
+      })
+    : null;
+  const author = data.author ?? 'Chroma Team';
+  const avatarLetter = (author.trim()[0] ?? 'C').toUpperCase();
+  const category = categorize(slug);
+
   return (
-    <HomeLayout {...baseOptions()}>
-      <main className="min-h-0 w-full flex-1">
-        <div className="mx-auto max-w-3xl px-4 py-8 sm:px-6 lg:px-8">
-          <Link
-            to="/blog"
-            className="mb-8 inline-flex items-center text-sm text-fd-muted-foreground hover:text-fd-foreground"
-          >
-            ← Back to Blog
-          </Link>
+    <div className="chroma-home">
+      <ChromaNav active="blog" />
 
-          <header className="mb-10">
-            <h1 className="text-3xl font-bold tracking-tight text-fd-foreground sm:text-4xl">
-              {data.title}
-            </h1>
-            {data.description && (
-              <p className="mt-3 text-lg text-fd-muted-foreground">{data.description}</p>
-            )}
-            <div className="mt-6 flex flex-wrap gap-x-6 gap-y-1 text-sm text-fd-muted-foreground">
-              {data.author && (
-                <span>
-                  <span className="font-medium text-fd-foreground">Written by</span> {data.author}
-                </span>
-              )}
-              {data.date && (
-                <time dateTime={new Date(data.date).toISOString()}>
-                  <span className="font-medium text-fd-foreground">Published</span>{' '}
-                  {new Date(data.date).toLocaleDateString('en-US', {
-                    year: 'numeric',
-                    month: 'long',
-                    day: 'numeric',
-                  })}
-                </time>
-              )}
-            </div>
-          </header>
+      <article className="article">
+        <Link className="back" to="/blog">
+          ← All posts
+        </Link>
 
-          <Suspense>{clientLoader.useContent(data.path)}</Suspense>
-
-          <footer className="mt-12 border-t border-fd-border pt-8">
-            <Link
-              to="/blog"
-              className="text-sm text-fd-muted-foreground hover:text-fd-foreground"
-            >
-              ← Back to Blog
-            </Link>
-          </footer>
+        <div className="a-meta">
+          <span className="tag">{CATEGORY_LABEL[category]}</span>
+          {dateLabel && <span className="post-date">{dateLabel}</span>}
         </div>
-      </main>
-    </HomeLayout>
+
+        <h1>{data.title}</h1>
+        {data.description && <p className="a-lede">{data.description}</p>}
+
+        <div className="a-byline">
+          <div className="avatar" aria-hidden="true">
+            {avatarLetter}
+          </div>
+          <div className="who">
+            <b>{author}</b>
+            <span>@avalix/chroma</span>
+          </div>
+        </div>
+
+        <div className="body">
+          <Suspense>{clientLoader.useContent(data.path)}</Suspense>
+        </div>
+
+        <hr className="a-end" />
+        <div className="a-foot">
+          <Link className="back" to="/blog">
+            ← All posts
+          </Link>
+          <a
+            className="back"
+            href="https://github.com/avalix-labs/chroma"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Star on GitHub →
+          </a>
+        </div>
+      </article>
+
+      <ChromaFooter />
+    </div>
   );
 }

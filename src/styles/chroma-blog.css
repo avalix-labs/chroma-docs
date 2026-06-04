@@ -1,0 +1,146 @@
+/* ============================================================
+   Chroma — blog (index + article)
+   Ported from the Claude Design handoff bundle (blog.css).
+   Scoped under `.chroma-home` so it reuses the shared design
+   tokens defined in chroma-home.css and never bleeds into the
+   Fumadocs-themed docs pages.
+   ============================================================ */
+
+.chroma-home .blog-wrap { max-width: var(--maxw); margin: 0 auto; padding: 0 28px; }
+
+/* ---------- Index header ---------- */
+.chroma-home .blog-hero { padding: 64px 0 8px; text-align: center; }
+.chroma-home .blog-hero h1 { font-size: clamp(34px, 4.5vw, 50px); letter-spacing: -0.035em; }
+.chroma-home .blog-hero > .eyebrow { display: block; }
+.chroma-home .blog-hero p { font-size: 19px; color: var(--ink-3); margin: 16px auto 0; max-width: 52ch; }
+
+.chroma-home .tag { font-family: var(--font-mono); font-size: 11.5px; text-transform: uppercase; letter-spacing: .08em; color: var(--accent); background: var(--accent-soft); border: 1px solid var(--accent-line); padding: 2px 9px; border-radius: 100px; font-weight: 600; }
+.chroma-home .post-meta { display: flex; align-items: center; gap: 10px; font-size: 13px; color: var(--ink-4); font-family: var(--font-mono); }
+.chroma-home .post-date { white-space: nowrap; color: var(--ink-4); font-family: var(--font-mono); font-size: 13px; }
+
+/* ---------- Toolbar: filter chips + search ---------- */
+.chroma-home .blog-toolbar {
+  position: sticky; top: 60px; z-index: 30;
+  display: flex; align-items: center; gap: 18px; flex-wrap: wrap;
+  padding: 16px 0; margin: 40px 0 6px;
+  background: rgba(255,255,255,.86); backdrop-filter: saturate(180%) blur(12px);
+  border-bottom: 1px solid var(--line);
+}
+.chroma-home .filter-chips { display: flex; gap: 6px; flex-wrap: wrap; }
+.chroma-home .chip {
+  font-family: var(--font-sans); font-weight: 600; font-size: 13.5px;
+  color: var(--ink-2); background: var(--bg); border: 1px solid var(--line);
+  padding: 6px 14px; border-radius: 100px; cursor: pointer; transition: all .14s ease;
+  display: inline-flex; align-items: center; gap: 7px; white-space: nowrap;
+}
+.chroma-home .chip:hover { border-color: var(--ink-4); color: var(--ink); }
+.chroma-home .chip.active { background: var(--ink); color: #fff; border-color: var(--ink); }
+.chroma-home .chip .cnt { font-family: var(--font-mono); font-size: 11px; opacity: .55; }
+.chroma-home .chip.active .cnt { opacity: .7; }
+
+.chroma-home .search { position: relative; margin-left: auto; }
+.chroma-home .search svg { position: absolute; left: 12px; top: 50%; transform: translateY(-50%); color: var(--ink-4); pointer-events: none; }
+.chroma-home .search input {
+  font-family: var(--font-sans); font-size: 14px; color: var(--ink);
+  width: 220px; padding: 9px 14px 9px 36px; border-radius: var(--r-md);
+  border: 1px solid var(--line); background: var(--bg-soft); outline: none; transition: all .14s;
+}
+.chroma-home .search input:focus { border-color: var(--accent); background: var(--bg); box-shadow: 0 0 0 3px var(--accent-soft); }
+.chroma-home .search input::placeholder { color: var(--ink-4); }
+
+.chroma-home .result-count { font-size: 13.5px; color: var(--ink-3); font-family: var(--font-mono); margin: 22px 0 18px; }
+
+/* ---------- Pagination ---------- */
+.chroma-home .pager-nav { display: flex; justify-content: center; align-items: center; gap: 6px; margin: 36px 0 4px; flex-wrap: wrap; }
+.chroma-home .pager-nav button {
+  min-width: 40px; height: 40px; padding: 0 12px;
+  font-family: var(--font-sans); font-weight: 600; font-size: 14.5px;
+  color: var(--ink-2); background: var(--bg); border: 1px solid var(--line);
+  border-radius: var(--r-md); cursor: pointer; transition: all .14s ease;
+  display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+}
+.chroma-home .pager-nav button:hover:not(:disabled) { border-color: var(--accent-line); color: var(--ink); background: var(--accent-soft); }
+.chroma-home .pager-nav button.active { background: var(--ink); color: #fff; border-color: var(--ink); }
+.chroma-home .pager-nav button.active:hover { background: var(--ink); color: #fff; }
+.chroma-home .pager-nav button:disabled { opacity: .38; cursor: default; }
+.chroma-home .pager-nav .ellipsis { color: var(--ink-4); padding: 0 2px; align-self: flex-end; }
+
+/* ---------- Post grid ---------- */
+.chroma-home .post-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  gap: 18px; margin-bottom: 28px; align-items: stretch;
+}
+.chroma-home .pcard {
+  display: flex; flex-direction: column; gap: 0;
+  border: 1px solid var(--line); border-radius: var(--r-lg); background: var(--bg);
+  padding: 24px 24px 22px; transition: border-color .16s, transform .16s, box-shadow .16s;
+}
+.chroma-home .pcard:hover { text-decoration: none; border-color: var(--accent-line); transform: translateY(-2px); box-shadow: var(--shadow-md); }
+.chroma-home .pcard h3 { font-size: 19px; margin: 14px 0 9px; color: var(--ink); letter-spacing: -0.02em; line-height: 1.22; }
+.chroma-home .pcard p { color: var(--ink-3); font-size: 14.5px; margin: 0; line-height: 1.6; }
+.chroma-home .pcard .read { margin-top: auto; padding-top: 18px; color: var(--accent); font-weight: 600; font-size: 14px; display: inline-flex; align-items: center; gap: 6px; }
+
+/* Featured card — spans the full row, with art panel */
+.chroma-home .pcard.feat {
+  grid-column: 1 / -1; flex-direction: row; padding: 0; overflow: hidden; gap: 0;
+}
+.chroma-home .pcard.feat .ftxt { padding: 38px 36px; display: flex; flex-direction: column; flex: 1.15; }
+.chroma-home .pcard.feat h3 { font-size: 27px; margin: 16px 0 12px; line-height: 1.14; }
+.chroma-home .pcard.feat p { font-size: 16px; }
+.chroma-home .pcard.feat .fart { flex: 1; background: var(--code-bg); position: relative; overflow: hidden; min-height: 260px; }
+.chroma-home .pcard.feat .fart::before {
+  content: ""; position: absolute; inset: 0;
+  background: radial-gradient(420px 220px at 70% 20%, rgba(251,146,60,.35), transparent 60%),
+              radial-gradient(360px 220px at 20% 90%, rgba(236,72,153,.28), transparent 60%);
+}
+.chroma-home .fart .gloss { position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; }
+.chroma-home .fart .gloss code { font-family: var(--font-mono); color: rgba(255,255,255,.92); font-size: 14px; line-height: 1.9; background: rgba(12,10,9,.5); padding: 18px 22px; border-radius: var(--r-md); border: 1px solid rgba(255,255,255,.1); }
+.chroma-home .fart .gloss .ok { color: #4ade80; }
+
+/* Empty state */
+.chroma-home .no-results { text-align: center; padding: 60px 20px 80px; color: var(--ink-3); }
+.chroma-home .no-results svg { color: var(--ink-4); margin-bottom: 14px; }
+.chroma-home .no-results b { color: var(--ink); display: block; font-size: 17px; margin-bottom: 4px; }
+
+@media (max-width: 720px) {
+  .chroma-home .pcard.feat { flex-direction: column; }
+  .chroma-home .pcard.feat .fart { min-height: 160px; order: -1; }
+  .chroma-home .pcard.feat .ftxt { padding: 28px 24px; }
+  .chroma-home .blog-toolbar { gap: 12px; }
+  .chroma-home .search { margin-left: 0; width: 100%; }
+  .chroma-home .search input { width: 100%; }
+}
+
+/* ---------- Article ---------- */
+.chroma-home .article { max-width: 720px; margin: 0 auto; padding: 56px 28px 100px; }
+.chroma-home .article .back { font-family: var(--font-mono); font-size: 13.5px; color: var(--ink-3); display: inline-flex; gap: 7px; margin-bottom: 28px; }
+.chroma-home .article .back:hover { color: var(--accent); }
+.chroma-home .article .a-meta { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; }
+.chroma-home .article h1 { font-size: clamp(32px, 4.4vw, 46px); letter-spacing: -0.035em; line-height: 1.08; margin: 0 0 18px; }
+.chroma-home .article .a-lede { font-size: 20px; color: var(--ink-3); line-height: 1.55; margin: 0 0 28px; }
+.chroma-home .article .a-byline { display: flex; align-items: center; gap: 12px; padding: 18px 0; border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); margin-bottom: 40px; }
+.chroma-home .a-byline .avatar { width: 38px; height: 38px; border-radius: 50%; background: linear-gradient(135deg, var(--accent-500), #ec4899); display: flex; align-items: center; justify-content: center; color: #fff; font-weight: 700; font-family: var(--font-display); }
+.chroma-home .a-byline .who { font-size: 14px; }
+.chroma-home .a-byline .who b { color: var(--ink); display: block; font-weight: 600; }
+.chroma-home .a-byline .who span { color: var(--ink-4); font-family: var(--font-mono); font-size: 12.5px; }
+
+.chroma-home .article .body { font-size: 17px; line-height: 1.75; color: var(--ink-2); }
+.chroma-home .article .body h2 { font-size: 27px; margin: 46px 0 14px; letter-spacing: -0.025em; }
+.chroma-home .article .body h3 { font-size: 19px; margin: 32px 0 10px; }
+.chroma-home .article .body p { margin: 0 0 20px; }
+.chroma-home .article .body ul, .chroma-home .article .body ol { padding-left: 22px; }
+.chroma-home .article .body li { margin: 8px 0; }
+.chroma-home .article .body a { color: var(--accent); text-decoration: underline; text-underline-offset: 3px; }
+/* Inline code only — fenced code blocks are owned by Fumadocs (shiki + copy
+   button) so they keep their theme-aware highlighting. */
+.chroma-home .article .body :not(pre) > code { font-family: var(--font-mono); font-size: 0.85em; background: var(--accent-soft); color: #c2410c; padding: 2px 6px; border-radius: 5px; border: 1px solid var(--accent-line); }
+.chroma-home .article .body pre { margin: 24px 0; }
+.chroma-home .article .body blockquote { margin: 24px 0; padding: 6px 22px; border-left: 3px solid var(--accent); color: var(--ink-2); font-size: 18px; }
+.chroma-home .article .body blockquote p { margin: 0; }
+.chroma-home .article .body img { max-width: 100%; border-radius: var(--r-md); }
+.chroma-home .article .body table { width: 100%; border-collapse: collapse; margin: 24px 0; font-size: 14.5px; }
+.chroma-home .article .body th, .chroma-home .article .body td { text-align: left; padding: 10px 14px; border: 1px solid var(--line); }
+.chroma-home .article .body th { background: var(--bg-soft); color: var(--ink); font-weight: 600; }
+.chroma-home .article hr.a-end { margin: 56px 0 32px; border: none; height: 1px; background: var(--line); }
+.chroma-home .article .a-foot { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
+.chroma-home .article .a-foot .back { margin: 0; }

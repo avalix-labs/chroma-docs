@@ -1,4 +1,4 @@
-import { createMiddleware, createStart } from '@tanstack/react-start';
+import { createCsrfMiddleware, createMiddleware, createStart } from '@tanstack/react-start';
 import { isMarkdownPreferred } from 'fumadocs-core/negotiation';
 import { redirect } from '@tanstack/react-router';
 import { docsRoute } from '@/lib/shared';
@@ -24,8 +24,15 @@ const llmMiddleware = createMiddleware().server(({ next, request }) => {
   return next();
 });
 
+// Server functions are same-origin RPC endpoints; protect them from cross-site
+// requests. The filter scopes the CSRF check to server-fn handlers only, leaving
+// normal router/document requests untouched.
+const csrfMiddleware = createCsrfMiddleware({
+  filter: (ctx) => ctx.handlerType === 'serverFn',
+});
+
 export const startInstance = createStart(() => {
   return {
-    requestMiddleware: [llmMiddleware],
+    requestMiddleware: [csrfMiddleware, llmMiddleware],
   };
 });
