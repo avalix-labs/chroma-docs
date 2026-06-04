@@ -279,7 +279,10 @@
 .chroma-home .term-head .dots i:nth-child(2){ background:#fbbf24; }
 .chroma-home .term-head .dots i:nth-child(3){ background:#34d399; }
 .chroma-home .term-head .ttitle { font-family: var(--font-mono); font-size: 12.5px; color: var(--code-dim); margin-left: 6px; }
-.chroma-home .term-body { font-family: var(--font-mono); font-size: 13px; line-height: 1.85; color: var(--code-ink); padding: 18px 20px; min-height: 320px; overflow-x: auto; }
+/* min-height reserves the full 12-line content height (≈324.6px = 12 × 1.85 × 13px
+   + 36px padding) so the box never shrinks/grows as the animation clears and
+   re-types the lines — keeps the hero grid from shifting. */
+.chroma-home .term-body { font-family: var(--font-mono); font-size: 13px; line-height: 1.85; color: var(--code-ink); padding: 18px 20px; min-height: 326px; overflow-x: auto; }
 .chroma-home .tl { white-space: pre; }
 .chroma-home .tprompt { color: var(--accent-400); }
 .chroma-home .tl .ok { color: #4ade80; }
