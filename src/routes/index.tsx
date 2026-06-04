@@ -38,8 +38,8 @@ const TERMINAL_FINAL_HTML = TERMINAL_LINES.map((l) => lineHTML(l, l.text)).join(
 
 /** Ports chroma.js's animated terminal: types commands char-by-char and reveals
  *  output lines, respecting prefers-reduced-motion. The terminal renders EMPTY on
- *  the server/first paint (no flash of the completed run); the client fills it in —
- *  animating it, or showing the final state instantly when motion is reduced. */
+ *  the server/first paint (no flash of the completed run); the client fills it in,
+ *  animating it or showing the final state instantly when motion is reduced. */
 function useTerminal(ref: React.RefObject<HTMLDivElement | null>) {
   useEffect(() => {
     const term = ref.current;
@@ -200,7 +200,7 @@ function HomePage() {
             </h1>
             <p className="lede">
               Chroma drives Polkadot, Ethereum &amp; Solana wallet extensions inside real Playwright
-              tests — import seeds, authorize dApps, approve and reject transactions, all in code.
+              tests. Import seeds, authorize dApps, approve and reject transactions, all in code.
             </p>
             <div className="hero-cta">
               <span className="cmd">
@@ -250,7 +250,7 @@ function HomePage() {
                 <i />
                 <i />
               </div>
-              <span className="ttitle">chroma — playwright test</span>
+              <span className="ttitle">chroma · playwright test</span>
             </div>
             {/* Empty on first paint; useTerminal fills/animates it on the client. */}
             <div className="term-body" ref={termRef} />
@@ -263,7 +263,7 @@ function HomePage() {
         <div className="wrap">
           <div className="sec-head">
             <p className="eyebrow">Why Chroma</p>
-            <h2>Wallet automation that behaves like a user — not a mock.</h2>
+            <h2>Wallet automation that behaves like a user, not a mock.</h2>
             <p>
               No stubbed providers or injected globals. Chroma loads the real browser extensions and
               clicks through them, so your tests exercise the exact flows your users hit.
@@ -286,7 +286,7 @@ function HomePage() {
               body={
                 <>
                   Configure one wallet or several in a single test. The <code>wallets</code> fixture
-                  is fully typed — only the wallets you declare show up, with their own methods.
+                  is fully typed. Only the wallets you declare show up, with their own methods.
                 </>
               }
             />
@@ -317,7 +317,7 @@ function HomePage() {
               body={
                 <>
                   <code>npx chroma download-extensions</code> pulls pinned extension builds into{' '}
-                  <code>.chroma/</code> — reproducible across machines and CI.
+                  <code>.chroma/</code>, reproducible across machines and CI.
                 </>
               }
             />
@@ -362,7 +362,7 @@ function HomePage() {
                 <div className="n">2</div>
                 <div>
                   <h4>Import</h4>
-                  <p>Seed an account with a mnemonic — Chroma drives the extension's import flow.</p>
+                  <p>Seed an account with a mnemonic. Chroma drives the extension's import flow.</p>
                 </div>
               </li>
               <li>
