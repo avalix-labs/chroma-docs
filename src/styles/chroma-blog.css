@@ -67,7 +67,10 @@
 
 /* ---------- Post grid ---------- */
 .chroma-home .post-grid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr));
+  display: grid;
+  /* min(330px, 100%) keeps a single card from forcing the grid wider than the
+     viewport on narrow phones (a bare 330px min track overflows < ~386px). */
+  grid-template-columns: repeat(auto-fill, minmax(min(330px, 100%), 1fr));
   gap: 18px; margin-bottom: 28px; align-items: stretch;
 }
 .chroma-home .pcard {
@@ -106,9 +109,21 @@
   .chroma-home .pcard.feat { flex-direction: column; }
   .chroma-home .pcard.feat .fart { min-height: 160px; order: -1; }
   .chroma-home .pcard.feat .ftxt { padding: 28px 24px; }
-  .chroma-home .blog-toolbar { gap: 12px; }
+  .chroma-home .pcard.feat h3 { font-size: 23px; }
+  /* A wrapped chip row + full-width search makes the sticky bar tall on phones,
+     so let it scroll away instead of pinning under the nav. */
+  .chroma-home .blog-toolbar { position: static; gap: 12px; margin-top: 28px; }
   .chroma-home .search { margin-left: 0; width: 100%; }
   .chroma-home .search input { width: 100%; }
+}
+
+@media (max-width: 620px) {
+  /* Match the 20px gutter the nav/footer drop to at this breakpoint so the blog
+     content lines up with the header and footer. */
+  .chroma-home .blog-wrap { padding: 0 20px; }
+  .chroma-home .blog-hero { padding-top: 48px; }
+  .chroma-home .blog-hero p { font-size: 17px; }
+  .chroma-home .article { padding: 40px 20px 72px; }
 }
 
 /* ---------- Article ---------- */
@@ -127,6 +142,9 @@
 .chroma-home .article .body { font-size: 17px; line-height: 1.75; color: var(--ink-2); }
 .chroma-home .article .body h2 { font-size: 27px; margin: 46px 0 14px; letter-spacing: -0.025em; }
 .chroma-home .article .body h3 { font-size: 19px; margin: 32px 0 10px; }
+/* Fumadocs wraps headings in permalink anchors; keep them ink-colored (not the
+   accent link color) so headings read as headings, per the design. */
+.chroma-home .article .body :is(h1, h2, h3, h4, h5, h6) a { color: inherit; text-decoration: none; }
 .chroma-home .article .body p { margin: 0 0 20px; }
 .chroma-home .article .body ul, .chroma-home .article .body ol { padding-left: 22px; }
 .chroma-home .article .body li { margin: 8px 0; }
