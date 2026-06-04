@@ -37,7 +37,9 @@ function lineHTML(line: TermLine, text: string) {
 const TERMINAL_FINAL_HTML = TERMINAL_LINES.map((l) => lineHTML(l, l.text)).join('');
 
 /** Ports chroma.js's animated terminal: types commands char-by-char and reveals
- *  output lines, respecting prefers-reduced-motion. SSR renders the final state. */
+ *  output lines, respecting prefers-reduced-motion. The terminal renders EMPTY on
+ *  the server/first paint (no flash of the completed run); the client fills it in —
+ *  animating it, or showing the final state instantly when motion is reduced. */
 function useTerminal(ref: React.RefObject<HTMLDivElement | null>) {
   useEffect(() => {
     const term = ref.current;
@@ -45,7 +47,10 @@ function useTerminal(ref: React.RefObject<HTMLDivElement | null>) {
 
     const reduce =
       window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    if (reduce) return; // final state already rendered
+    if (reduce) {
+      term.innerHTML = TERMINAL_FINAL_HTML; // no animation: show the completed run
+      return;
+    }
 
     const timers = new Set<ReturnType<typeof setTimeout>>();
     const wait = (fn: () => void, ms: number) => {
@@ -247,11 +252,8 @@ function HomePage() {
               </div>
               <span className="ttitle">chroma — playwright test</span>
             </div>
-            <div
-              className="term-body"
-              ref={termRef}
-              dangerouslySetInnerHTML={{ __html: TERMINAL_FINAL_HTML }}
-            />
+            {/* Empty on first paint; useTerminal fills/animates it on the client. */}
+            <div className="term-body" ref={termRef} />
           </div>
         </div>
       </header>
