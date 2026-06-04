@@ -195,7 +195,7 @@
 .chroma-home .code-tabs button {
   font-family: var(--font-mono); font-size: 12.5px; color: var(--code-dim);
   background: none; border: none; padding: 6px 12px; border-radius: var(--r-sm) var(--r-sm) 0 0;
-  cursor: pointer; border-bottom: 2px solid transparent;
+  cursor: pointer; border-bottom: 2px solid transparent; white-space: nowrap;
 }
 .chroma-home .code-tabs button.active { color: #fff; border-bottom-color: var(--accent); }
 .chroma-home .code-tabs button:hover { color: var(--code-ink); }
@@ -279,7 +279,7 @@
 .chroma-home .term-head .dots i:nth-child(2){ background:#fbbf24; }
 .chroma-home .term-head .dots i:nth-child(3){ background:#34d399; }
 .chroma-home .term-head .ttitle { font-family: var(--font-mono); font-size: 12.5px; color: var(--code-dim); margin-left: 6px; }
-.chroma-home .term-body { font-family: var(--font-mono); font-size: 13px; line-height: 1.85; color: var(--code-ink); padding: 18px 20px; min-height: 320px; }
+.chroma-home .term-body { font-family: var(--font-mono); font-size: 13px; line-height: 1.85; color: var(--code-ink); padding: 18px 20px; min-height: 320px; overflow-x: auto; }
 .chroma-home .tl { white-space: pre; }
 .chroma-home .tprompt { color: var(--accent-400); }
 .chroma-home .tl .ok { color: #4ade80; }
@@ -307,7 +307,6 @@
 .chroma-home .feat .ico { width: 40px; height: 40px; border-radius: var(--r-md); background: var(--accent-soft); color: var(--accent); display: flex; align-items: center; justify-content: center; border: 1px solid var(--accent-line); }
 .chroma-home .feat h3 { font-size: 18px; margin: 18px 0 8px; }
 .chroma-home .feat p { color: var(--ink-3); font-size: 14.5px; margin: 0; }
-.chroma-home .feat code { background: var(--bg-sunken); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 1px 5px; font-size: .9em; color: var(--ink-2); }
 
 /* ---------- Code showcase ---------- */
 .chroma-home .show-grid { display: grid; grid-template-columns: 0.9fr 1.1fr; gap: 48px; align-items: center; }
@@ -316,7 +315,6 @@
 .chroma-home .show-list .n { flex: none; width: 28px; height: 28px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent-line); display: flex; align-items: center; justify-content: center; font-family: var(--font-mono); font-size: 13px; font-weight: 600; }
 .chroma-home .show-list h4 { font-size: 16px; margin: 2px 0 3px; }
 .chroma-home .show-list p { font-size: 14.5px; color: var(--ink-3); margin: 0; }
-.chroma-home .show-list code { background: var(--bg-sunken); border: 1px solid var(--line); border-radius: var(--r-sm); padding: 1px 5px; font-size: .9em; color: var(--ink-2); }
 
 /* ---------- Support matrix ---------- */
 .chroma-home .matrix { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
@@ -337,7 +335,7 @@
 
 @media (max-width: 920px) {
   .chroma-home .hero-grid, .chroma-home .show-grid { grid-template-columns: 1fr; gap: 40px; }
-  .chroma-home .feat-grid { grid-template-columns: 1fr; }
+  .chroma-home .feat-grid { grid-template-columns: repeat(2, 1fr); }
   .chroma-home .matrix { grid-template-columns: 1fr; }
   .chroma-home .cta-band { padding: 44px 24px; }
 }
@@ -346,6 +344,35 @@
   .chroma-home .nav-links { display: none; }
   .chroma-home .footer-inner { grid-template-columns: 1fr 1fr; gap: 32px; }
 }
+
+/* ---------- Mobile polish ---------- */
+@media (max-width: 620px) {
+  .chroma-home .feat-grid { grid-template-columns: 1fr; }
+  .chroma-home .wrap { padding: 0 20px; }
+  .chroma-home .nav-inner { padding: 0 20px; gap: 14px; }
+  .chroma-home .nav-version { display: none; }
+  .chroma-home section.band { padding: 64px 0; }
+  .chroma-home .hero-grid { padding-block: 56px 60px; }
+  /* keep the code-showcase tabs from being clipped */
+  .chroma-home .code-head .fname { display: none; }
+  .chroma-home .code-tabs button { padding: 6px 9px; }
+  /* let matrix rows wrap instead of squeezing name + version on one line */
+  .chroma-home .mrow { flex-wrap: wrap; gap: 4px 12px; padding: 12px 16px; }
+  .chroma-home .mtable .mh { padding: 14px 16px; }
+  /* avoid a dangling divider when the chain list wraps below the meta */
+  .chroma-home .hero-meta { gap: 12px 18px; }
+  .chroma-home .hero-meta .sep { display: none; }
+  .chroma-home .footer-inner { padding: 44px 20px 32px; }
+  .chroma-home .footer-bottom { padding: 18px 20px; }
+}
+
 @media (max-width: 520px) {
   .chroma-home .footer-inner { grid-template-columns: 1fr; }
+}
+
+@media (max-width: 400px) {
+  .chroma-home .nav-inner { gap: 10px; }
+  .chroma-home .brand { font-size: 19px; }
+  /* "Get started" stays tappable but compact next to the GitHub icon */
+  .chroma-home .nav-right .btn-primary { padding: 8px 12px; }
 }

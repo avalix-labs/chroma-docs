@@ -185,7 +185,7 @@ function HomePage() {
 
       {/* HERO */}
       <header className="hero">
-        <div className="wrap hero-grid" style={{ paddingInline: '28px' }}>
+        <div className="wrap hero-grid">
           <div>
             <p className="eyebrow">End-to-end wallet testing</p>
             <h1>
