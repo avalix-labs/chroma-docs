@@ -1,0 +1,75 @@
+---
+title: "MetaMask Connect's Multichain API: One CAIP-25 Session for EVM and Solana"
+description: "MetaMask Connect rebuilds the legacy MetaMask SDK on CAIP-25. One wallet prompt can now authorize EVM and Solana scopes in a single session."
+date: 2026-06-05
+author: Chroma Team
+---
+
+dApp wallet connection has always been a per-ecosystem affair. If your product touches both EVM and Solana — a swap that pays in USDC on Base and settles on Solana, an L2 game whose marketplace lives on Solana, an AI agent that holds funds on both — your frontend ships two SDKs, two connect buttons, and two trust prompts. **MetaMask Connect**, the ground-up rewrite of the legacy MetaMask SDK, collapses that into a single session built on the **CAIP-25** standard. One popup, one authorization, two ecosystem scopes attached to it.
+
+## Why Cross-Ecosystem dApps Have Shipped Two Connection Flows
+
+EVM and Solana use fundamentally different injection contracts in the page. On EVM, wallets expose an EIP-1193 provider — historically through `window.ethereum`, now via the EIP-6963 discovery events. The dApp picks a provider and calls `eth_requestAccounts` to open a connect prompt. On Solana, wallets register through the Wallet Standard, the dApp lists them, and a separate `standard:connect` call opens a different prompt with different account semantics.
+
+The two surfaces also disagree about what a "connection" authorizes. An EVM connection grants account access on a chain id. A Solana connection grants signing rights for a public key — there is no chain id in the request because the Solana cluster URL is the dApp's concern, not the wallet's. Two SDKs, two account caches, two reconnect strategies, two test paths. Even when the same user runs MetaMask for everything, your dApp talks to it twice.
+
+## How CAIP-25 Sessions Work in MetaMask Connect
+
+CAIP-25 is the Chain Agnostic Improvement Proposal that defines a session object the wallet and the dApp negotiate up front. A session is a set of authorized **scopes** — chains, addressed in CAIP-2 notation — and the set of methods and accounts the dApp is allowed to use on each. The dApp calls `wallet_createSession` once, the wallet shows one popup that lists every requested scope, and the user approves them together or rejects.
+
+The `@metamask/connect-multichain` client wraps that handshake:
+
+```ts
+import { createMultichainClient } from '@metamask/connect-multichain'
+
+const client = createMultichainClient({ /* transport config */ })
+
+const session = await client.createSession({
+  requiredScopes: {
+    'eip155:1':    { methods: ['eth_sendTransaction', 'personal_sign'], notifications: [] },
+    'eip155:8453': { methods: ['eth_sendTransaction'],                  notifications: [] },
+    'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp': {
+      methods: ['signTransaction', 'signMessage'],
+      notifications: [],
+    },
+  },
+})
+```
+
+`eip155:1` is Ethereum mainnet, `eip155:8453` is Base, and the long string is Solana mainnet's CAIP-2 identifier (the first 32 bytes of its genesis hash). The returned `session` carries `sessionScopes` keyed by the same identifiers, each with the granted methods and accounts. A subsequent `wallet_getSession` reads the current state without re-prompting; `wallet_revokeSession` tears it down.
+
+## Calling Chain-Specific Methods Through wallet_invokeMethod
+
+Once a session exists, every chain-specific call routes through `wallet_invokeMethod`. The dApp names the scope and the underlying method; the wallet dispatches it to the right ecosystem under the hood:
+
+```ts
+// EVM: a normal EIP-1559 transaction on Base
+const evmHash = await client.invokeMethod({
+  scope: 'eip155:8453',
+  request: {
+    method: 'eth_sendTransaction',
+    params: [{ from, to, value: '0x16345785d8a0000' }],
+  },
+})
+
+// Solana: sign a v0 transaction the dApp built locally
+const signed = await client.invokeMethod({
+  scope: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp',
+  request: {
+    method: 'signTransaction',
+    params: { transaction: base64VersionedTx },
+  },
+})
+```
+
+The two calls share a session but not an execution model — and that distinction is the easy thing to forget. On Base, the dApp hands the wallet a transaction object and the wallet broadcasts it. On Solana, the dApp builds a versioned (v0) transaction with explicit accounts, lookup tables, and a compute-budget instruction, asks the wallet to sign it, and the dApp itself submits the signed bytes to an RPC. The wallet never sees a Solana cluster URL — that is still the dApp's responsibility, exactly as it was under the Wallet Standard. CAIP-25 standardizes the authorization, not the execution.
+
+## What Changes for Your E2E Tests
+
+The test surface gets simpler in one specific way: there is now one connect button and one MetaMask popup that authorizes both ecosystems, instead of two of each. The assertion that survives is the popup interaction — `metamask.confirm()` still applies whether the request is an `eth_sendTransaction` on Base or a Solana `signTransaction`. If you drive MetaMask through [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/metamask), the test reads the same. What your dApp builds before handing the payload over is the part that diverges: an EVM call produces a gas-priced transaction; a Solana call produces a signed v0 transaction your test runner submits separately. Wire your assertions around the wallet boundary, not around a single ecosystem's RPC.
+
+The harder surface is reconnection. A page reload that drops the EVM provider and the Solana provider used to be two independent recovery paths. Under CAIP-25 they become one — `wallet_getSession` either returns the prior session or it doesn't. Tests that exercise refresh-after-connect should run against the multichain client, not against the legacy per-ecosystem mocks.
+
+## What to Audit Before You Ship
+
+If you ship a cross-ecosystem dApp today, three sweeps make the migration cheap. Replace the per-ecosystem connect buttons with a single `createSession` call whose `requiredScopes` lists every chain you actually use. Move chain-specific RPC calls behind `invokeMethod` so the scope is named at the call site, not implied by which provider you grabbed. Then re-run your reconnect path against `wallet_getSession` so a refresh restores the multichain state in one shot. The session contract is the same on both sides of the EVM/Solana boundary now — your code can be too.
