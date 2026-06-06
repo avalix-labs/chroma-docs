@@ -1,0 +1,93 @@
+---
+title: "Polkadot Block Bundling: How Parachains Get to Choose Their Own Block Time"
+description: "Polkadot SDK Block Bundling fits multiple parachain blocks into one PoV, turning block interval into a per-parachain knob. Here's the mechanism and dev impact."
+date: 2026-06-06
+author: Chroma Team
+---
+
+{/* Meta description ≤155 chars: Polkadot SDK Block Bundling fits multiple parachain blocks into one PoV, turning block interval into a per-parachain knob. */}
+
+Every parachain on Polkadot has shipped one block every six seconds since 2024 — a number that wasn't really a design choice. It was the smallest interval that the relay chain's 1-PoV-per-parachain-per-relay-block model could amortise without leaving most of a core idle. Parity's recent Block Bundling work in the Polkadot SDK — the feature core developer Basti has been writing about as "Basti Blocks" — finally breaks that coupling. Multiple parachain blocks now fit into a single Proof of Validity, which means a parachain can pick the block interval that fits its workload, down to 500ms, without spending more relay-chain cores or running into the witness-size ceiling.
+
+For dApp teams, the headline number is "500ms blocks." The more durable change is that block interval becomes a per-parachain configuration parameter rather than a relay-chain constant.
+
+## Why parachain blocks have been six seconds
+
+A parachain block on Polkadot is validated by the relay chain through a **Proof of Validity** (PoV): a packed witness containing the pre-state, the extrinsics, the post-state diff, and everything else a relay-chain validator needs to re-execute the block without the parachain's state on disk. PoV size is capped at 5 MiB per core, and the validator gets a fixed execution budget — historically about two seconds of reference compute — to verify it.
+
+The original model was straightforward: one parachain block per relay slot, one PoV submitted per slot, one core consumed. Asynchronous Backing and Elastic Scaling chipped at that. Asynchronous Backing decoupled candidate validation from inclusion, letting parachains target ~6s blocks while staying inside a 12s relay slot. Elastic Scaling, which finalised on Polkadot in late 2025 with SDK release 2509, let a single parachain spread across multiple cores in parallel, getting throughput linear in core count.
+
+Neither of those changed the "one block per PoV" rule. To go from 6s to 500ms by adding cores alone, a parachain would need roughly twelve of them — and most of each PoV's compute budget and witness size would sit unused, because a 500ms block does much less work than a 6s block.
+
+## What Block Bundling actually changes
+
+Block Bundling rewrites that rule. A collator can build several parachain blocks back-to-back and pack them into one PoV before submitting it to the relay chain. The relay chain validates the bundle the same way it validates any single PoV: re-execute, check the witness, sign off. From the relay chain's perspective, the parachain produced one batch of state transitions. From the parachain's perspective, it produced four — or eight, or whatever the bundle size is — distinct blocks with their own headers, their own events, and their own block numbers.
+
+The two scarce resources stay the same and stay shared across the bundle:
+
+- **5 MiB witness ceiling.** The bundle's PoV is one PoV. If you halve the block time without changing what each block does, witnesses per block roughly halve, and a bundle of two fits where one used to.
+- **Reference execution budget.** Same logic — split across the bundle's blocks, with some fixed per-block overhead.
+
+The architectural unlock is that the *number* of state transitions and the *cadence* of finality on the parachain side become decoupled from the relay chain's 6s slot. A parachain configured for 500ms blocks running with bundle size 12 still consumes one core per relay slot; it just hands the relay chain a denser PoV.
+
+That's why the Parity team is careful with the naming. "500ms blocks" is the most visible outcome. The mechanism is generic: any block interval that fits the bundle's witness and compute envelope is selectable.
+
+## Block interval becomes a parachain-level knob
+
+The practical consequence is that two different parachains on the same relay chain can — and will — run with very different block times. A payments parachain that wants near-instant UX picks 500ms with a large bundle. A storage chain like Bulletin that occasionally writes 8 MiB payloads picks something slower, because each of its blocks already eats the witness budget. A governance parachain with light traffic stays at 6s because it has no reason to spend the engineering effort.
+
+That choice carries trade-offs the runtime team makes once and the dApp team lives with:
+
+- **Per-block fixed overhead is paid more often.** Every block in a bundle still pays for header construction, event indexing, and storage proof framing. Halving the block interval more than doubles total fixed overhead.
+- **Witness-budget pressure shifts to the bundle, not the individual block.** A bundle of eight 500ms blocks that each touch many storage keys will hit the 5 MiB ceiling faster than one 4s block doing similar work. Storage-heavy pallets may need their internal layout reviewed.
+- **Finality is now bundle-paced.** A block isn't safely final until the relay chain has validated the bundle that contains it. From the dApp's perspective, optimistic confirmation can land in 500ms, but the "won't be rolled back" guarantee follows the relay-chain slot.
+- **Block numbers grow faster.** A 500ms parachain emits 12× the block numbers of a 6s one over the same wall time. Anywhere `BlockNumberFor<T>` is used as an expiry, a delay, or a vesting cliff, the constant needs to be expressed in time rather than blocks.
+
+This is also why the Polkadot SDK exposes block interval as a runtime-level config, not a chain-wide protocol parameter. The relay chain doesn't care what cadence the parachain ran internally — only that the bundle it received validates.
+
+## What this changes for your dApp code and tests
+
+Most of the dApp surface is unchanged. An extrinsic on a Block-Bundling parachain is the same SCALE-encoded call into the same pallet's dispatchable, signed with the same signed-extensions envelope. The wallet popup shows the same decoded call — `balances.transferKeepAlive`, `staking.bond`, whatever your runtime exposes. PAPI, Dedot, or `@polkadot/api` build it the same way regardless of how often the chain produces blocks.
+
+What does change is anything in your code that quietly assumed six-second slot timing:
+
+- **Poll intervals and retry budgets.** Subscriptions to `system.events` or block-finalised streams fire 12× as often on a 500ms parachain. Code that re-queries chain state on a fixed timer will burn RPC budget and over-render the UI unless it gates on actual subscription deltas.
+- **Time-to-finality expectations in UX copy.** "This usually takes a few seconds" was accurate at 6s. It's wrong twice over at 500ms: optimistic confirmation lands sooner, but full relay-chain-validated finality follows the relay slot's own cadence, which is the boundary that matters for irreversible UI states.
+- **Test timeouts measured in blocks.** Anywhere you wait for `n` blocks before asserting — a vesting unlock, a referenda delay, a treasury payout — encode it in time, not block count. `expect(...).toBeVisible({ timeout: 30_000 })` is durable; `await waitForBlocks(5)` is not.
+- **Constants in your runtime if you maintain a parachain.** `MinimumPeriod`, slot duration, and any pallet `BlockNumberProvider`-derived constants need to be reviewed before you change block interval. A `MinimumPeriod` left at 3000ms will silently break Aura on a 500ms chain.
+
+For end-to-end coverage, the wallet boundary is the same. A test that drives the Polkadot.js extension through [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/polkadot-js) signs the same extrinsic regardless of how fast the chain produces blocks underneath:
+
+```ts
+import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'polkadot-js' }],
+})
+
+test('signs a transfer on a fast parachain', async ({ page, wallets }) => {
+  const polkadotJs = wallets['polkadot-js']
+
+  await polkadotJs.importMnemonic({
+    seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk',
+  })
+
+  await page.goto('http://localhost:3000')
+  await page.click('button:has-text("Connect")')
+  await polkadotJs.authorize()
+  // The extrinsic is unchanged; what differs is how soon
+  // the dApp can show a confirmed state afterwards.
+})
+```
+
+The line worth auditing is the one after `polkadotJs.authorize()`. Any assertion that waited "long enough" for a 6s parachain to produce the next block needs to be re-anchored on a subscription or a longer, more honest wall-clock timeout — not a smaller one tuned to 500ms, which is the trap on the other side.
+
+## What to read before you change block time
+
+If you maintain a parachain, the Block Bundling work makes block interval a one-line runtime change with a long tail of consequences. Three checks before you flip it:
+
+- Confirm your collator is on a Polkadot SDK release that ships Block Bundling, and that your runtime exposes the slot duration as a configurable constant rather than a hard-coded `pub const SLOT_DURATION`.
+- Profile your two heaviest extrinsics under the new block interval. The constraint is the bundle's PoV size, not the individual block's. If a single user action already produces a sizeable witness, halving the block time can push you into the 5 MiB ceiling sooner than the average block suggests.
+- Audit every constant in your runtime that's measured in blocks. If it should mean "two weeks," express it as `2 * WEEKS` derived from the new `MILLISECS_PER_BLOCK`, not as a literal block count.
+
+The cadence the relay chain enforces is staying at the relay slot. Everything inside the parachain — block time, finality UX, event frequency — is moving into the parachain team's hands. That is the change worth planning around.
