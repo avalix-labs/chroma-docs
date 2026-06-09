@@ -1,0 +1,44 @@
+---
+title: "Hardhat 3.9's coverage.skipFiles: How to Get Honest Solidity Coverage Numbers"
+description: "Hardhat 3.9 adds coverage.skipFiles, a glob list that excludes mocks and helpers from Solidity coverage reports. Here's what to skip and why it matters."
+date: 2026-06-09
+author: Chroma Team
+---
+
+Hardhat 3.9.0 shipped on June 8, 2026, and the headline change is small enough that you might miss it scrolling the changelog: `coverage.skipFiles`. A single new config option that takes a list of globs and excludes the matching Solidity files from coverage instrumentation and reporting. It sounds dull. It is not. If you have ever opened a Hardhat 3 coverage report and squinted at a 92% number you do not believe, this is the option that lets you replace it with one you do.
+
+## Why Hardhat coverage reports drift from the truth
+
+Hardhat 3's built-in coverage subsystem instruments every Solidity file it compiles. That includes the contracts you actually ship — but it also includes everything *under the same compilation roof*: mocks of external protocols you do not own, lightweight test-helper contracts that exist purely to deploy harnesses, vendored copies of libraries like OpenZeppelin's `ERC20Mock`, and constructor-only fixtures used by Hardhat's Solidity test runner.
+
+Two things go wrong when those files are counted.
+
+The first is denominator inflation. A mock has lots of trivial branches your tests will never exercise on purpose — that is the point of a mock — and every uncovered line drags the project number down. A team chasing 90% coverage on production code ends up at 78% on the report and either ships chasing a phantom metric or writes throwaway tests against contracts they were never going to audit.
+
+The second is harder to spot. A small subset of mocks and helpers do get fully exercised, and their coverage *inflates* the number. You read 92% on the project, but the real production contracts are at 80%, and the remaining 12 points come from a `TestERC20` helper that a single test hammers from every angle. Coverage as a quality signal stops correlating with anything you care about.
+
+Before 3.9, the only escape was the `npx hardhat coverage` task plus heavy directory-level workarounds: shuffle helpers into a separate Hardhat project, hand-edit the generated LCOV file in CI, or fall back to the standalone `solidity-coverage` plugin's own `.solcover.js` `skipFiles` array — which only works if you are not using the built-in coverage at all.
+
+## What 3.9 actually adds
+
+The `coverage.skipFiles` option is documented in the release notes as "a list of globs of Solidity files to exclude from coverage instrumentation and reporting." Two words in that sentence are worth holding onto.
+
+"Instrumentation" means the excluded files are not rewritten when you run `npx hardhat coverage` or pass `--coverage` to a test task. That matters for two reasons: instrumentation slows compilation and execution measurably, and instrumented code occasionally bumps into contract-size limits or stack-too-deep edges that the un-instrumented build does not. Skipping mocks shortens the coverage run *and* sidesteps a class of failures that only happen under `--coverage`.
+
+"Reporting" means the excluded files do not appear in the LCOV file Hardhat writes to `coverage/lcov.info`, in the HTML report under `coverage/html/`, or in the Markdown summary the task prints to the terminal. If you push LCOV to Codecov or Coveralls, they see the same picture.
+
+## A starting skipFiles policy for a typical Hardhat 3 project
+
+Most Hardhat 3 codebases land in a similar place once you sort the contracts directory by purpose. A reasonable opening shape for `coverage.skipFiles` excludes three buckets:
+
+- **Mocks of external protocols.** Anything under `contracts/mocks/**` or named `*Mock.sol`. You do not own the upstream contract; you are not auditing this one.
+- **Test-only harnesses.** Anything under `contracts/test/**` that exists to expose internals to the Hardhat Solidity test runner or to a TypeScript test. These are coverage targets in the same way `assert.equal` is — instrumenting them measures the test, not the code under test.
+- **Vendored dependencies.** OpenZeppelin's libraries pulled in via `node_modules` are already excluded by default, but copies dropped into the source tree (a common pattern for forks that needed a one-line patch) are not. Skip them explicitly.
+
+A `skipFiles` array does not need to be long; it needs to be intentional. Review every entry the way you would review an `.eslintignore`: each glob should be justifiable, and the diff that adds one should explain *why* the matching file is out of scope.
+
+## Where coverage stops being the right question
+
+Coverage answers "did a test ever execute this line." It cannot answer "does the user-facing flow that lands in this line actually work." A `claimRewards` function with 100% line coverage in Hardhat tests can still ship broken if the connect button does not fire `claim()` with the right calldata, or if MetaMask shows a popup the dApp does not handle. That is a separate layer of confidence — end-to-end tests that drive the real wallet extension against the deployed contract, the layer where a tool like [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/metamask) sits. Use `coverage.skipFiles` to make your unit-test number honest, and use a wallet-driven E2E suite to cover the part that number was never going to measure.
+
+If you run Hardhat 3 and CI tracks coverage, add `coverage.skipFiles` this week. The 3.9 upgrade is otherwise a quiet patch, and the moment your report stops counting mocks, every threshold you set in CI starts meaning what you originally intended it to mean.
