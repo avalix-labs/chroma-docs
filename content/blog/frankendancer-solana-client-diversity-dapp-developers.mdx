@@ -1,0 +1,45 @@
+---
+title: "Frankendancer Is Producing Solana Blocks: What Client Diversity Means for Your dApp"
+description: "Frankendancer now produces a meaningful share of Solana mainnet blocks. How its scheduler diverges from Agave and what that changes for dApp testing."
+date: 2026-06-10
+author: Chroma Team
+---
+
+For nearly five years Solana ran on a single validator implementation. Whenever Agave — the descendant of Solana Labs' original Rust client — had a bug, the network had a bug. As of Q2 2026 that is no longer the case. Jump Crypto's Frankendancer, the hybrid that pairs Firedancer's networking and block-production tiles with Agave's execution and consensus, is producing blocks on roughly 20% of mainnet validators. The pure Firedancer rewrite is still pre-production, but Frankendancer alone is enough to change how you should think about Solana client diversity, transaction ordering, and what your dApp tests are actually asserting.
+
+## What "client diversity" actually looks like on Solana right now
+
+The deployed implementation is **Frankendancer**, not full Firedancer. The split matters:
+
+- **Networking, signature verify, dedup, pack, shred, store:** Firedancer's C tiles
+- **Bank (execution) and consensus:** Agave (Rust)
+
+Pure Firedancer — every stage rewritten from scratch — is still flagged as not ready for testnet or mainnet. What is producing blocks today is the hybrid. That distinction matters because the layer that *changed* is the one your transactions hit first: ingestion, packing, and block production. The layer that did *not* change is the one that turns instructions into account writes.
+
+So consensus, transaction execution, and the SVM model itself are unaffected. Versioned (v0) transactions still carry address lookup tables; instructions are still stateless; accounts are still explicit inputs; compute units are still metered the same way. What can vary slot-to-slot is which of the transactions a Frankendancer leader chose to include in its block, and in what order.
+
+## Where the two clients diverge for your dApp
+
+The pack tile in Frankendancer uses a different scheduler than Agave's banking stage. Both clients are constrained by the same protocol — both produce valid blocks under the same consensus rules — but the algorithm that decides which transactions to fit into a block from a saturated mempool is *not* part of the protocol. It is a client implementation detail.
+
+Three places this surfaces for a dApp:
+
+- **Priority fee landing.** Agave's and Frankendancer's schedulers weigh `SetComputeUnitPrice` and account contention differently. A transaction with the same fee can land in slot N under one client and slot N+1 under the other. Fee estimators tuned exclusively against Agave behavior will under- or over-shoot when the slot's leader is running Frankendancer.
+- **Account-contention ordering.** Both clients prioritize non-conflicting transactions for parallelism, but their conflict graphs and tie-break heuristics differ. For dApps with a small set of hot writable accounts — perps, AMM pools, a single-mint launch — the per-block order of two competing transactions can flip purely based on which client built the block.
+- **Inclusion under load.** Frankendancer's QUIC tile applies its own backpressure and stake-weighted shaping. If your dApp opens persistent QUIC sessions to an RPC, the connection-level QoS you measured against Agave is not a guarantee under the new tile.
+
+None of this breaks the protocol. All of it can move a confirmed transaction by one slot or flip which of two near-simultaneous swaps lands first.
+
+## What to start testing for now
+
+If your test suite was written against a one-client world, three patterns are worth refactoring before Frankendancer's share grows further:
+
+- **Stop asserting exact intra-block ordering for non-conflicting transactions.** If a test expects "tx A lands before tx B," anchor it on something the protocol enforces — priority fee per CU, or an explicit dependency via a shared writable account — not on incidental scheduler behavior.
+- **Re-measure your fee estimator against both clients.** `getRecentPrioritizationFees` returns a distribution shaped by whichever leaders produced the recent slots. Sampling across a longer window smooths the bias; a single-slot read is now strictly worse than it was a year ago.
+- **Treat first-slot inclusion as best-effort.** Retry logic that assumed "this fee always lands in the next leader's slot" needs a wider window. The cost of a one-slot miss is negligible; the cost of giving up too early and broadcasting a duplicate signed message is not.
+
+If you drive a real Phantom popup through end-to-end tests, this is also worth folding into your assertions. A library like [@avalix/chroma](https://github.com/avalix-labs/chroma) lets you sign and confirm a real Solana transaction through the actual extension, which means your test sees the same confirmation timing variance a user does — including the slot that landed under Frankendancer rather than Agave. The takeaway is to anchor those assertions to on-chain effects (the user's USDC balance, a position's collateralization, an NFT's owner) rather than to a specific slot number, block height, or the order of two unrelated logs.
+
+## The shape of the next year
+
+Frankendancer's mainnet share will grow before pure Firedancer is production-ready, and the gap between the two schedulers is going to widen as Firedancer adds tiles like a fully native bank. The Solana protocol guarantees the same final state under both implementations. It does not guarantee the same path to get there. The dApp tests that age best will be the ones that check outcomes — the balance after a swap, the account after a mint — and let the scheduler stay an implementation detail.
