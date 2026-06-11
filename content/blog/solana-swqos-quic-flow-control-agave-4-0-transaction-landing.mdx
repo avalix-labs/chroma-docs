@@ -1,0 +1,45 @@
+---
+title: "Solana SWQoS Is Becoming QUIC Flow Control: How Agave 4.0/4.1 Change Transaction Landing"
+description: "Agave 4.0/4.1 rework Solana SWQoS: QUIC flow control replaces the 80/20 split. Transaction landing stops being stake-gated under normal load."
+date: 2026-06-11
+author: Chroma Team
+---
+
+For years, Solana dApp teams have shipped the same operational advice for "make transactions land reliably": pay for a staked RPC. The reason was structural. Stake-Weighted Quality of Service (SWQoS) reserved roughly 80% of every leader's transaction-ingestion capacity for connections from staked validators in proportion to their stake, and unstaked senders shared the remaining 20% — capped at around 200 TPS per connection. With Agave 4.0 recommended for mainnet validators on May 18, 2026, and the SWQoS rewrite (PR #10666) targeting Agave 4.1, those rules are being rewritten. Under normal load, any staked sender receives ~10,000 TPS per connection regardless of stake size, and the stake-proportional split only re-engages when a leader's TPU exceeds 95% capacity. The line item is quiet in the changelog and large in practice.
+
+## How the old SWQoS shaped where your transactions landed
+
+A typical dApp send path on Solana has three hops: your client signs a transaction and posts it to an RPC node via `sendTransaction`, the RPC node opens (or reuses) a QUIC connection to the next leader's TPU, and the leader's transaction-processing pipeline ingests it. SWQoS lives at the third hop — it is the policy by which a leader decides how to allocate its limited QUIC connection slots and per-connection throughput across the senders trying to reach it.
+
+The original implementation gave 2,000 connection slots (80% of the available 2,500) to staked validators in proportion to their stake, and reserved 500 slots for unstaked traffic that any RPC node could use. Inside each slot, the validator enforced a per-second packet quota with a sleep-based throttle: when a connection's recent traffic exceeded its quota, the receive loop slept until the next tick. For an unstaked connection that quota worked out to roughly 200 TPS. Staked connections were allocated proportionally larger budgets.
+
+Two consequences followed for dApps. First, "use a staked RPC" was the cheapest way to raise your effective landing rate during congestion — a paid RPC tier that ran on a node with significant stake got your transaction into the higher-priority pool. Second, the sleep-based throttle was coarse: under brief bursts, even unsaturated connections could see ~100 ms of induced latency that the sender could not observe or correct.
+
+## What Agave 4.0 and 4.1 actually rework
+
+Agave 4.0 already moved transaction ingestion to **QUIC-only** TPU — the legacy UDP path was removed, so every transaction now traverses an authenticated, congestion-controlled QUIC stream. The deeper SWQoS rewrite lives in PR #10666, targeting Agave 4.1, and it replaces both the static 80/20 split *and* the sleep-based throttle.
+
+The new model uses QUIC's own flow-control primitives. Instead of sleeping a connection, the validator issues `MAX_STREAMS` credits to each sender. Every connection receives a stream-credit budget scaled by its round-trip time to the leader, so a sender that is one hop away is not penalised relative to one across the world. Under normal load, a staked sender receives roughly 1,024 stream credits per 100 ms tick — about ~10,000 TPS per connection, regardless of how much stake backs the identity. The artificial cap that made unstaked senders crawl is gone for the common case; so is the stake-proportional rationing that gave large validators most of the bandwidth.
+
+The 80/20 split is not deleted — it is reframed as a saturation safeguard. Once a leader's TPU rises above 95% capacity, the validator re-enables stake-proportional allocation, parks (stops serving) unstaked connections, and favours staked peers in the order their stake dictates. Outside of those congestion windows, the split is dormant.
+
+## What this changes for your dApp's transaction strategy
+
+The advice that hardened into Solana dApp engineering during the old SWQoS era no longer holds in the same shape after 4.0/4.1 ships fully.
+
+- **Staked RPC stops being the default differentiator under normal load.** Two RPCs sending through different identities will see comparable landing rates as long as the leader is below the 95% threshold. The premium tier still matters during congestion, but you are paying for tail behaviour, not steady-state throughput.
+- **Retry logic tuned to the old TPS caps is too conservative.** Backoff and retry budgets that assumed a 200 TPS unstaked ceiling were sized for a throttle that no longer fires under normal load. The cost of an aggressive resend dropped; the cost of giving up on a transaction too early did not.
+- **Priority fees do exactly what they always did.** SWQoS controls *whether the leader sees your bytes*; priority fee per compute unit controls *whether it picks your bytes for the block*. Nothing about that pricing layer changes. What changes is that "the leader did not see my transaction in time" stops being the most common failure mode for unstaked senders.
+- **Congestion windows are sharper, not gone.** The 95% threshold is a real cliff. Code paths that rely on landing rate during MEV-heavy slots — minting drops, hot AMM pools under a price move — still need stake-weighted submission, but only for those slots.
+
+The execution model itself doesn't move. Solana programs remain stateless and instruction-based; accounts are still explicit inputs to every instruction; versioned (v0) transactions with address lookup tables remain the unit you sign and submit. What changes is the queue that feeds the runtime.
+
+## What to audit before Agave 4.1 lands
+
+Three quick passes catch most of the surface area:
+
+- **Hardcoded "staked RPC only" send paths.** Anywhere your code routes all sends through a single premium endpoint "because unstaked landing is unreliable," that assumption is about to be partially true at best. Make the routing policy a config knob you can flip per environment, not a build-time constant.
+- **Retry budgets and timeouts.** Re-derive them from a current `getRecentPrioritizationFees` sample rather than a fixed slot count. Once landing under normal load matches what staked senders see, the right retry budget shifts toward "narrow window, tighter loop."
+- **E2E coverage of submit-and-confirm.** If you drive the real Phantom popup through a tool like [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom), the chain side of the test gets faster on average and sharper at the tail. Assertions that encoded the old timing profile — "expect this to land within N slots" — should anchor on outcomes (an account's post-state, a balance, a position) rather than a slot budget written for the old SWQoS.
+
+The chain's execution model is the same; the queue that feeds it is being rebuilt. Code that hardcoded the old queue will not age well — but the upside, for the first time since SWQoS shipped, is that "I am not running a staked validator" stops being a structural disadvantage on the way into the block.
