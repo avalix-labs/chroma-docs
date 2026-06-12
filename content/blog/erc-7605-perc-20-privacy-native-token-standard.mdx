@@ -1,0 +1,59 @@
+---
+title: "ERC-7605 pERC-20: A Privacy-Native Token Standard That Ships Without a Hard Fork"
+description: "ERC-7605 (pERC-20) replaces ERC-20's balanceOf and approve with ZK-proven mint, burn, and transfer. Here's the IPERC20 interface and what it changes."
+date: 2026-06-12
+author: Chroma Team
+---
+
+The `approve` then `transferFrom` pattern is the most-audited workflow in Ethereum, and the most-leaked one. Every wallet balance, every transfer amount, and every counterparty is queryable through a single `eth_call`. Privacy on Ethereum has answered that with mixers and wrappers — protocols you bolt on top of an otherwise public token contract. **ERC-7605**, the draft standard published on Ethereum Research in early June 2026 under the name pERC-20, takes a different swing: rewrite the token interface so privacy is the default, not a wrapper. No protocol fork required.
+
+This post walks through what the IPERC20 interface looks like, the UTXO note model it borrows from Zcash, and what an EVM dApp's wallet and test code has to change to handle privacy-native fungibles.
+
+## Why the ERC-20 ABI Is the Wrong Surface for Private Tokens
+
+`balanceOf`, `approve`, `allowance`, and `transferFrom` are all public state reads or public state writes by definition. Each tells a watcher precisely how much an address holds, who is authorized to spend it, and how much. Wrapping an ERC-20 in a privacy contract — Tornado-style — only masks the token *while it sits inside the wrapper*. The moment funds leave, every read on the public token leaks the relationship between deposit and withdrawal addresses.
+
+ERC-7605's authors argue the fix has to happen at the interface, not the integration. If your token's public ABI never had a way to ask "how much does address X own?", no integrator could leak it. So pERC-20 removes those four functions entirely.
+
+## The IPERC20 Interface: Three Operations, All Proof-Gated
+
+The new interface — `IPERC20` — narrows down to three operations:
+
+- `mint(proof, encryptedOutput)` — create a new private note
+- `burn(proof, nullifier)` — exit a note back to a public balance
+- `transfer(proof, nullifiers, encryptedOutputs)` — spend one or more notes and produce one or more new ones
+
+Every call carries a Groth16 proof. The proof attests, in zero knowledge, that:
+
+1. The spender controls the input notes (private key knowledge).
+2. The input notes have not been spent (nullifiers are fresh).
+3. The output values sum to the input values minus any public mint or burn amount.
+
+No clear-text amount enters call data. There is no `balanceOf` because the contract no longer tracks balances per address — it tracks a Merkle tree of note commitments and a set of consumed nullifiers. Who owns what lives entirely off-chain, encrypted under the holder's viewing key.
+
+## Notes, Nullifiers, and Why pERC-20 Looks Like Zcash
+
+The note model is a deliberate borrowing from Zcash Orchard. A *note* is a commitment to a tuple of `(owner_key, value, randomness)`. The contract stores only the commitment — never the tuple. When you spend a note, the proof reveals only the corresponding *nullifier*, a deterministic value derived from the note that proves "this commitment has now been used" without identifying which leaf in the tree was consumed.
+
+Two consequences fall out of that design:
+
+- **Bandwidth shifts off-chain.** Wallets have to scan every encrypted output, attempt decryption, and maintain their own local index of notes they own. The chain no longer answers "what is my balance?" — your client computes it.
+- **Anonymity sets compound.** Because every transfer adds new commitments without identifying which prior ones were spent, the anonymity set grows monotonically with token usage, not with how many users opt into a wrapper.
+
+ERC-7605 keeps Zcash's Groth16 circuit shape for the same reason most ZK-EVM projects do: small proofs, mature tooling, and well-understood gas costs for the BN254 pairing precompiles already on mainnet.
+
+## A Compliance Hook, Not a Privacy-Maximalist Tool
+
+The draft includes one departure from Zcash worth flagging: a deliberate **compliance blacklist** at the contract level. Token issuers can register addresses that the verifier circuit treats as non-transferable. The mechanism is opt-in per deployment — a stablecoin issuer needing OFAC compliance can switch it on; a memecoin can ship with it disabled. The point is to make the standard usable for regulated assets without forcing every deployment to accept that posture.
+
+For dApp developers integrating pERC-20s, the implication is concrete: your transfer call can revert based on a list you do not control. Surfacing a clear, distinct error for "blocked by issuer policy" — separate from "proof invalid" or "double spend" — is part of the UI contract from day one.
+
+## What This Changes for Wallets, dApps, and Tests
+
+The biggest change is that the wallet stops being a passive signer. To send a pERC-20 transfer, the wallet has to scan recent blocks for new encrypted outputs, decrypt the ones addressed to it, build the spend circuit input, generate the Groth16 proof (browser-side, today, runs into ~1–3 seconds per transfer), and only then hand the proof to the dApp for inclusion in `transfer()`.
+
+That latency is a real UX boundary, and it shows up in tests. If you E2E-test a pERC-20 flow with `@avalix/chroma`, the MetaMask popup arrives later than for a standard ERC-20 transfer — your `metamask.confirm()` call has to be reached after proof generation finishes, not immediately after the user clicks "Send."
+
+There is also no equivalent of the ERC-20 `Transfer(address, address, uint256)` event to assert on. Indexers that depended on log-driven balance reconstruction have to be rebuilt against commitment and nullifier events that reveal nothing about who or how much.
+
+ERC-7605 is still a draft, and large pieces — viewing-key delegation, recovery for lost keys, cross-chain compatibility — are open questions. But the proposal is the clearest signal yet that Ethereum's privacy story is moving back into the token contract itself, not into wrappers around it. If you ship fungibles, this is the interface to read before the standard finalizes.
