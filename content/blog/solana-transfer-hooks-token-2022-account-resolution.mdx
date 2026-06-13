@@ -1,0 +1,64 @@
+---
+title: "Solana Transfer Hooks: Why Every Caller of a Hooked Token Has to Resolve Accounts First"
+description: "Token-2022 Transfer Hooks let mints run custom logic on every transfer. Here's how ExtraAccountMetaList resolution changes wallet and dApp code."
+date: 2026-06-13
+author: Chroma Team
+---
+
+Token-2022 ships a long list of mint extensions — confidential balances, interest-bearing supply, transfer fees, default account state — but the Transfer Hook extension is the one that changes the call surface of `Transfer` itself. Most extensions configure something Token-2022 enforces. Transfer Hook delegates enforcement to a third-party program. Every transfer of a hooked mint becomes a CPI into that program, and every caller — wallet, dApp, server, indexer — has to know in advance which accounts that program will touch. If you're shipping a Solana dApp or program that handles SPL-style tokens, the resolution dance is where the bugs hide.
+
+## Why a transfer extension needs to be more than a fee
+
+Token-2022 already covers fixed-policy transfer behaviors. The Transfer Fee extension diverts a percentage to a designated account, with a maximum cap, all enforced by Token-2022 itself. Confidential Balances run ZK proof verification before adjusting ciphertext balances. Both are bounded — the mint authority sets parameters, Token-2022 does the math.
+
+Transfer Hooks are different. They don't add a parameter; they add a program ID. A mint with the Transfer Hook extension stores the public key of a hook program, and Token-2022 invokes that program's `Execute` instruction on every successful transfer. The hook can do whatever its author writes: gate transfers on a KYC PDA, enforce a per-recipient whitelist, charge a royalty in a token other than itself, refuse transfers above a threshold. No fixed schema could express these policies — that's the whole point of the extension.
+
+The trade-off is that arbitrary code needs arbitrary accounts. A KYC check has to read a verification record. A royalty hook has to write to a treasury. Token-2022's transfer instruction can't know which accounts your hook touches, so the hook program publishes that contract on-chain and callers read it.
+
+## ExtraAccountMetaList: the contract the hook program writes
+
+A hook program implements two instructions. The first, `InitializeExtraAccountMetaList`, runs once per mint and stores an `ExtraAccountMetaList` account at a PDA seeded with the byte string `"extra-account-metas"` and the mint's public key, under the hook program ID. The list contains every extra account the hook's `Execute` will use, with each entry tagged either as a fixed pubkey, a PDA derivation seed, or a slice of another account's data.
+
+The second instruction, `Execute`, is what Token-2022 invokes on transfer. It receives the source token account, mint, destination token account, source owner, and then the extra accounts in the exact order the list specifies. Anchor 0.31's `#[interface]` macro wires the discriminator and the account validation; without Anchor, the discriminator is the first eight bytes of `sha256("spl-transfer-hook-interface:execute")`.
+
+One subtle constraint sits underneath all of this: a hook must not itself transfer the same mint. Token-2022 sets a `transferring` flag on the source account during the CPI, and any nested `Transfer` of that mint reverts. Hooks can write state, read other accounts, log events — they cannot recursively move the asset that triggered them.
+
+## The caller side: resolving accounts before submitting
+
+A caller's job is to read the `ExtraAccountMetaList` PDA, resolve each entry into a concrete `AccountMeta`, and append the resolved metas to the transfer instruction. The `@solana/spl-token` package exposes a helper that does this in one call:
+
+```ts
+import {
+  TOKEN_2022_PROGRAM_ID,
+  createTransferCheckedWithTransferHookInstruction,
+} from '@solana/spl-token'
+
+const ix = await createTransferCheckedWithTransferHookInstruction(
+  connection,
+  sourceAta,
+  mint,
+  destinationAta,
+  owner,
+  amount,
+  decimals,
+  [],            // multi-signers
+  'confirmed',
+  TOKEN_2022_PROGRAM_ID,
+)
+```
+
+The helper fetches the mint, detects the Transfer Hook extension, derives the `ExtraAccountMetaList` PDA, resolves each entry against current chain state, and returns an instruction with the extra accounts attached. A plain `createTransferCheckedInstruction` against a hooked mint will sign and then revert on submit — the on-chain CPI has no accounts to load. Compose this instruction into a v0 transaction with whatever lookup tables and compute-budget instructions you already use; the resolution affects the instruction's account list, not the transaction envelope.
+
+Wallets that build their own transfer UIs face the same constraint. Solana didn't change its model — instructions remain stateless, accounts remain explicit — but a hooked mint widens the account list every caller is responsible for assembling.
+
+## Where this changes your tests
+
+Three failure modes only surface against a real hook deployment and a real wallet:
+
+- A caller using the unhooked `transferChecked` path against a hooked mint reverts with an account-resolution error. Unit tests that mock the RPC mint fetch miss this.
+- A hook program whose `ExtraAccountMetaList` drifts from what the dApp resolves to — common after a hook upgrade that adds an account — surfaces only when the wallet submits against the latest on-chain state.
+- A hook that conditionally rejects (KYC fail, allowlist miss) reverts inside `Execute`, and the dApp has to render that error so the user can act on it. That's wallet-side and UI-side, not program-side.
+
+E2E tests that drive a real Phantom extension against a devnet hook surface all three. That's the seam [@avalix/chroma](https://github.com/avalix-labs/chroma) is built for — running an actual wallet inside Playwright so the resolution and signing flow exercises the same code path as production. The transfer that compiles on your machine is not the transfer the wallet has to sign once a hook is in the mix.
+
+The actionable read: before integrating a Token-2022 mint, check its extensions. If `transferHook` is set, route every transfer through the resolving helper, and write at least one test that exercises a hook reject path. The two extra lines of plumbing are cheaper than the first user reporting a stuck transaction.
