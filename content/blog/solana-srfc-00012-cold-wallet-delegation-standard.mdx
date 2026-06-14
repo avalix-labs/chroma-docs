@@ -1,0 +1,59 @@
+---
+title: "sRFC-00012: Solana's Cold-Wallet Delegation Standard, Explained for dApp Builders"
+description: "sRFC-00012 lets Solana cold-wallet holders delegate proof of ownership to a hot wallet without transfer rights. Here's the model and what changes for dApps."
+date: 2026-06-14
+author: Chroma Team
+---
+
+Ethereum NFT and DeFi users have had `delegate.xyz` (formerly delegate.cash) since 2022. The pattern is now table stakes for high-value asset holders: keep the NFT in a cold wallet, designate a hot wallet as a "shadow owner," and use the hot wallet to claim airdrops, mint allowlisted spots, vote in DAOs, and unlock token-gated UX — without ever connecting the cold wallet to a dApp. Solana has been conspicuously missing this primitive. On June 14, 2026 the Solana developer community formally introduced **sRFC-00012**, the Wallet Delegation Standard for Secure Proof of Ownership. It is the closest thing yet to a chain-native answer to delegate.xyz, and it solves a problem the existing Solana delegation primitives do not.
+
+## Why Solana's existing delegation primitives don't cover this
+
+There are already two ways to "delegate" on Solana, and both of them grant transfer authority. SPL Token's `Approve` instruction sets a single delegate that can move tokens out of the account up to an allowance. The Solana Subscriptions and Allowances program, which shipped earlier this June, layers on Subscription Authority PDAs, recurring allowances, and merchant pulls. Both are real on-chain transfer authorizations — the delegate can take the asset.
+
+That is exactly the wrong model for cold-wallet proof of ownership. If you hold a 1-of-1 NFT in a hardware wallet, you want a hot wallet to be able to *prove* it controls that NFT on your behalf — to claim a free mint, sign into a token-gated forum, or be marked as an allowlisted holder — but you absolutely do not want that hot wallet to be able to transfer the NFT. Approve-style delegation gives away too much.
+
+sRFC-00012 closes that gap with a read-only delegation: the hot wallet acquires the right to *speak for* the cold wallet's assets, with no transfer authority granted by either SPL Token or any other program.
+
+## How the delegation model works at the program layer
+
+The proposed shape is small. A delegation program owns a PDA per `(cold_wallet, hot_wallet)` pair — and optionally per asset, when a user wants finer-grained control. The cold wallet signs one transaction that creates the PDA, recording the hot wallet's pubkey as a delegate. From that point forward, the cold wallet is offline. Any dApp that wants to verify "does this hot wallet speak for some cold wallet that owns X?" reads the delegation PDA from chain.
+
+The SVM execution model rewards this design. Solana programs are stateless and accounts are explicit inputs to every instruction, so a verification check is a single deterministic lookup — derive the PDA seeds, fetch the account, inspect the delegation. No CPI tree, no transaction submission, no cold-wallet signature. The Custos reference implementation, one of the projects whose work shaped the RFC, sketches the data model as two account types: a `DelegationAccount` for whole-wallet delegation seeded on the cold wallet's pubkey, and a per-token variant seeded on `(cold_wallet, token_account)` for asset-scoped delegation. Either way, the hot wallet only ever reads — it cannot `Transfer`, it cannot `CloseAccount`, it cannot recover lamports.
+
+That separation is the entire point. A user keeps the cold wallet in a drawer; a hot wallet on a daily browser inherits a read-only proof.
+
+## What a delegated connect flow actually looks like in your dApp
+
+The integration on the dApp side is shorter than you might expect. When a wallet connects, you have its public key. Today, that pubkey is the start and end of the ownership question — you check the hot wallet's token accounts for the asset you care about, and if it's not there, the user is not a holder. Under sRFC-00012 you add one step: query the delegation program with a `memcmp` filter against the connected hot wallet's address, and you get back every cold wallet that has delegated to it, plus the asset scope of each delegation. Run your existing ownership check against those cold-wallet addresses as well.
+
+```ts
+import { createSolanaRpc, address } from '@solana/kit'
+
+const rpc = createSolanaRpc(process.env.RPC_URL!)
+const hotWallet = address(connectedPubkey)
+
+const delegations = await rpc
+  .getProgramAccounts(WALLET_DELEGATION_PROGRAM, {
+    filters: [
+      { dataSize: DELEGATION_ACCOUNT_SIZE },
+      { memcmp: { offset: HOT_WALLET_OFFSET, bytes: hotWallet.toString() } },
+    ],
+    encoding: 'base64',
+  })
+  .send()
+
+const coldWallets = delegations.map(({ account }) => decodeDelegation(account.data).delegator)
+```
+
+The first three lines build a Kit RPC client and coerce the connected pubkey into a Kit `Address`. The `getProgramAccounts` request narrows by `dataSize` (so the index only walks delegation accounts) and `memcmp` against the offset where the hot wallet's pubkey sits in the account layout. The response carries every delegation account whose hot-wallet field matches — one RPC roundtrip, no cold-wallet signature. From there, your existing eligibility logic runs unchanged against the cold-wallet addresses you decoded.
+
+The asset itself never moves. The dApp never sees a cold-wallet signature. The cold wallet stays offline.
+
+## What this changes for the UX you ship — and the tests around it
+
+The user-facing surface gains one new pattern: "I'm connecting with my burner — show me my vault's assets." Wallets and dApps that adopt the standard will start rendering both balances side by side, and your connect flow needs to communicate clearly which assets are owned by the hot wallet versus held under delegation. A dApp that silently treats them as identical for transfer paths will surprise users at the moment they try to send a delegated NFT — and they cannot.
+
+That makes this exactly the kind of read-versus-write boundary that an end-to-end test belongs around. If you exercise the Phantom popup with [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom), the assertion worth pinning down is that delegated assets appear in the read views — allowlist eligibility, balance display, token-gated UI — but are absent from any write surface that would attempt to sign a transfer with the hot wallet. The standard does not authorize that, and the dApp should not pretend it does.
+
+The RFC is still in discussion and the program addresses are not finalised. The architectural shape — read-only delegation, hot wallet inherits proof but not authority, cold wallet stays offline after one setup signature — is the part most likely to survive editorial passes. The dApps that prepare for it now ship the cold-wallet experience Solana power users have been asking for since the first delegate.xyz integration on Ethereum.
