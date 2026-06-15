@@ -1,0 +1,42 @@
+---
+title: "Solana Embedded Wallets: What Changes When There's No Extension to Click"
+description: "Phantom Connect and Privy drop the extension and seed phrase for social login. Here's what Solana embedded wallets change for signing, custody, and tests."
+date: 2026-06-15
+author: Chroma Team
+---
+
+Every Solana dApp tutorial starts the same way: install Phantom, write down your seed phrase, fund the account, then come back. For a crypto-native user that's muscle memory. For everyone else it's the moment they close the tab. Embedded wallets — the model behind Phantom Connect and Privy — remove that wall: a user signs in with Google or Apple and lands in your app with a usable Solana wallet already attached. No extension, no seed phrase. If you're deciding how users get into your dApp this year, it's worth understanding exactly what Solana embedded wallets change — and, just as important, what they leave untouched.
+
+## Two ways in, one signing model
+
+There are now two distinct paths onto a Solana dApp, and they only diverge at the edges.
+
+An **extension or injected wallet** (Phantom, Solflare, Backpack) is installed by the user, holds a keypair on their device, and surfaces a popup whenever your dApp needs a signature. An **embedded wallet** is created inside your app after the user authenticates, with no extension and no popup — your app requests signatures through an SDK instead.
+
+Underneath, the SVM execution model is identical. Your dApp still composes instructions, assembles a versioned (v0) transaction, sets a compute budget, attaches any address lookup tables, and hands the wallet something to sign or sign-and-send. The wallet's job — sign the bytes, return a signature — does not change with where the key lives. That is why "add embedded wallet support" is mostly an authentication and custody question, not a transaction-building one.
+
+## Where a Solana embedded wallet keeps your key
+
+With an extension wallet, the private key is generated and stored locally and guarded by the seed phrase the user backed up. Custody sits on the user's device, and losing the phrase means losing the account.
+
+An embedded wallet never shows a seed phrase. With Phantom Connect, the user signs in with Google or Apple, sets a short PIN, approves any requested permissions, and your app receives a connected wallet. The private key is never exposed to your app, your backend, or your infrastructure — the provider handles signing on the other side of the SDK. The key material itself is held in secure infrastructure: providers like Privy use a Trusted Execution Environment (TEE) or multi-party computation (MPC) so the full key is never reconstructed in the clear by any single party.
+
+This is still non-custodial in the sense that the provider cannot unilaterally move funds, but the trust model differs from a local keypair, and it is worth stating plainly to your users rather than implying the two are the same.
+
+## What changes in your signing code — and what doesn't
+
+The connect step changes. Instead of detecting an injected wallet through the Solana Wallet Standard, you initialize an SDK, trigger a login, and get back a wallet object. Privy deliberately shapes its Solana provider to mirror Phantom's familiar provider interface, so the call site that requests a signature looks much the same as the one you already have.
+
+Everything before the signature is unchanged. You still build the v0 transaction with `@solana/kit` (or web3.js), fetch a recent blockhash, set the compute unit limit and price, and resolve any lookup tables. The signature request is the only seam that moved.
+
+One practical difference: embedded signing has no human in the loop pressing "Approve." Any spending limits or guardrails you want for the user live in your application logic or in the provider's permission configuration — not in a wallet popup the user pauses to read. Note also the chain reach: Phantom Connect's embedded wallets are Solana-first, with EVM support on the roadmap for later in 2026, so a single-login-many-chains embedded story is still arriving.
+
+## Testing embedded and extension wallets are different jobs
+
+This is where the two models stop being interchangeable. An extension wallet flow can only be exercised by a real extension running in a real browser: the popup, the approve click, the rejection path. That is the seam end-to-end tools like [@avalix/chroma](https://github.com/avalix-labs/chroma) cover — they drive an actual wallet extension inside Playwright so your test encounters what a user encounters.
+
+An embedded wallet flow has no extension and no popup. It looks more like testing an app login: a social-auth redirect, a PIN entry, then programmatic signing. Because your app holds the wallet object, you can often assert against the signing step directly — but the login and consent UI is now yours to test, and its failure modes (auth timeout, redirect mismatch, a declined permission) live in your code, not the wallet's. If your dApp offers both paths, you need both kinds of test. A passing extension test tells you nothing about the embedded one.
+
+## The takeaway
+
+Embedded wallets lower the cost of the first five minutes, which is where most Solana dApps lose people. They do not change how a transaction is built or what the SVM verifies — they change who holds the key and how the user proves it is them. Decide which path your users actually take, write the trust model down so they understand it too, and make sure your tests follow the same road they will.
