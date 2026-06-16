@@ -1,0 +1,91 @@
+---
+title: "EIP-5792 and the Wallet Call API: Testing One-Confirmation Batch Transactions"
+description: "EIP-5792's Wallet Call API batches transactions into one MetaMask confirmation. How it works, atomic vs sequential, and how to test the flow E2E."
+date: 2026-06-16
+author: Chroma Team
+---
+
+Approve, then swap, then deposit. Three on-chain calls, three MetaMask popups, three places a user can stall, misread, or reject. The frontend code that drives this is a chain of `await`s, and every step is a place where your dApp's state and the wallet's state can drift apart. **EIP-5792**, the Wallet Call API, is the standard that lets your dApp hand the wallet all three calls at once and get back a single confirmation. It shipped in MetaMask v12+, Coinbase Wallet, and Rainbow, and viem and wagmi expose it directly. If you build multi-step flows on EVM, it changes both how you send transactions and how you test them.
+
+## What the Wallet Call API actually adds
+
+EIP-5792 defines four JSON-RPC methods. The two you reach for daily:
+
+- `wallet_getCapabilities` — asks the wallet what it can do on a given chain, including whether it can batch atomically.
+- `wallet_sendCalls` — hands the wallet an array of calls to process as one batch.
+
+The request to `wallet_sendCalls` carries a `version`, the `from` address, a hex `chainId`, an `atomicRequired` boolean, and a `calls` array where each entry has `to`, `data`, and `value`. It returns a batch `id`, not a transaction hash — because a batch is not necessarily one transaction.
+
+That distinction is the whole point. You track progress with `wallet_getCallsStatus`, which returns a numeric status code modeled on HTTP:
+
+- **100** — pending (received, not yet on-chain)
+- **200** — confirmed (on-chain, no reverts; `receipts` holds every call's receipt)
+- **400** — off-chain failure (nothing hit the chain, the wallet won't retry)
+- **500** — reverted completely (only gas-related changes may have landed)
+- **600** — reverted partially (some calls may have landed)
+
+Those last two codes only matter when a batch runs *non-atomically*, which is the part most developers get wrong.
+
+## Atomic vs. sequential, and why MetaMask leans on EIP-7702
+
+`atomicRequired: true` asks for all-or-nothing: every call lands in one transaction, or none does. Whether the wallet can honor that depends on the account. `wallet_getCapabilities` reports an `atomic` status with three values:
+
+- `supported` — the wallet will run the calls atomically and contiguously.
+- `ready` — the wallet *can* upgrade to atomic, pending user approval.
+- `unsupported` — no atomicity guarantee; calls go out sequentially.
+
+A plain EOA can't execute multiple calls in one transaction — that's a smart-account capability. This is where EIP-7702 comes in: MetaMask uses a 7702 delegation to temporarily give the EOA smart-account behavior, which is exactly the `ready` state. The user approves the upgrade, and the batch then executes atomically.
+
+The practical rule: **feature-detect before you assume.** If you send `atomicRequired: true` to a wallet reporting `unsupported`, the call fails. Read capabilities first, and design a sequential fallback for wallets and chains that aren't there yet.
+
+Here's the EVM client side with viem:
+
+```ts
+// EVM / viem — feature-detect, then batch
+const caps = await client.getCapabilities({ account })
+const atomic = caps[client.chain.id].atomic.status // 'supported' | 'ready' | 'unsupported'
+
+const { id } = await client.sendCalls({
+  account,
+  forceAtomic: atomic !== 'unsupported',
+  calls: [
+    { to: usdc, abi: erc20Abi, functionName: 'approve', args: [router, amount] },
+    { to: router, abi: routerAbi, functionName: 'swap', args: [amount, minOut] },
+  ],
+})
+
+const { status } = await client.getCallsStatus({ id })
+```
+
+`getCapabilities` reads what the wallet supports on this chain. `sendCalls` ships the approve and the swap as one batch, with `forceAtomic` mapping to `atomicRequired`. `getCallsStatus` polls the batch `id` until it resolves to success or failure.
+
+## What this changes for your E2E tests
+
+Here's the catch teams hit: a test written against the old flow expects *two* wallet confirmations — one for `approve`, one for `swap`. Once you adopt EIP-5792, that test is wrong. The wallet now shows **one** confirmation listing both calls. A loop that confirms twice will hang on a popup that never appears.
+
+This is a flow you want covered with a real wallet, not a mock, because the number of confirmations is wallet behavior — not something your dApp controls. With [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/metamask) you assert it directly:
+
+```ts
+// EVM / @avalix/chroma — one confirmation for the whole batch
+import { createWalletTest } from '@avalix/chroma'
+import { expect } from '@playwright/test'
+
+const test = createWalletTest({ wallets: [{ type: 'metamask' }] })
+
+test('batched approve + swap needs a single confirmation', async ({ page, metamask }) => {
+  await metamask.importSeedPhrase({ seedPhrase: process.env.SEED_PHRASE! })
+  await page.goto('/swap')
+  await metamask.authorize()
+
+  await page.getByRole('button', { name: 'Swap 100 USDC' }).click()
+  await metamask.confirm() // one popup covers approve + swap
+
+  await expect(page.getByText('Swap complete')).toBeVisible()
+})
+```
+
+`authorize()` connects the wallet, and the single `confirm()` covers the entire batch — if a second popup were expected here, the test would tell you. Keep your old sequential test too: run it against a wallet without atomic support so the fallback path stays honest.
+
+## The takeaway
+
+EIP-5792 moves batching from a contract trick to a first-class wallet feature, and the user-visible payoff is one confirmation instead of many. Treat capability detection as required, not optional, and update your E2E assertions to match the new confirmation count — because the most common breakage isn't the batch itself, it's a test still waiting for a popup that EIP-5792 just removed.
