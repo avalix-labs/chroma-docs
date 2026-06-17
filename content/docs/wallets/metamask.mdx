@@ -47,10 +47,10 @@ When your dApp requests wallet access:
 await page.click('button:has-text("Connect Wallet")')
 
 // Approve the request
-await metamask.authorize()
+await metamask.approve()
 ```
 
-## Confirm or Reject Transaction
+## Approve or Reject Transaction
 
 When your dApp requests transaction signing or message signing:
 
@@ -58,8 +58,8 @@ When your dApp requests transaction signing or message signing:
 // Your dApp triggers a transaction
 await page.click('button:has-text("Submit")')
 
-// Confirm the transaction
-await metamask.confirm()
+// Approve the transaction
+await metamask.approve()
 ```
 
 To reject a transaction or connection request:
@@ -69,7 +69,7 @@ await metamask.reject()
 ```
 
 <Callout type="info">
-  MetaMask uses `confirm()` and `reject()` instead of `approveTx()` and `rejectTx()` used by other Chroma wallets.
+  MetaMask uses `approve()` and `reject()` instead of `approveTx()` and `rejectTx()` used by other Chroma wallets. The same `approve()` handles both the connection prompt and a transaction/signing prompt.
 </Callout>
 
 ## Complete Example
@@ -96,13 +96,13 @@ test.describe('MetaMask Wallet', () => {
 
     await page.goto('http://localhost:3000')
     await page.click('button:has-text("Connect")')
-    await metamask.authorize()
+    await metamask.approve()
 
     await expect(page.locator('.connected')).toBeVisible()
 
     await page.fill('input[name="amount"]', '0.01')
     await page.click('button:has-text("Send")')
-    await metamask.confirm()
+    await metamask.approve()
 
     await expect(page.locator('.success')).toBeVisible()
   })
