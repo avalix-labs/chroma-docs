@@ -42,7 +42,7 @@ await talisman.importPolkadotMnemonic({
 Import an EVM account using a private key:
 
 ```ts
-await talisman.importPrivateKey({
+await talisman.importEthPrivateKey({
   privateKey: '0x...',
   name: 'My EVM Account',
 })
@@ -94,7 +94,7 @@ const test = createWalletTest({
 test('evm transaction', async ({ page, wallets }) => {
   const talisman = wallets.talisman
   
-  await talisman.importPrivateKey({
+  await talisman.importEthPrivateKey({
     privateKey: '0x...',
     name: 'My EVM Account',
   })
