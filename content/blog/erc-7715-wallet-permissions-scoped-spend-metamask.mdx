@@ -1,0 +1,104 @@
+---
+title: "ERC-7715 Wallet Permissions: Granting Scoped Spend Without a Popup Every Transaction"
+description: "ERC-7715 lets a dApp request scoped, time-bounded wallet permissions via MetaMask. Here's the grant request shape, how redemption works, and how to test it."
+author: Chroma Team
+date: 2026-06-17
+---
+
+Every recurring payment, DCA bot, and autopay flow on an EVM chain runs into the same wall: the wallet pops a confirmation for every single transaction. That model is fine for a one-off swap and miserable for anything that needs to act on a schedule or while the user is away. The usual workaround — asking the user to `approve()` an unbounded ERC-20 allowance to a contract — trades the popup problem for a much worse one: a blank check that has drained more than a few wallets. **ERC-7715 wallet permissions** replace that blunt instrument with something bounded. MetaMask ships it as Advanced Permissions inside its Smart Accounts Kit (the Delegation Toolkit), and the June 2026 Early Access Program for agents leans on exactly this primitive to let automated agents transact within rules a user sets once.
+
+## Why per-transaction approval breaks recurring and agent flows
+
+On a plain EOA, every state-changing call is one signature and one popup. A subscription that charges 10 USDC monthly would mean twelve interruptions a year — assuming the user is even online when the charge is due. The historical escape hatch was a single unlimited `approve()` to a spender contract, after which the contract could move tokens with no further prompts. The cost of that convenience is that the allowance has no ceiling, no expiry, and no notion of "per day." If the spender is compromised, the whole balance is reachable.
+
+ERC-7715 reframes the question from "approve everything to this contract" to "grant a bounded budget to this key." The user approves a budget with a cap, a renewal period, and an expiry. Nothing outside those bounds is ever authorized.
+
+## What an ERC-7715 permission request actually contains
+
+The standard adds a JSON-RPC method, `wallet_grantPermissions`. With the MetaMask Delegation Toolkit you extend a viem wallet client with `erc7715ProviderActions()` and call `grantPermissions`:
+
+```ts
+import { createWalletClient, custom, parseUnits } from 'viem'
+import { erc7715ProviderActions } from '@metamask/delegation-toolkit/experimental'
+
+const walletClient = createWalletClient({
+  transport: custom(window.ethereum),
+}).extend(erc7715ProviderActions())
+
+const currentTime = Math.floor(Date.now() / 1000)
+
+const granted = await walletClient.grantPermissions([{
+  chainId: 1,
+  expiry: currentTime + 604800,            // hard stop: 7 days from now
+  signer: {
+    type: 'account',
+    data: { address: sessionAccountAddress }, // the key that will spend
+  },
+  permission: {
+    type: 'erc20-token-periodic',
+    data: {
+      tokenAddress: '0xA0b8…USDC',
+      periodAmount: parseUnits('10', 6),   // 10 USDC...
+      periodDuration: 86400,               // ...renewing every 24h
+      justification: 'Daily subscription charge, max 10 USDC',
+    },
+  },
+}])
+```
+
+Reading it line by line: `chainId` and `expiry` (a Unix timestamp) bound *where* and *how long* the grant lives. `signer` is the session account that will later spend — a key your app or an agent controls, never the user's main account. The `permission.type` picks the shape of the budget; MetaMask supports `native-token-periodic`, `native-token-stream`, `erc20-token-periodic`, `erc20-token-stream`, `erc20-token-allowance`, and `erc20-revocation`. A *periodic* type is a renewing cap (10 USDC every 24 hours); a *stream* type is a continuous, linearly accruing allowance. The `justification` string is not decoration — MetaMask renders it on the human-readable approval screen the user actually reads before signing.
+
+## From grant to redemption: who holds the key
+
+`grantPermissions` returns a signed permission context. The session key named in `signer` later redeems it through ERC-7710's `redeemDelegations` to execute the bounded transfer — with no further user popup, because the user already consented to the envelope. The caps you set (period amount, duration, expiry) are enforced on-chain by the smart account's caveat enforcers, not by your backend's good behavior.
+
+One dependency is easy to miss: the granting account has to *be* a smart account. ERC-7715 is the request layer; it sits on top of an account that can delegate. On an EOA, that capability arrives via EIP-7702 delegation. So 7702 and 7715 are not competitors — 7702 makes the EOA programmable, and 7715 is how a dApp asks that programmable account for a scoped permission.
+
+## Testing the permission grant with @avalix/chroma
+
+The grant is a real MetaMask popup with a human-readable screen, and that screen is where things quietly go wrong: a `justification` that doesn't match the actual cap, an `expiry` your UI computed in milliseconds instead of seconds, a token address pointing at testnet. A mocked provider won't catch any of it. Driving the real extension does. With [@avalix/chroma](https://chroma.avalix.dev), the grant flow tests like any other wallet interaction:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test.describe('ERC-7715 subscription grant', () => {
+  test.beforeEach(async ({ wallets }) => {
+    await wallets.metamask.importSeedPhrase({
+      seedPhrase: 'test test test test test test test test test test test junk',
+    })
+  })
+
+  test('user approves a scoped daily allowance', async ({ page, wallets }) => {
+    const metamask = wallets.metamask
+    await page.goto('http://localhost:3000')
+
+    await page.click('button:has-text("Connect Wallet")')
+    await metamask.authorize()
+
+    // dApp calls wallet_grantPermissions — MetaMask shows the permission screen
+    await page.click('button:has-text("Enable subscription")')
+    await metamask.confirm()
+
+    await expect(page.locator('[data-testid="sub-active"]')).toBeVisible()
+  })
+
+  test('user declines the permission', async ({ page, wallets }) => {
+    const metamask = wallets.metamask
+    await page.goto('http://localhost:3000')
+    await page.click('button:has-text("Connect Wallet")')
+    await metamask.authorize()
+    await page.click('button:has-text("Enable subscription")')
+    await metamask.reject()
+
+    await expect(page.locator('[data-testid="sub-declined"]')).toBeVisible()
+  })
+})
+```
+
+`importSeedPhrase` and `authorize` get a real wallet connected; `confirm` approves the permission screen, and `reject` covers the path your UI must handle when a user refuses. Both deserve a test — a grant flow that assumes approval is a grant flow that strands the user who says no.
+
+If you currently lean on unlimited `approve()` or ask users to sign every recurring action, ERC-7715 gives you a bounded alternative worth adopting. Treat the permission screen as a first-class UX surface: get the cap, period, and justification right, and put the grant and the decline path under an end-to-end test before either reaches a user.
