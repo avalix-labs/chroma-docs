@@ -1,0 +1,181 @@
+---
+title: Solana via MetaMask
+description: Test a multichain dApp that authorizes EVM and Solana in one MetaMask session
+icon: Layers
+---
+
+MetaMask now signs Solana transactions through its **multichain API**, built on the [CAIP-25](https://chroma.avalix.dev/blog/metamask-connect-multichain-caip-25-evm-solana) session standard. A single MetaMask popup can authorize both EVM and Solana scopes at once, so a cross-ecosystem dApp ships one connect button instead of two.
+
+The good news for tests: **the wallet boundary doesn't change.** Whether the request is an `eth_sendTransaction` on Base or a Solana `signTransaction`, it surfaces as the same MetaMask popup — so the same Chroma methods (`authorize`, `confirm`, `reject`) drive it. This guide shows how to test that flow.
+
+<Callout type="info">
+  Chroma automates the **MetaMask extension popup**, not your dApp's RPC layer. The CAIP-25 session, the Solana cluster URL, and submitting the signed transaction are all your dApp's responsibility. Chroma's job starts and ends at the popup.
+</Callout>
+
+## How It Works
+
+Under the legacy model, an EVM connection and a Solana connection were two separate prompts with two different injection contracts. With the multichain API, your dApp calls `wallet_createSession` once and MetaMask shows **one popup** listing every requested scope:
+
+1. Your dApp requests a CAIP-25 session covering EVM chains (`eip155:*`) and Solana (`solana:*`)
+2. MetaMask shows a single connection popup → `metamask.authorize()`
+3. A Solana action routes through `wallet_invokeMethod` and opens a signing popup → `metamask.confirm()`
+4. Your dApp submits the signed Solana transaction to an RPC and your test asserts the result
+
+Steps 2 and 3 are the only points Chroma touches. Everything else is standard Playwright against your dApp's UI.
+
+## Setup
+
+Use the standard MetaMask wallet — there is no separate Solana wallet type, because the same extension handles both ecosystems:
+
+```ts
+import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{
+    type: 'metamask'
+  }]
+})
+
+test('multichain test', async ({ wallets }) => {
+  const metamask = wallets.metamask
+
+  await metamask.importSeedPhrase({
+    seedPhrase: 'test test test test test test test test test test test junk',
+  })
+})
+```
+
+<Callout type="warn">
+  Never use real seed phrases in tests. Always use a throwaway account with no real funds on either ecosystem.
+</Callout>
+
+## Authorize the Multichain Session
+
+When your dApp calls `wallet_createSession`, MetaMask opens a single connection popup that lists both the EVM and Solana scopes. Approve it once:
+
+```ts
+// Your dApp requests a CAIP-25 session for EVM + Solana
+await page.click('button:has-text("Connect Wallet")')
+
+// One popup authorizes every scope in the session
+await metamask.authorize()
+```
+
+There is no second prompt for Solana — that's the whole point of the CAIP-25 session. If your test was written for the old two-popup flow, drop the second `authorize()` call.
+
+## Sign a Solana Transaction
+
+A Solana action routes through `wallet_invokeMethod` with a `solana:*` scope. MetaMask shows a signing popup just like an EVM transaction, so you confirm it the same way:
+
+```ts
+// Your dApp builds a v0 transaction and asks MetaMask to sign it
+await page.click('button:has-text("Send SOL")')
+
+// Confirm the Solana signing request
+await metamask.confirm()
+```
+
+To reject the signing request instead:
+
+```ts
+await metamask.reject()
+```
+
+<Callout type="info">
+  EVM and Solana share a session but not an execution model. On EVM, MetaMask broadcasts the transaction. On Solana, MetaMask only **signs** — your dApp submits the signed bytes to an RPC itself. Assert against the wallet popup (`confirm`/`reject`), then assert your dApp's post-submit UI separately.
+</Callout>
+
+## Complete Example
+
+A test that connects once and then exercises both a Base transfer and a Solana transfer through the same MetaMask session:
+
+```ts title="tests/solana-metamask.spec.ts"
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{
+    type: 'metamask'
+  }]
+})
+
+test.setTimeout(60_000)
+
+test.describe('MetaMask multichain (EVM + Solana)', () => {
+  test.beforeEach(async ({ wallets }) => {
+    await wallets.metamask.importSeedPhrase({
+      seedPhrase: 'test test test test test test test test test test test junk',
+    })
+  })
+
+  test('one session, two ecosystems', async ({ page, wallets }) => {
+    const metamask = wallets.metamask
+
+    await page.goto('http://localhost:3000')
+
+    // Single CAIP-25 session covers EVM + Solana
+    await page.click('button:has-text("Connect Wallet")')
+    await metamask.authorize()
+    await expect(page.locator('.connected')).toBeVisible()
+
+    // EVM: MetaMask broadcasts the transaction
+    await page.fill('input[name="evm-amount"]', '0.01')
+    await page.click('button:has-text("Send on Base")')
+    await metamask.confirm()
+    await expect(page.locator('.evm-success')).toBeVisible()
+
+    // Solana: MetaMask signs, the dApp submits to an RPC
+    await page.fill('input[name="sol-amount"]', '0.1')
+    await page.click('button:has-text("Send SOL")')
+    await metamask.confirm()
+    await expect(page.locator('.solana-success')).toBeVisible()
+  })
+
+  test('user can reject the Solana signing request', async ({ page, wallets }) => {
+    const metamask = wallets.metamask
+
+    await page.goto('http://localhost:3000')
+    await page.click('button:has-text("Connect Wallet")')
+    await metamask.authorize()
+
+    await page.click('button:has-text("Send SOL")')
+    await metamask.reject()
+
+    await expect(page.getByText('User rejected the request.')).toBeVisible()
+  })
+})
+```
+
+<Callout type="info">
+  MetaMask uses `confirm()` and `reject()` — not the `approveTx()` / `rejectTx()` used by Chroma's Polkadot wallets. See the [MetaMask wallet reference](/docs/wallets/metamask) for the full method list.
+</Callout>
+
+## Testing Reconnection
+
+The hardest surface in a multichain dApp is reconnect. Under the old model, a page reload dropped the EVM provider and the Solana provider as two independent recovery paths. With CAIP-25 they collapse into one: `wallet_getSession` either returns the prior session or it doesn't.
+
+Test the refresh-after-connect path against the real session, not a per-ecosystem mock:
+
+```ts
+test('session survives a reload', async ({ page, wallets }) => {
+  const metamask = wallets.metamask
+
+  await page.goto('http://localhost:3000')
+  await page.click('button:has-text("Connect Wallet")')
+  await metamask.authorize()
+  await expect(page.locator('.connected')).toBeVisible()
+
+  // Reload — the dApp should restore the session via wallet_getSession
+  // without a fresh popup
+  await page.reload()
+  await expect(page.locator('.connected')).toBeVisible()
+})
+```
+
+If your dApp shows a new MetaMask popup after reload, the session restore is broken — that's a real bug this test catches.
+
+## Tips
+
+- **No Solana wallet type.** Use `{ type: 'metamask' }`. The multichain API is a property of the MetaMask extension, not a separate wallet.
+- **Assert at the wallet boundary.** `confirm()` / `reject()` is what Chroma controls. What the transaction *does* afterward (broadcast on EVM, submit-to-RPC on Solana) is your dApp's code — assert its UI separately.
+- **One popup for connect.** If you see two connection prompts, your dApp is still using the legacy per-ecosystem SDK, not `wallet_createSession`.
+- **Background:** see [MetaMask Connect's Multichain API](https://chroma.avalix.dev/blog/metamask-connect-multichain-caip-25-evm-solana) for how CAIP-25 sessions and `wallet_invokeMethod` work under the hood.
