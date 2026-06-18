@@ -1,0 +1,72 @@
+---
+title: "Wallet Transaction Simulation on EVM and Solana: What the Preview Promises (and What It Doesn't)"
+description: "Wallet transaction simulation previews balance changes before you sign — but it's a prediction, not a guarantee. How EVM and Solana differ, and what to test."
+date: 2026-06-18
+author: Chroma Team
+---
+
+Open MetaMask or Phantom in 2026 and the signing popup no longer shows you raw calldata and a gas number. It shows you an outcome: "You send 100 USDC, you receive 0.03 ETH." That line is the result of **wallet transaction simulation** — the wallet runs your transaction against current chain state before you sign and renders the predicted balance changes. It is one of the better security wins of the last two years. It is also routinely misread, by users and by the developers building the flows, as a promise. It is not. It is a prediction, and the gap between the two is where bugs and bad UX live.
+
+This matters more now that simulation is becoming default rather than opt-in. MetaMask's Agent Wallet, in early access since June 8, 2026, routes every transaction through simulation plus Blockaid threat scanning before it can execute. Phantom has simulated transactions on the confirmation screen for years. If you ship a signing flow, you are shipping on top of a simulator — so it's worth knowing exactly what it does.
+
+## What "simulate before you sign" actually runs
+
+On EVM, MetaMask's estimated balance changes are produced by replaying your transaction against the latest state via an `eth_simulateV1`-style dry run on a MetaMask service. The simulator reports the net token movements — ERC-20, ERC-721, and ERC-1155 deltas in and out of your account — separate from gas. Blockaid layers a threat scan on top, flagging known-malicious targets. MetaMask is explicit in its own docs that simulations are available on Ethereum mainnet, and that the result is a prediction whose final outcome isn't guaranteed.
+
+The mechanism is a dry run: take the transaction, execute it against a recent block without committing, diff the account balances, throw the result away. Nothing is broadcast. The wallet is answering one question — "if this landed right now, what would change?" — and showing you the answer.
+
+## EVM and Solana simulate the same idea on different machines
+
+The concept is shared; the execution model underneath is not, and conflating the two will mislead you.
+
+On **EVM**, contracts hold their own state. The simulator runs your call against the latest block and the diff it produces depends on whatever that contract's storage happens to be at that moment.
+
+On **Solana (SVM)**, programs are stateless and every account a transaction touches is an explicit input. Phantom simulates through the `simulateTransaction` RPC method, which accepts a versioned (v0) transaction and returns the execution logs, the **compute units consumed**, the post-execution account data, and any error. Because the account list is declared up front in the transaction message, the simulator knows precisely which accounts will be read and written before it runs a single instruction — there is no hidden state for a program to reach into. That's a structural difference from EVM, not a cosmetic one: an SVM simulation is a function of the accounts you passed, so a transaction that forgets a required account fails in simulation the same way it would on-chain.
+
+Note what does *not* transfer between the two: EVM simulation reasons about contract storage; SVM simulation reasons about an explicit account set and a compute budget. Don't carry one mental model into the other chain.
+
+## Why a clean simulation can still revert on-chain
+
+A green preview is a snapshot of a moving target. The transaction is simulated against state at one moment and included at a later one, and several things change in between:
+
+- **State drift.** Another transaction touches the same pool, allowance, or nonce between simulation and inclusion. The swap you simulated at one price executes at another.
+- **MEV.** A sandwich around your trade moves the on-chain result away from the simulated quote even though nothing in your transaction changed.
+- **Oracle and time-dependent logic.** A price feed updates, a deadline passes, an epoch rolls over.
+- **Compute budget (SVM).** A versioned transaction that under-provisions compute units can pass a light simulation and then hit the limit under real load.
+
+Simulation removes blind signing. It does not remove execution risk. Treating the preview as a contract is exactly the mistake it was built to prevent.
+
+## What this changes for your E2E tests
+
+Two things move when a wallet simulates. First, the confirmation popup now resolves **asynchronously** — there's a brief "estimating changes" state before the confirm control is ready, and a test that clicks approve the instant the popup opens can race it. Second, simulation introduces branches your tests probably don't cover: the transaction the simulator can't estimate, and the one Blockaid flags as hostile.
+
+Mocked providers can't reproduce any of this — a mock returns whatever you told it to, so it never renders a real preview or a real warning. Driving the actual extension does. With [@avalix/chroma](https://github.com/avalix-labs/chroma), the genuine MetaMask extension runs inside Playwright against your fork or devnet, so the real simulation executes against real state and the preview renders exactly as a user would see it:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test('swap confirms after the simulation preview resolves', async ({ page, wallets }) => {
+  const metamask = wallets.metamask
+  await metamask.importSeedPhrase({
+    seedPhrase: 'test test test test test test test test test test test junk',
+  })
+
+  await page.goto('http://localhost:3000')
+  await page.click('button:has-text("Connect")')
+  await metamask.approve()
+
+  await page.click('button:has-text("Swap")')
+  // The real extension runs the simulation; approve drives the live popup
+  await metamask.approve()
+
+  await expect(page.locator('.swap-success')).toBeVisible()
+})
+```
+
+Line by line: `importSeedPhrase` loads a throwaway account, the first `approve()` clears the connection prompt, and the second `approve()` confirms the transaction *after* MetaMask has simulated it against your fork. Because it's the real extension, that simulation actually ran — and `metamask.reject()` lets you assert the path where a user backs out of a preview that looks wrong. The same `approve`/`reject` methods drive a Solana signing request when your dApp uses MetaMask's multichain session, so the testing seam is identical across ecosystems even though the simulation underneath is not.
+
+The takeaway: build on the simulation, but don't trust it as a guarantee — and write the test that proves your dApp behaves when the preview is slow, unestimable, or flagged. That branch is the one your users will eventually hit.
