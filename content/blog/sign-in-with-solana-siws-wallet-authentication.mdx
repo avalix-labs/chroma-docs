@@ -1,0 +1,59 @@
+---
+title: "Sign In With Solana: Replacing the Connect-Then-Sign Authentication Dance"
+description: "Sign In With Solana (SIWS) folds connect, nonce, and signMessage into one signed message. Here's the SignInInput, backend verification, and what to test."
+date: 2026-06-19
+author: Chroma Team
+---
+
+Almost every Solana dApp that needs a logged-in session does the same three-step shuffle: connect the wallet, fetch a nonce from your backend, then ask the wallet to sign that nonce with `signMessage`. It works, but it means two separate wallet interactions, a round-trip to your server in the middle, and a pile of glue code that every team reimplements slightly differently. Sign In With Solana (SIWS) collapses that whole sequence into a single wallet call — and standardizes the message format so you stop hand-rolling it.
+
+## Why connect-then-sign was two problems pretending to be one
+
+Connecting a wallet (`standard:connect`) proves only that a wallet is present and willing to share a public key. It does not prove the user controls the corresponding private key — anyone can claim an address. To get an authenticated session you need a signature over something your server chose, so the standard pattern grew into: connect → `GET /nonce` → `signMessage(nonce)` → `POST` the signature → verify it → issue a session token.
+
+That is two popups (one to connect, one to sign) with a network round-trip wedged between them. Worse, the message the user signed was usually an opaque blob — a raw nonce or a string only your backend understood. The user couldn't read what they were approving, which is blind signing applied to authentication. And because every dApp invented its own message text, nothing was portable and nothing was easy for a wallet to render safely.
+
+## What a Sign In With Solana message actually contains
+
+SIWS, introduced by Phantom and now part of the Solana Wallet Standard as the `solana:signIn` feature, mirrors Sign-In with Ethereum (EIP-4361) but for Solana's ed25519 keys. Instead of two steps, your dApp builds a `SignInInput`, the wallet renders a dedicated, human-readable sign-in screen, and it returns the signature — connecting and signing in one prompt.
+
+```ts
+const input = {
+  domain: 'app.example.com',
+  statement: 'Sign in to Example. This request will not trigger a transaction or cost any fees.',
+  uri: 'https://app.example.com/login',
+  version: '1',
+  chainId: 'mainnet',
+  nonce: 'a1b2c3d4e5',
+  issuedAt: new Date().toISOString(),
+  expirationTime: new Date(Date.now() + 5 * 60_000).toISOString(),
+}
+```
+
+A few fields carry most of the weight. `domain` binds the signature to your origin, so a phishing site on another domain can't replay a message a user signed for you. `nonce` (at least 8 alphanumeric characters) is your replay guard. `issuedAt` and `expirationTime` bound how long the proof is valid. `statement` is the plain text the user actually reads before approving. Note that `domain` and `address` are optional in the *input* but mandatory in the *constructed* message — if you omit them, the wallet fills them in.
+
+The detail that trips up developers coming from the transaction side: this is an off-chain ed25519 signature, not a transaction. There is no recent blockhash, no instructions, no compute units, no fee, and nothing lands on-chain. SIWS proves key ownership; it never touches the SVM runtime.
+
+## Verifying the result on your backend
+
+After the user approves, the wallet returns a `SignInOutput`: the `account`, the `signedMessage` bytes, the `signature`, and a `signatureType` (defaulting to `ed25519`). Rather than re-deriving the message and calling tweetnacl by hand, use the `verifySignIn` helper:
+
+```ts
+import { verifySignIn } from '@solana/wallet-standard-util'
+
+const ok = verifySignIn(input, output)
+```
+
+The helper parses the `signedMessage`, checks its fields against the `input` you sent, reconstructs the message per the SIWS ABNF format, and verifies the signature against the account's public key. That removes the most error-prone part of the old flow.
+
+What it does *not* do is enforce your session policy. You still have to confirm the `nonce` is one you actually issued and haven't seen before, and that `expirationTime` hasn't passed. `verifySignIn` proves the message is structurally valid and genuinely signed; it doesn't know your replay table or your clock. Keep those checks server-side.
+
+## What this changes for your auth tests
+
+Because SIWS replaces two wallet popups with one, any end-to-end test scripted around "click connect, wait, then click sign" needs rewriting to the single sign-in prompt. And since the signature is off-chain, there's no transaction to confirm and no on-chain effect to assert against — your assertions move to the resulting session: is the user logged in, did the cookie or token appear, does a protected route now load?
+
+This is the human-layer step worth exercising against a real extension. If you drive an actual Phantom popup through a tool like [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom), the test sees the exact `signedMessage` bytes the wallet produces — and a `verifySignIn` call that passes against a hand-crafted message in a unit test can still reject what a real wallet emits if your `SignInInput` and the constructed message disagree. Anchor the assertion on the post-login state, not on how many popups appeared.
+
+## Where to start
+
+If you're still maintaining a bespoke nonce endpoint and a manual signature check, SIWS is mostly a deletion: one wallet interaction, a standardized message your users can read, and a verification helper that handles the ABNF parsing for you. Swap the sign-in path first, keep your nonce issuance and expiry enforcement, and let the wallet render a sign-in screen instead of asking users to blind-sign a blob.
