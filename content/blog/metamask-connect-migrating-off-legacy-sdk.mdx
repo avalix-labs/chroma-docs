@@ -1,0 +1,116 @@
+---
+title: "Migrating Off the Legacy MetaMask SDK: A MetaMask Connect Upgrade Guide"
+description: "MetaMask retired the legacy SDK for MetaMask Connect. Here's how to migrate to createEVMClient, what changes in your provider code, and how to test it."
+date: 2026-06-20
+author: Chroma Team
+---
+
+If your EVM dApp has a Connect Wallet button wired through `@metamask/sdk`, that package is now on borrowed time. MetaMask has superseded the legacy SDK with **MetaMask Connect**, a ground-up rewrite with a new package, a streamlined API, and direct wallet communication. The migration is mostly mechanical, but two changes will break your code if you copy your old setup verbatim: the package name and entry point changed, and initialization is now asynchronous. This is a practical **MetaMask SDK migration** guide for EVM dApps — what moves, what stays, and how to confirm your connect flow still works before you ship.
+
+## What MetaMask Connect Actually Changes
+
+Most of your dApp doesn't care which SDK created the provider. MetaMask Connect returns the same **EIP-1193** provider the legacy SDK did, so your viem, ethers.js, web3.js, or wagmi calls keep working unchanged. The differences live in the setup layer:
+
+- **No relay server.** The legacy SDK routed messages through a hosted relay. MetaMask Connect talks to the wallet directly, which removes a network hop and a third-party dependency from your connection path.
+- **Async initialization.** The old `new MetaMaskSDK(...)` constructor was synchronous and handed you a provider immediately. `createEVMClient(...)` returns a promise — you have to `await` it before the provider exists.
+- **A shared multichain core.** The EVM client wraps `createMultichainClient` and manages a CAIP-25 session under the hood. That's what lets MetaMask Connect later attach a Solana scope to the same session — a capability worth its own discussion, but not something a single-chain EVM dApp has to think about during this migration.
+
+The takeaway: this is a setup-layer change, not an application-layer rewrite. Your transaction-building and contract-read code is safe.
+
+## The Migration, Step by Step
+
+There are three mechanical steps: swap the dependency, update the import and constructor, and move your initialization behind an `await`.
+
+First, replace the package:
+
+```bash
+npm remove @metamask/sdk
+npm install @metamask/connect-evm
+```
+
+Then update the import and initialization. Here is the legacy pattern most dApps shipped:
+
+```ts
+// Before — legacy @metamask/sdk
+import { MetaMaskSDK } from '@metamask/sdk'
+
+const sdk = new MetaMaskSDK({
+  dappMetadata: { name: 'My dApp', url: window.location.href },
+})
+const provider = sdk.getProvider()
+const accounts = await sdk.connect()
+```
+
+And the MetaMask Connect equivalent:
+
+```ts
+// After — @metamask/connect-evm
+import { createEVMClient } from '@metamask/connect-evm'
+
+const evmClient = await createEVMClient({
+  dapp: { name: 'My dApp', url: window.location.href },
+})
+const provider = evmClient.getProvider()
+const accounts = await evmClient.connect()
+```
+
+Line by line:
+
+- `createEVMClient` replaces the `new MetaMaskSDK()` constructor and **must be awaited**. You can no longer create the client inline at the top level of a module — wrap it in an `async` function or initialize it inside an effect/lifecycle hook.
+- `dappMetadata` is now just `dapp`. The fields (`name`, `url`) are the same.
+- `evmClient.getProvider()` returns the EIP-1193 provider, available immediately once the client resolves. Everything downstream of this line — `provider.request({ method: 'eth_sendTransaction', params: [...] })`, your viem client, your wagmi config — stays identical.
+- `evmClient.connect()` prompts the wallet and resolves with the connected accounts.
+
+One gotcha worth flagging: `evmClient.disconnect()` only revokes the EVM (`eip155`) scopes. If you ever add a Solana scope to the same session, calling `disconnect()` from the EVM client will not tear down the whole multichain session. For a pure EVM dApp this is invisible, but it's a sharp edge if you go multichain later.
+
+## Re-Test the Connect Flow Before You Ship
+
+The riskiest part of this migration isn't the transaction logic — it's the connect button itself. Moving initialization behind an `await` is exactly the kind of change that introduces race conditions: a button that fires before the client resolves, a provider that's `undefined` for the first render, or a rejected connection that leaves the UI stuck. None of that shows up in a unit test that mocks the provider, because the mock resolves instantly and never opens a real popup.
+
+This is where an E2E test against a real MetaMask extension earns its keep. With `@avalix/chroma` you drive the actual wallet UI, so the async boundary and the authorization popup are exercised the way a user hits them:
+
+```ts
+import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test('connects through MetaMask Connect', async ({ page, wallets }) => {
+  const metamask = wallets.metamask
+  await metamask.importSeedPhrase({ seedPhrase: process.env.TEST_SEED! })
+
+  await page.goto('http://localhost:3000')
+  await page.getByRole('button', { name: 'Connect Wallet' }).click()
+  await metamask.authorize() // approve the connection request
+
+  await expect(page.getByTestId('account-address')).toBeVisible()
+})
+```
+
+What each step verifies:
+
+- `importSeedPhrase` loads a known test wallet into the extension.
+- Clicking the button triggers `createEVMClient`/`connect()` — if your async init has a race, the popup never appears and `authorize()` times out, failing the test loudly instead of silently in production.
+- `metamask.authorize()` approves the connection popup, mirroring a real user.
+
+Pair it with the rejection path, the case async migrations break most often:
+
+```ts
+test('handles a rejected connection', async ({ page, wallets }) => {
+  const metamask = wallets.metamask
+  await metamask.importSeedPhrase({ seedPhrase: process.env.TEST_SEED! })
+
+  await page.goto('http://localhost:3000')
+  await page.getByRole('button', { name: 'Connect Wallet' }).click()
+  await metamask.reject() // user declines
+
+  await expect(page.getByRole('button', { name: 'Connect Wallet' })).toBeEnabled()
+})
+```
+
+`metamask.reject()` declines the prompt, and the assertion confirms your UI returns to a clickable state rather than hanging on a promise that never resolved.
+
+## Takeaway
+
+The MetaMask Connect migration is small on paper — swap one package, rename one field, add one `await`. But that `await` is precisely where dApps regress, because the connect button now depends on a promise resolving before it can fire. Pin the new version, move your initialization into an async boundary, and run your connect-and-reject E2E suite once against the new client. If both pass against a real extension, the rest of your dApp won't notice the SDK changed underneath it.
