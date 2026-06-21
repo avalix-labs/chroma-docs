@@ -1,0 +1,78 @@
+---
+title: "Generate a Type-Safe Solana Program Client from Your IDL with Codama"
+description: "Codama generates type-safe instruction builders and account decoders from your Solana program's IDL, so you stop hand-writing serialization code."
+date: 2026-06-21
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): Codama generates type-safe instruction builders and account decoders from your Solana program's IDL, so you stop hand-writing serialization code. */}
+
+If you build a Solana dApp against your own program, you have probably written the boring half by hand: a function that packs an instruction's arguments into a byte buffer in exactly the order the program expects, plus another that reads an account's raw data back into a typed object. It works until the program changes. Add a field to an account, reorder an instruction's arguments, and your hand-rolled serialization silently drifts out of sync with the on-chain layout. The compiler can't catch it, because nothing tells TypeScript what the program's binary layout actually is. A Solana program client generated from the IDL closes that gap, and [Codama](https://github.com/codama-idl/codama) is the tool the ecosystem has standardized on for doing it.
+
+## The cost of hand-written instruction code
+
+Solana's execution model makes this drift especially easy to miss. Programs are stateless: an instruction carries a program ID, a serialized data blob, and an explicit list of accounts. The program reads the blob and the accounts, runs, and writes back. Nothing in that wire format is self-describing. If your client encodes a `u64` amount where the program now expects a `u32` discriminator first, the transaction either fails with an opaque error or, worse, succeeds against the wrong account. None of this surfaces in a type check, because the bytes are just bytes.
+
+The IDL — the Interface Definition Language file your build emits — is the one artifact that *does* describe the layout: every instruction's argument types, account ordering, and the byte shape of each account struct. Codama treats that file as the source of truth and generates the encoding and decoding code from it, so the client and the program move together by construction.
+
+## What Codama derives from an IDL
+
+Codama parses a program's IDL into a standardized node tree, then renders a client from those nodes. Install it and point it at your IDL:
+
+```sh
+pnpm install codama
+codama init
+```
+
+`codama init` writes a `codama.json`. Set the `idl` path to the file your Anchor (or native) build produces, then generate:
+
+```json
+{
+  "idl": "target/idl/my_program.json",
+  "scripts": {
+    "js": ["@codama/renderers-js"]
+  }
+}
+```
+
+```sh
+codama run js
+```
+
+The `@codama/renderers-js` renderer emits a JavaScript client built for `@solana/kit`. For each instruction in the IDL you get a builder named `get<Instruction>Instruction(input)` that takes typed arguments and named accounts and returns a fully encoded instruction object. For each account type you get a `fetch<Account>(rpc, address)` helper plus a matching decoder, so reading state back is one typed call instead of a manual `Buffer` slice. You also get the program's address as a constant and helpers for any PDAs the IDL declares. Rename a field in the program, regenerate, and the call sites that no longer match fail to compile — which is the entire point.
+
+## Wiring a generated builder into a Kit transaction
+
+The generated builders are deliberately narrow: they produce instructions and decode accounts, and nothing else. Connecting to the network, composing a versioned transaction, and signing stay in `@solana/kit`. That separation means a generated instruction drops straight into the standard Kit pipe:
+
+```ts
+import {
+  pipe,
+  createTransactionMessage,
+  setTransactionMessageFeePayerSigner,
+  setTransactionMessageLifetimeUsingBlockhash,
+  appendTransactionMessageInstructions,
+} from '@solana/kit'
+import { getInitializeInstruction } from './generated' // Codama output
+
+const instruction = getInitializeInstruction({
+  account: newAccount,   // a named account from the IDL
+  authority: signer,
+  amount: 1_000_000n,    // a typed argument from the IDL
+})
+
+const message = pipe(
+  createTransactionMessage({ version: 0 }),
+  (m) => setTransactionMessageFeePayerSigner(signer, m),
+  (m) => setTransactionMessageLifetimeUsingBlockhash(latestBlockhash, m),
+  (m) => appendTransactionMessageInstructions([instruction], m),
+)
+```
+
+The transaction stays a v0 (versioned) message, so it remains compatible with address lookup tables, and you can prepend a compute-budget instruction the same way you'd add any other. Because the instruction's accounts and arguments are typed, a wrong account or a missing argument is a compile error, not a runtime revert you discover on devnet.
+
+## Where this leaves your end-to-end tests
+
+Generated clients shrink the gap between code and program, but they don't prove the *user-facing* flow — connecting Phantom, reviewing the transaction, and signing — actually works in a browser. The IDL guarantees the bytes are correct; it says nothing about whether the wallet popup renders or whether your UI handles a rejection. That seam is what an E2E tool like [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom) covers: it drives a real Phantom extension inside Playwright so your test composes a transaction with the generated builder, then confirms the actual signing flow end to end.
+
+A practical habit: regenerate the client on every program build and commit the output. Then a changed account layout shows up as a diff in code review and a failed type check, instead of a transaction that fails in front of a user. The IDL was always the contract — Codama just makes your client honor it automatically.
