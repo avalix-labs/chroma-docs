@@ -1,0 +1,79 @@
+---
+title: "PAPI vs Dedot: Picking a Polkadot Client Library Now That @polkadot/api Is Frozen"
+description: "@polkadot/api is frozen. Compare PAPI and Dedot — descriptors, typed APIs, light clients, and signing — to pick the right Polkadot client library."
+date: 2026-06-22
+author: Chroma Team
+---
+
+{/* Suggested meta description (≤155 chars): @polkadot/api is frozen. Compare PAPI and Dedot — descriptors, typed APIs, light clients, and signing — to pick the right Polkadot client library. */}
+
+If you maintain a Polkadot dApp, you have a decision on your roadmap whether you have written it down or not. `@polkadot/api`, the library most Substrate frontends were built on, is in maintenance mode, and the official docs now point new projects at one of two successors: **Polkadot-API (PAPI)** or **Dedot**. Both are modern, typed, tree-shakable, and actively maintained. Both are recommended. That is exactly what makes the choice hard — so this is a practical comparison of the two Polkadot client libraries, decided by the code you will actually write.
+
+## Why the choice exists now
+
+`@polkadot/api` was class-based and dynamic. You connected, and the runtime metadata was decoded at runtime to build `api.tx`, `api.query`, and `api.consts` on the fly. That was flexible, but it shipped a large bundle and gave you types that were loose at best. The metadata is fetched at startup, so your editor could not tell you whether `balances.transferKeepAlive` even existed until the app was running.
+
+PAPI and Dedot both fix this the same way in principle — generate types from a chain's metadata ahead of time — but they make opposite bets on ergonomics. Knowing where they diverge is the whole decision.
+
+## PAPI: light-client-first and metadata-typed
+
+PAPI treats the [light client](https://docs.polkadot.com/) as a first-class transport, not an afterthought. You generate descriptors with a CLI step (`papi add dot -n polkadot`), which pulls metadata and writes a typed package you import from `@polkadot-api/descriptors`. From there the API is fully typed and leans toward a fresh, PascalCase surface:
+
+```ts
+import { createClient } from "polkadot-api"
+import { getWsProvider } from "polkadot-api/ws-provider/web"
+import { dot } from "@polkadot-api/descriptors"
+
+const client = createClient(getWsProvider("wss://rpc.polkadot.io"))
+const api = client.getTypedApi(dot)
+
+// Storage read — note the PascalCase pallet and item
+const { data } = await api.query.System.Account.getValue(address)
+
+// A transfer, submitted with a PolkadotSigner
+const tx = api.tx.Balances.transfer_keep_alive({ dest, value: 1_000_000_000_000n })
+await tx.signAndSubmit(polkadotSigner)
+```
+
+Two things stand out. First, `createClient(getWsProvider(...))` swaps cleanly to `getSmProvider(...)` to run against an in-browser smoldot light client — no infrastructure change to your queries. Second, PAPI exposes both Promise and Observable APIs, so reactive UIs can subscribe to storage instead of polling. The cost is a mental reset: the descriptor workflow and the `getValue()` / `signAndSubmit()` naming are new, and an injected extension has to be adapted into a `PolkadotSigner` (via `@polkadot-api/pjs-signer`) before it can sign.
+
+## Dedot: familiar ergonomics, smaller footprint
+
+Dedot makes the opposite bet. It keeps the `@polkadot/api` shape developers already know — camelCase pallets, `client.query`, `client.tx`, `signAndSend` — while delivering the lean, tree-shakable bundle and the strict types that the old library lacked. Types for major chains ship prebuilt in `@dedot/chaintypes`, and its CLI generates them for any chain you point it at.
+
+```ts
+import { DedotClient, WsProvider } from "dedot"
+import type { PolkadotApi } from "@dedot/chaintypes"
+
+const client = await DedotClient.new<PolkadotApi>(new WsProvider("wss://rpc.polkadot.io"))
+
+// Storage read — camelCase, like @polkadot/api
+const account = await client.query.system.account(address)
+
+// A transfer, signed by an injected extension
+await client.tx.balances
+  .transferKeepAlive(dest, 1_000_000_000_000n)
+  .signAndSend(senderAddress, { signer }, ({ status }) => {
+    if (status.type === "Finalized") console.log("done")
+  })
+```
+
+If your team has muscle memory from `@polkadot/api`, this reads almost unchanged: `signAndSend(address, { signer }, callback)` takes the injected extension's signer directly, and the pallet/method names are identical to what you already call. Dedot also supports smoldot through its own provider, so light-client mode is not exclusive to PAPI.
+
+## The same transfer, two philosophies
+
+Look at the two snippets side by side and the trade-off is concrete, not abstract:
+
+- **Naming.** PAPI: `api.query.System.Account.getValue(...)`. Dedot: `client.query.system.account(...)`. One asks you to learn a new surface; the other preserves the old one.
+- **Signing.** PAPI hands a `PolkadotSigner` to `signAndSubmit`. Dedot passes `(address, { signer })` to `signAndSend` — the exact `@polkadot/api` calling convention.
+- **Reactivity.** PAPI ships Observables out of the box and a `reactive-dot` ecosystem for React. Dedot stays Promise-first with `typink` for React bindings.
+
+Neither is faster or safer in a way that should decide it for you. The honest tiebreaker is migration cost versus a clean break: Dedot minimizes the diff against your existing `@polkadot/api` code, while PAPI asks for more rewriting up front in exchange for a transport model built around light clients.
+
+## How to choose — and the one thing neither changes
+
+A reasonable default: **migrating an existing `@polkadot/api` dApp under time pressure? Reach for Dedot** — the call sites barely move. **Building something new, or you want light-client-first as a hard requirement? PAPI's descriptor model rewards the investment.** Either way, generate types from real chain metadata and delete the runtime guesswork the old library left in your editor.
+
+One thing survives the choice entirely: the **signing boundary**. Whichever library builds the extrinsic, the bytes handed to the Polkadot.js or Talisman extension — the decoded call the user reviews and approves — are the same. That is the part worth pinning down with an end-to-end test before you migrate. [@avalix/chroma](https://github.com/avalix-labs/chroma) drives the real extension in Playwright, so a `approveTx()` / `rejectTx()` test asserts on what your dApp *displays and does*, not on PAPI or Dedot call objects. Swap the library underneath it and a green test means your users see no difference.
+
+Pick the library that matches your migration appetite, type everything from metadata, and keep one test on the wallet boundary so the swap stays boring.
