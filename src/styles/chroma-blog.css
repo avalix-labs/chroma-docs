@@ -162,3 +162,10 @@
 .chroma-home .article hr.a-end { margin: 56px 0 32px; border: none; height: 1px; background: var(--line); }
 .chroma-home .article .a-foot { display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 12px; }
 .chroma-home .article .a-foot .back { margin: 0; }
+
+/* Related posts — reuses the blog index card grid inside the article column */
+.chroma-home .article .related { margin-top: 64px; }
+.chroma-home .article .related .related-title {
+  font-size: 14px; text-transform: uppercase; letter-spacing: 0.08em;
+  color: var(--ink-3); font-weight: 600; margin: 0 0 18px;
+}
