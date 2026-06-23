@@ -32,6 +32,7 @@
   color: var(--ink-2); background: var(--bg); border: 1px solid var(--line);
   padding: 6px 14px; border-radius: 100px; cursor: pointer; transition: all .14s ease;
   display: inline-flex; align-items: center; gap: 7px; white-space: nowrap;
+  text-decoration: none;
 }
 .chroma-home .chip:hover { border-color: var(--ink-4); color: var(--ink); }
 .chroma-home .chip.active { background: var(--ink); color: #fff; border-color: var(--ink); }
@@ -52,17 +53,23 @@
 
 /* ---------- Pagination ---------- */
 .chroma-home .pager-nav { display: flex; justify-content: center; align-items: center; gap: 6px; margin: 36px 0 4px; flex-wrap: wrap; }
+.chroma-home .pager-nav a,
 .chroma-home .pager-nav button {
   min-width: 40px; height: 40px; padding: 0 12px;
   font-family: var(--font-sans); font-weight: 600; font-size: 14.5px;
   color: var(--ink-2); background: var(--bg); border: 1px solid var(--line);
   border-radius: var(--r-md); cursor: pointer; transition: all .14s ease;
   display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+  text-decoration: none;
 }
+.chroma-home .pager-nav a:hover,
 .chroma-home .pager-nav button:hover:not(:disabled) { border-color: var(--accent-line); color: var(--ink); background: var(--accent-soft); }
+.chroma-home .pager-nav a.active,
 .chroma-home .pager-nav button.active { background: var(--ink); color: #fff; border-color: var(--ink); }
+.chroma-home .pager-nav a.active:hover,
 .chroma-home .pager-nav button.active:hover { background: var(--ink); color: #fff; }
-.chroma-home .pager-nav button:disabled { opacity: .38; cursor: default; }
+.chroma-home .pager-nav button:disabled,
+.chroma-home .pager-nav .pager-disabled { opacity: .38; cursor: default; pointer-events: none; }
 .chroma-home .pager-nav .ellipsis { color: var(--ink-4); padding: 0 2px; align-self: flex-end; }
 
 /* ---------- Post grid ---------- */

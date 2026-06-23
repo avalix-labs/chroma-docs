@@ -148,7 +148,7 @@ function BlogPostPage() {
       <ChromaNav active="blog" />
 
       <article className="article">
-        <Link className="back" to="/blog">
+        <Link className="back" to="/blog" search={{}}>
           ← All posts
         </Link>
 
@@ -211,7 +211,7 @@ function BlogPostPage() {
 
         <hr className="a-end" />
         <div className="a-foot">
-          <Link className="back" to="/blog">
+          <Link className="back" to="/blog" search={{}}>
             ← All posts
           </Link>
           <a
