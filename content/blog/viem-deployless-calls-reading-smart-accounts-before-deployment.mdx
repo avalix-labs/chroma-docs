@@ -1,0 +1,60 @@
+---
+title: "Reading a Smart Account Before It Exists: viem's Deployless Calls"
+description: "Use viem deployless calls to read state from undeployed contracts and ERC-4337 smart accounts via bytecode or a counterfactual factory address."
+date: 2026-06-23
+author: Chroma Team
+---
+
+Account abstraction made one pattern common that classic EVM tooling never planned for: reading state from a contract that does not exist on-chain yet. An ERC-4337 smart account has a deterministic address the moment you know its factory and salt, but the bytecode only lands after the first `UserOperation` is mined. So your frontend wants to display the account's owner, its nonce, or its token balance — and an ordinary `eth_call` to that address returns empty, because there is no code at the address to execute. This is the exact gap viem's **deployless calls** close, and most teams reach for awkward workarounds before discovering the feature already shipped in the library they use.
+
+## Why a normal read returns nothing
+
+`eth_call` runs against the state at a given block. If an address has no deployed bytecode, there is nothing to run, so a `readContract` against a counterfactual smart account address resolves to `0x` and viem throws a decode error. The contract is *defined* — you have the factory, the constructor args, the CREATE2 salt — it is just not *deployed*. Developers usually patch around this by deploying the account early on a fork, or by reimplementing the address-derivation math off-chain and hardcoding expected values into tests. Both are brittle: the first changes the very state you are trying to observe, and the second drifts the moment the factory changes.
+
+The cleaner approach is to ask the node to *temporarily* materialize the contract for the duration of a single read, then throw the result away. The chain state never changes; you just get the return value as if the contract were live.
+
+## Two ways viem does deployless reads
+
+viem exposes deployless calls on both the low-level `call` action and the higher-level `readContract`, with two methods depending on what you have.
+
+**Method 1 — you have the bytecode.** Pass the compiled bytecode through `code` and viem executes the function against it directly, no address required:
+
+```ts
+const name = await publicClient.readContract({
+  abi: parseAbi(['function name() view returns (string)']),
+  code: '0x60a06040...', // full creation bytecode
+  functionName: 'name',
+})
+```
+
+This is ideal when you have just compiled a contract and want to read a constant or a constructor-derived value without spending a deployment. `code` is the creation bytecode, so any logic that runs in the constructor is reflected in what you read back.
+
+**Method 2 — you have a factory.** For ERC-4337 accounts you rarely hold the bytecode; you hold a factory and the calldata that would deploy the account. Pass `factory` and `factoryData`, and viem derives the counterfactual address, simulates the deploy, and runs your call against it — all inside one `eth_call`:
+
+```ts
+const entryPoint = await publicClient.readContract({
+  address: '0xAccountCounterfactualAddress',
+  abi: parseAbi(['function entryPoint() view returns (address)']),
+  functionName: 'entryPoint',
+  factory: '0xE8Df82fA4E10e6A12a9Dab552bceA2acd26De9bb',
+  factoryData: encodeFunctionData({
+    abi: parseAbi(['function createAccount(address owner, uint256 salt)']),
+    functionName: 'createAccount',
+    args: [owner, 0n],
+  }),
+})
+```
+
+Here `address` is the counterfactual account, `factory` is the smart-account factory, and `factoryData` is the exact `createAccount` call the bundler would use to deploy it. viem returns `entryPoint()` as though the account already existed. The same parameters work on `publicClient.call(...)` when you want raw bytes back instead of decoded values — there you pass the target address as `to` alongside `factory`, `factoryData`, and the encoded `data`.
+
+A practical note: this is read-only by construction. The deploy is simulated, never broadcast, so there is no gas cost beyond the `eth_call` and no risk of accidentally deploying an account you only meant to inspect.
+
+## Where this fits in a testing workflow
+
+Deployless reads are most useful exactly where smart-account flows are hardest to verify: the window between "user has an address" and "account is on-chain." In a test, you can assert that a freshly derived account reports the right owner and a zero nonce *before* the first transaction, then assert the same reads change after the account is deployed — without polluting setup by deploying it yourself.
+
+That undeployed-state check is the unit-level half of the picture. The other half is the browser: a real user opening MetaMask, approving the first `UserOperation`, and watching the account come into existence. That end-to-end leg is what [@avalix/chroma](https://github.com/avalix-labs/chroma) drives in a real browser — importing a seed phrase, authorizing the dApp, and confirming the transaction through the actual MetaMask popup — so your deployless reads cover the pre-deploy assertions while the E2E run covers the deploy itself. The two layers describe the same lifecycle from opposite ends.
+
+## Takeaway
+
+If your app touches ERC-4337, CREATE2 vaults, or any counterfactual deployment, stop deploying contracts just to read from them. `code` handles the case where you hold bytecode; `factory` plus `factoryData` handles the case where you hold a deployer. Both let an `eth_call` answer questions about a contract that does not exist yet — which, in an account-abstraction world, is a question you will ask constantly.
