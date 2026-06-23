@@ -22,7 +22,7 @@ export function ChromaNav({ active = 'home' }: { active?: ChromaSection }) {
           <Link to="/docs/$" params={{ _splat: 'quick-start' }}>
             Quick start
           </Link>
-          <Link to="/blog" className={active === 'blog' ? 'active' : undefined}>
+          <Link to="/blog" search={{}} className={active === 'blog' ? 'active' : undefined}>
             Blog
           </Link>
         </div>
@@ -99,7 +99,7 @@ export function ChromaFooter() {
           <h5>Project</h5>
           <ul>
             <li>
-              <Link to="/blog">Blog</Link>
+              <Link to="/blog" search={{}}>Blog</Link>
             </li>
             <li>
               <a href="https://github.com/avalix-labs/chroma" target="_blank" rel="noopener noreferrer">

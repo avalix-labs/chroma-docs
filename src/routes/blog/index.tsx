@@ -8,11 +8,62 @@ import {
   type CategoryKey,
   categorize,
 } from '@/lib/blog-categories';
+import { SITE_URL } from '@/lib/site';
 import { blog } from '@/lib/source';
 import chromaBlogCss from '@/styles/chroma-blog.css?url';
 import chromaHomeCss from '@/styles/chroma-home.css?url';
 
 const PAGE_SIZE = 9;
+const BLOG_DESCRIPTION =
+  'Releases, engineering deep-dives and practical guides from the team building Chroma.';
+const BLOG_OG_IMAGE = `${SITE_URL}/og/blog`;
+
+type BlogSearch = {
+  page?: number;
+  category?: CategoryKey;
+};
+
+const CATEGORY_KEYS = new Set<string>(CATEGORIES.map((c) => c.key));
+
+function parseBlogSearch(search: Record<string, unknown>): BlogSearch {
+  const result: BlogSearch = {};
+
+  if (typeof search.page === 'string' || typeof search.page === 'number') {
+    const parsed = Number(search.page);
+    if (Number.isFinite(parsed) && parsed >= 1 && parsed !== 1) {
+      result.page = Math.floor(parsed);
+    }
+  }
+
+  const categoryRaw = search.category;
+  if (typeof categoryRaw === 'string' && CATEGORY_KEYS.has(categoryRaw)) {
+    result.category = categoryRaw as CategoryKey;
+  }
+
+  return result;
+}
+
+function resolveBlogSearch(search: BlogSearch) {
+  return {
+    page: search.page ?? 1,
+    category: (search.category ?? 'all') as 'all' | CategoryKey,
+  };
+}
+
+function blogListSearch(category: 'all' | CategoryKey, page: number): BlogSearch {
+  const result: BlogSearch = {};
+  if (category !== 'all') result.category = category;
+  if (page > 1) result.page = page;
+  return result;
+}
+
+function blogListUrl(category: 'all' | CategoryKey, page: number) {
+  const params = new URLSearchParams();
+  if (category !== 'all') params.set('category', category);
+  if (page > 1) params.set('page', String(page));
+  const qs = params.toString();
+  return `${SITE_URL}/blog${qs ? `?${qs}` : ''}`;
+}
 
 const getBlogPosts = createServerFn({ method: 'GET' }).handler(async () => {
   return blog
@@ -45,21 +96,57 @@ const getBlogPosts = createServerFn({ method: 'GET' }).handler(async () => {
 type BlogPost = Awaited<ReturnType<typeof getBlogPosts>>[number];
 
 export const Route = createFileRoute('/blog/')({
+  validateSearch: parseBlogSearch,
   loader: () => getBlogPosts(),
   component: BlogPage,
-  head: () => ({
-    meta: [
-      { title: 'Blog | @avalix/chroma' },
-      {
-        name: 'description',
-        content: 'Releases, engineering deep-dives and practical guides from the team building Chroma.',
-      },
-    ],
-    links: [
-      { rel: 'stylesheet', href: chromaHomeCss },
-      { rel: 'stylesheet', href: chromaBlogCss },
-    ],
-  }),
+  head: ({ match, loaderData }) => {
+    const posts = loaderData ?? [];
+    const { page, category } = resolveBlogSearch(match.search);
+    const filteredCount =
+      category === 'all' ? posts.length : posts.filter((p) => p.category === category).length;
+    const totalPages = Math.max(1, Math.ceil(filteredCount / PAGE_SIZE));
+    const safePage = Math.min(Math.max(1, page), totalPages);
+
+    const titleParts = ['Blog'];
+    if (category !== 'all') titleParts.unshift(CATEGORY_LABEL[category]);
+    if (safePage > 1) titleParts.push(`Page ${safePage}`);
+    const title = `${titleParts.join(' · ')} | @avalix/chroma`;
+
+    const description =
+      category === 'all'
+        ? BLOG_DESCRIPTION
+        : `${CATEGORY_LABEL[category]} posts from the Chroma blog — ${BLOG_DESCRIPTION.toLowerCase()}`;
+
+    const url = blogListUrl(category, safePage);
+    const prevPage = safePage > 1 ? safePage - 1 : undefined;
+    const nextPage = safePage < totalPages ? safePage + 1 : undefined;
+
+    return {
+      meta: [
+        { title },
+        { name: 'description', content: description },
+        { property: 'og:title', content: title.replace(' | @avalix/chroma', '') },
+        { property: 'og:description', content: description },
+        { property: 'og:type', content: 'website' },
+        { property: 'og:url', content: url },
+        { property: 'og:image', content: BLOG_OG_IMAGE },
+        { property: 'og:image:width', content: '1200' },
+        { property: 'og:image:height', content: '630' },
+        { property: 'og:image:alt', content: 'The Chroma blog — Notes from the test runner.' },
+        { name: 'twitter:card', content: 'summary_large_image' },
+        { name: 'twitter:title', content: title.replace(' | @avalix/chroma', '') },
+        { name: 'twitter:description', content: description },
+        { name: 'twitter:image', content: BLOG_OG_IMAGE },
+      ],
+      links: [
+        { rel: 'canonical', href: url },
+        ...(prevPage ? [{ rel: 'prev', href: blogListUrl(category, prevPage) }] : []),
+        ...(nextPage ? [{ rel: 'next', href: blogListUrl(category, nextPage) }] : []),
+        { rel: 'stylesheet', href: chromaHomeCss },
+        { rel: 'stylesheet', href: chromaBlogCss },
+      ],
+    };
+  },
 });
 
 function formatDate(iso?: string) {
@@ -83,9 +170,8 @@ function pagerItems(pages: number, page: number): Array<number | '…'> {
 
 function BlogPage() {
   const posts = Route.useLoaderData();
-  const [active, setActive] = useState<'all' | CategoryKey>('all');
+  const { page, category: active } = resolveBlogSearch(Route.useSearch());
   const [query, setQuery] = useState('');
-  const [page, setPage] = useState(1);
   const toolbarRef = useRef<HTMLDivElement>(null);
 
   const counts = useMemo(() => {
@@ -112,20 +198,15 @@ function BlogPage() {
   const end = Math.min(start + PAGE_SIZE, total);
   const visible = filtered.slice(start, end);
 
-  const onFilter = (key: 'all' | CategoryKey) => {
-    setActive(key);
-    setPage(1);
-  };
-  const onSearch = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setQuery(e.target.value);
-    setPage(1);
-  };
-  const goTo = (p: number) => {
-    setPage(p);
+  const scrollToToolbar = () => {
     const el = toolbarRef.current;
     if (!el) return;
     const top = el.getBoundingClientRect().top + window.scrollY - 72;
     if (window.scrollY > top) window.scrollTo({ top, behavior: 'smooth' });
+  };
+
+  const onSearch = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setQuery(e.target.value);
   };
 
   const countLabel = (() => {
@@ -145,30 +226,29 @@ function BlogPage() {
         <div className="blog-wrap">
           <p className="eyebrow">The Chroma blog</p>
           <h1>Notes from the test runner.</h1>
-          <p>Releases, engineering deep-dives and practical guides from the team building Chroma.</p>
+          <p>{BLOG_DESCRIPTION}</p>
         </div>
       </header>
 
       <div className="blog-wrap">
-        {/* Toolbar: category filter + search */}
         <div className="blog-toolbar" ref={toolbarRef}>
           <div className="filter-chips">
-            <button
-              type="button"
+            <Link
+              to="/blog"
+              search={{}}
               className={active === 'all' ? 'chip active' : 'chip'}
-              onClick={() => onFilter('all')}
             >
               All <span className="cnt">{counts.all}</span>
-            </button>
+            </Link>
             {CATEGORIES.filter((cat) => counts[cat.key] > 0).map((cat) => (
-              <button
+              <Link
                 key={cat.key}
-                type="button"
+                to="/blog"
+                search={{ category: cat.key }}
                 className={active === cat.key ? 'chip active' : 'chip'}
-                onClick={() => onFilter(cat.key)}
               >
                 {cat.label} <span className="cnt">{counts[cat.key]}</span>
-              </button>
+              </Link>
             ))}
           </div>
           <div className="search">
@@ -203,42 +283,55 @@ function BlogPage() {
           </div>
         )}
 
-        {pages > 1 && (
+        {pages > 1 && !query.trim() && (
           <nav className="pager-nav" aria-label="Blog pages">
-            <button
-              type="button"
-              onClick={() => goTo(safePage - 1)}
-              disabled={safePage === 1}
-              aria-label="Previous page"
-            >
-              <ChevronLeft /> Prev
-            </button>
+            {safePage > 1 ? (
+              <Link
+                to="/blog"
+                search={blogListSearch(active, safePage - 1)}
+                aria-label="Previous page"
+                onClick={scrollToToolbar}
+              >
+                <ChevronLeft /> Prev
+              </Link>
+            ) : (
+              <span className="pager-disabled" aria-hidden="true">
+                <ChevronLeft /> Prev
+              </span>
+            )}
             {pagerItems(pages, safePage).map((n, i) =>
               n === '…' ? (
                 <span key={`e${i}`} className="ellipsis">
                   …
                 </span>
               ) : (
-                <button
-                  type="button"
+                <Link
                   key={n}
+                  to="/blog"
+                  search={blogListSearch(active, n)}
                   className={n === safePage ? 'active' : undefined}
-                  onClick={() => goTo(n)}
                   aria-label={`Page ${n}`}
                   aria-current={n === safePage ? 'page' : undefined}
+                  onClick={scrollToToolbar}
                 >
                   {n}
-                </button>
+                </Link>
               ),
             )}
-            <button
-              type="button"
-              onClick={() => goTo(safePage + 1)}
-              disabled={safePage === pages}
-              aria-label="Next page"
-            >
-              Next <ChevronRight />
-            </button>
+            {safePage < pages ? (
+              <Link
+                to="/blog"
+                search={blogListSearch(active, safePage + 1)}
+                aria-label="Next page"
+                onClick={scrollToToolbar}
+              >
+                Next <ChevronRight />
+              </Link>
+            ) : (
+              <span className="pager-disabled" aria-hidden="true">
+                Next <ChevronRight />
+              </span>
+            )}
           </nav>
         )}
 
