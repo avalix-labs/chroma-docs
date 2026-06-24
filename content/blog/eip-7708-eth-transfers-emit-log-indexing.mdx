@@ -1,0 +1,63 @@
+---
+title: "EIP-7708: When Native ETH Transfers Finally Emit a Log"
+description: "EIP-7708 makes native ETH transfers emit a Transfer log, so eth_getLogs can track ETH balances the same way it already tracks ERC-20 tokens."
+date: 2026-06-24
+author: Chroma Team
+---
+
+{/* Suggested meta description (≤155 chars): EIP-7708 makes native ETH transfers emit a Transfer log, so eth_getLogs can track ETH balances like it already tracks ERC-20 tokens. */}
+
+If you have ever built an indexer, an accounting dashboard, or a deposit-detection backend, you already know the asymmetry: tracking an ERC-20 token is easy, and tracking native ETH is a chore. **EIP-7708** proposes to fix that by making every value-bearing ETH transfer emit a log — the same `Transfer` event shape your code already parses for tokens. It is a small change to the protocol with an outsized effect on how you observe chain state. Here is what it does and why it matters for the tools you build around the EVM.
+
+## Why native ETH is invisible to event logs today
+
+An ERC-20 transfer is a contract call, and the contract emits a `Transfer(address,address,uint256)` event. That event lands in the transaction's logs, and `eth_getLogs` lets you query it by topic and by indexed sender or recipient. This is why every indexer treats token movements as a first-class, filterable stream.
+
+Native ETH has no such luck. When ETH moves — a plain transaction, a `CALL` carrying value, a `SELFDESTRUCT` beneficiary payout, a contract endowment via `CREATE` — nothing is logged. The value transfer happens inside the state transition, but it leaves no event behind.
+
+The practical consequence is that to know whether an address received ETH, you cannot just filter logs. You have to either diff balances block by block or trace every transaction's internal calls. Tracing requires `debug_traceTransaction` or an archive node with `trace_` methods, which many providers gate or rate-limit. This is exactly why early exchanges struggled to credit deposits from smart-contract wallets: the ETH arrived via an internal call that produced no observable event. Anyone tracking ETH for an account today is reconstructing information the protocol simply never surfaced.
+
+## The log EIP-7708 emits
+
+EIP-7708 closes the gap by emitting a log on any nonzero-value ETH transfer. The log deliberately reuses the ERC-20 `Transfer` shape so existing tooling can parse it with no new ABI:
+
+- **Emitting address:** `0xfffffffffffffffffffffffffffffffffffffffe`, the system address (the same one EIP-4788 uses for protocol-level writes).
+- **Topic 0:** `0xddf252ad...b3ef`, the `keccak256` of `Transfer(address,address,uint256)` — byte-for-byte identical to the ERC-20 signature.
+- **Topic 1 / Topic 2:** the source and destination addresses, zero-padded.
+- **Data:** the amount in wei, as a big-endian `uint256`.
+
+The triggers are every place value moves: top-level transactions to a different account, value-bearing `CALL`s at the moment the transfer executes, `SELFDESTRUCT` payouts, and `CREATE`/`CREATE2` endowments. The EIP is currently in **Draft** and is part of the cluster of observability proposals being discussed for a future Ethereum upgrade, so treat the details as stable-but-not-final.
+
+One nuance worth internalizing: because the signature is identical to ERC-20's, the *only* thing distinguishing a native-ETH log from a token log is the emitting address. Native ETH transfers come from the system address; token transfers come from the token contract. Filter on that, or you will count WETH and ETH as the same thing.
+
+## What changes for indexers and dApp backends
+
+The headline win is that ETH balance history becomes a log query. With viem, the same `getLogs` you already use for tokens now works for native ETH:
+
+```ts
+import { createPublicClient, http, parseAbiItem } from 'viem'
+import { mainnet } from 'viem/chains'
+
+const client = createPublicClient({ chain: mainnet, transport: http() })
+
+const transfer = parseAbiItem(
+  'event Transfer(address indexed from, address indexed to, uint256 value)'
+)
+
+const ethReceived = await client.getLogs({
+  address: '0xfffffffffffffffffffffffffffffffffffffffe', // system address = native ETH
+  event: transfer,
+  args: { to: '0xYourAccount' },
+  fromBlock: 'earliest',
+})
+```
+
+Line by line: the `address` filter pins the query to the system address so you get native ETH and not token transfers; `parseAbiItem` reuses the canonical `Transfer` ABI; the `args.to` filter leans on the indexed recipient topic so the node does the filtering, not your code; and `fromBlock: 'earliest'` walks history. The result is a complete inbound-ETH stream for an account without a single trace call.
+
+For backends, this collapses an entire class of infrastructure. Deposit detection no longer needs trace access or per-block balance diffing — it needs a log subscription. Accounting and reconciliation pipelines can treat ETH and tokens through one code path. And light clients get closer to viable, because balance changes become provable from logs instead of requiring full state access.
+
+## Testing the flows that depend on it
+
+If your dApp tells a user "you received 0.5 ETH" or credits an internal balance off an inbound transfer, that path is worth an end-to-end test — and it is easy to get subtly wrong, because a transfer triggered deep inside a contract call behaves differently from a plain send. End-to-end wallet tests with [@avalix/chroma](https://chroma.avalix.dev) let you drive a real send through MetaMask and assert your UI reflects the receipt, so the day this log lands you can confirm your detection logic reads it instead of silently falling back to the old balance-diff path.
+
+The takeaway: EIP-7708 does not change how ETH moves, only how visible the movement is. But observability is most of what indexing, accounting, and deposit detection actually are. When it ships, the cleanest migration is to delete trace-based reconstruction and let `eth_getLogs` do the work it always should have.
