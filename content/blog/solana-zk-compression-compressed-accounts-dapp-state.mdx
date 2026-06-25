@@ -1,0 +1,47 @@
+---
+title: "ZK Compression on Solana: How Compressed Accounts Move State Off-Chain Without Losing Verifiability"
+description: "ZK compression on Solana keeps account data off-chain under an on-chain Merkle root, cutting rent up to 99%. How compressed accounts read and write."
+date: 2026-06-25
+author: Chroma Team
+---
+
+{/* Suggested meta description (≤155 chars): ZK compression on Solana keeps account data off-chain under an on-chain Merkle root, cutting rent up to 99%. How compressed accounts read and write. */}
+
+Every account on Solana pays rent. A single token account or PDA is cheap, but a dApp that mints state *per user* — a position per trader, an attestation per identity, a leaf per game player — multiplies that rent by its user count. At scale the rent-exempt minimum becomes the dominant cost of onboarding, and it is paid up front, per account, before anyone has done anything useful. ZK compression is Solana's answer: keep account data off-chain under a single on-chain Merkle root, and prove an account's current state with a small zero-knowledge proof whenever you touch it. This post walks through what a compressed account actually is, how reads and writes differ from regular accounts, and what changes in your client code.
+
+## What a compressed account actually is
+
+A regular Solana account is a rent-funded entry in the validator's account database with five fields: `lamports`, `data`, `owner`, `executable`, and `rent_epoch`. A compressed account keeps the familiar shape — an `owner`, `lamports`, `data`, and an optional `address` — but it does not live in that database. Instead, a hash of the account sits as a leaf in a **state Merkle tree**, and only the tree's 32-byte root is stored on-chain. The full account data lives in the ledger (the transaction that last wrote it), and an indexer reconstructs the current state from chain history.
+
+Two tree types do the work. State trees hold the leaves that represent account state. **Address trees** track unique addresses, so a compressed account can have a stable, collision-checked address when it needs one — though many compressed accounts, such as compressed token accounts, are identified purely by their data hash and skip the address entirely. Because thousands of accounts collapse into one root, you pay rent for the tree, not for each account. That is where the saving comes from: the protocol advertises up to roughly 99% lower cost than rent-funding each account directly, and on the order of 1000x for high-volume account types.
+
+## Reads go through an indexer, not getAccountInfo
+
+This is the first thing that breaks naive code. `getAccountInfo` asks a validator for an entry in the account database — and a compressed account is not there. It is a leaf in a tree, with its data sitting in historical ledger calldata. To read it you query a **Photon indexer**: a service that watches every transaction touching the compression program, rebuilds the live state into a queryable database, and exposes it over an RPC surface that mirrors the regular one.
+
+The methods you reach for:
+
+- `getCompressedAccount` — fetch one compressed account by address or data hash.
+- `getCompressedTokenAccountsByOwner` — the compressed analogue of `getTokenAccountsByOwner`.
+- `getValidityProof` / `getCompressedAccountProof` — the Merkle proof material a write needs (below).
+
+In practice this means your dApp points reads at an RPC that supports the Photon methods (Helius and several others run them). A vanilla RPC returns nothing for compressed state — a confusing failure if you do not know to expect it.
+
+## Writes carry their own proof
+
+A regular instruction names the accounts it touches and the runtime loads them. A compressed write cannot do that, because the data is not in the account database for the runtime to load. So the SVM model is pushed one step further: you pass the account's current state into the instruction *explicitly*, alongside a validity proof.
+
+The flow on the client:
+
+1. Fetch the compressed accounts you are about to spend, via the indexer.
+2. Request a **validity proof** for them with `getValidityProof`. This is a succinct Groth16 proof — a constant 128 bytes regardless of how many accounts it covers — produced by a prover service.
+3. Build your instruction with the account data and the proof as instruction inputs.
+4. On-chain, the compression program verifies the proof against the current tree root, nullifies the old leaves, and appends the new ones — advancing the root.
+
+Two tradeoffs follow. Verifying the proof and re-hashing leaves costs compute units that the equivalent uncompressed write does not. And because account data *plus* proof ride inside the transaction, you spend against the 1232-byte transaction size limit — batching many compressed accounts into one transaction can overflow it even though the proof itself stays constant. The libraries that wrap all this are `@lightprotocol/stateless.js` for accounts and `@lightprotocol/compressed-token` for tokens.
+
+## What this changes for your dApp and its tests
+
+The signing flow your users see does not change: connect Phantom, review, approve. What changes is the assertion around it. A test that confirms "the position was created" by calling `getAccountInfo` on a derived address will pass against a regular account and silently find nothing against a compressed one — so post-state assertions have to move to the indexer (`getCompressedAccount`) instead. If you drive the real Phantom popup in an end-to-end test with a tool like [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom), keep the wallet half as it is and point the verification half at the Photon RPC: anchor on the compressed account's post-state, not on a regular-account read that will never resolve.
+
+Compressed accounts are not a drop-in swap — they change where state lives, how you read it, and what a write has to carry. But for any dApp whose cost scales with account count, moving that state under a Merkle root and proving it on demand is the difference between rent that grows with every user and rent that does not. Start by auditing which of your accounts are write-rarely, read-often, and numerous — those are the ones worth compressing first.
