@@ -1,0 +1,60 @@
+---
+title: "Right-Sizing Solana Compute Units: Why Over-Requesting Is About to Cost You"
+description: "Over-requesting Solana compute units already hurts scheduling, and SIMD-553 wants to price it. Measure real CU usage and set a tight limit instead."
+date: 2026-06-26
+author: Chroma Team
+---
+
+If your Solana transactions land slowly or get dropped under load, the reflex is to bump the compute unit limit "to be safe." That habit is quietly working against you. A request for more compute units than your transaction uses doesn't make it faster — it makes it a heavier object for the scheduler to place, and a new proposal, SIMD-553, wants to attach a price to the gap. This post is about measuring what your transaction actually consumes so you can stop padding the number.
+
+## What a compute unit request actually reserves
+
+Every Solana instruction is metered in compute units (CU). By default each instruction is budgeted 200,000 CU, and a whole transaction is capped at 1,400,000 CU. You override the default by prepending a `SetComputeUnitLimit` instruction from the Compute Budget program.
+
+The detail most developers miss is that the number you request is a *reservation*, not a bill. The runtime sets aside the full requested amount while scheduling the transaction into a block, even though it only charges base and priority fees afterward. So a transaction that requests 200,000 CU but consumes 40,000 still occupies a 200,000-CU slot in the block builder's accounting. Multiply that across a busy program and the block fills with reserved-but-unused space. Your honest transaction waits behind padding that nobody pays for.
+
+Because accounts are explicit inputs to every instruction on Solana and programs hold no internal state, the runtime can't infer your real cost ahead of time — it trusts your declared limit. That trust is exactly what SIMD-553 targets.
+
+## SIMD-553: putting a price on the units you don't use
+
+Today the base fee is a flat 5,000 lamports per signature, independent of how many compute units you request. There is no price signal discouraging an over-request, so the rational move has been to ask for plenty and never think about it again.
+
+SIMD-553, filed in early June 2026 and now in substantive review with Anza engineers engaged, adds a resource fee proportional to *requested* compute units, scaled by a 0.5 multiplier. The intent is narrow but consequential: make the scheduler's view of a transaction match what it actually costs, so prioritization stops being distorted by inflated limits. The proposal still needs sign-off from both Anza and Firedancer before it can merge, and open questions remain — how it interacts with Alpenglow and whether cost units are the right measurement among them — so treat the exact numbers as provisional.
+
+The direction, though, is not provisional. The era of free over-requesting is ending. The transactions that win are the ones that ask for close to what they use.
+
+## Measuring what your transaction actually consumes
+
+You don't have to guess. `@solana/kit` ships a simulation-based estimator that runs your transaction message against an RPC node and reports the units it consumed:
+
+```ts
+import {
+  createSolanaRpc,
+  estimateComputeUnitLimitFactory,
+  setTransactionMessageComputeUnitLimit,
+} from '@solana/kit';
+
+const rpc = createSolanaRpc('https://api.mainnet-beta.solana.com');
+const estimateComputeUnitLimit = estimateComputeUnitLimitFactory({ rpc });
+
+// `message` is a v0 transaction message you already built
+// with your instructions and a fee payer set.
+const units = await estimateComputeUnitLimit(message);
+
+const messageWithLimit = setTransactionMessageComputeUnitLimit(
+  Math.ceil(units * 1.1), // estimate + 10% headroom
+  message,
+);
+```
+
+Line by line: `createSolanaRpc` gives you an RPC client. `estimateComputeUnitLimitFactory({ rpc })` returns a function bound to that client. Calling it with your built transaction message simulates the transaction — if the message has no `SetComputeUnitLimit` instruction yet, the estimator adds one before simulating — and returns the consumed units. `setTransactionMessageComputeUnitLimit` then writes a tight limit back onto the message.
+
+Run this against the message you are *about* to send, not a hardcoded constant, because consumption shifts with account state: a swap through a fuller order book or a token transfer that initializes a new account costs more than the same call on a warm path.
+
+## Setting the limit with a margin (and verifying it end to end)
+
+Simulation is an estimate, not a guarantee — the real transaction can consume slightly more or less than what the node observed, since state moves between simulation and inclusion. That is why the snippet adds roughly 10% headroom rather than using the bare number. Too tight and a small state change pushes you over the limit and the transaction fails; too loose and you are back to padding. A 5–15% margin is a sane starting band; tune it per instruction by watching how often you hit the limit in practice.
+
+This is also worth pinning down in an end-to-end test, because the compute budget instruction is part of the exact bytes your user signs. Driving a real Phantom approval through Playwright with @avalix/chroma lets you assert that the transaction your dApp built — limit, priority fee, and all — is the one that reaches the wallet, instead of trusting that your client assembled it correctly.
+
+The takeaway is small and concrete: replace every hardcoded compute unit limit with a simulated estimate plus a modest margin. It already improves how your transactions schedule, and if SIMD-553 ships, the same discipline keeps you from paying for units you were never going to use.
