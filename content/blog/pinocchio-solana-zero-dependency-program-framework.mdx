@@ -1,0 +1,76 @@
+---
+title: "Pinocchio: Why Solana's Compute-Heavy Programs Are Dropping the Standard SDK"
+description: "Pinocchio is a zero-dependency Solana program framework that cuts compute units with zero-copy account parsing. How it works and when to reach for it."
+date: 2026-06-27
+author: Chroma Team
+---
+
+Solana programs pay for everything they compute. Before a single line of your handler runs, the runtime input — your program ID, the account array, and the instruction data — has to be turned into something your Rust code can read. The standard `solana-program` SDK does that work eagerly and the same way every time, copying account metadata into owned structures and wiring up a heap allocator and panic handler you may never touch. Pinocchio is a Rust framework that questions that default, and it is increasingly where Solana's hottest programs end up.
+
+If you have ever stared at a compute-unit budget that is mostly gone before your logic starts, this is the layer that explains where it went.
+
+## What Pinocchio strips out — and why that saves compute
+
+[Pinocchio](https://github.com/anza-xyz/pinocchio) is a `no_std` library for writing Solana programs with no external dependencies beyond Solana's own types. That constraint is the whole point. The conventional SDK pulls in transitive crates, sets up a bump allocator, installs a panic handler, and gives you the `msg!` logging macro — all by default. Pinocchio gives you the same on-chain program model with none of that unless you opt in.
+
+The real win is at the boundary. The standard entrypoint deserializes the runtime's input buffer into owned `AccountInfo` structures before handing them to you. Pinocchio reads the same bytes *in place* — its `AccountView` type points directly into the input buffer instead of copying account data to a new address. That is what "zero-copy" means here, and it is not a micro-optimization. In the P-Token reimplementation of SPL Token, roughly 70% of the compute reduction came from changing the entrypoint and adopting zero-copy account access alone, before any instruction logic was touched.
+
+## The entrypoint is where the savings start
+
+Here is the familiar `solana-program` shape most Solana developers know:
+
+```rust
+use solana_program::{
+    account_info::AccountInfo, entrypoint, entrypoint::ProgramResult,
+    msg, pubkey::Pubkey,
+};
+
+entrypoint!(process_instruction);
+
+pub fn process_instruction(
+    program_id: &Pubkey,
+    accounts: &[AccountInfo],
+    instruction_data: &[u8],
+) -> ProgramResult {
+    msg!("hello");
+    Ok(())
+}
+```
+
+And the Pinocchio equivalent:
+
+```rust
+use pinocchio::{AccountView, Address, entrypoint, ProgramResult};
+use solana_program_log::log;
+
+entrypoint!(process_instruction);
+
+pub fn process_instruction(
+    program_id: &Address,
+    accounts: &mut [AccountView],
+    instruction_data: &[u8],
+) -> ProgramResult {
+    log("hello");
+    Ok(())
+}
+```
+
+Three differences carry the design. `&[AccountInfo]` becomes `&mut [AccountView]` — a mutable slice of views into the runtime buffer rather than a copied, owned array. `&Pubkey` becomes `&Address`, Pinocchio's lighter address type. And `msg!` is gone, because it belongs to the dependency Pinocchio drops; logging moves to a small helper like `solana_program_log`. Same signature, same mental model — but the parsing step that used to be free-by-assumption is now explicit and cheap.
+
+## Three entrypoints, three levels of control
+
+Pinocchio exposes the entrypoint as a spectrum, not a single macro:
+
+- **`entrypoint!`** is the drop-in. It parses the input, sets up the default allocator, and installs a panic handler — the closest match to what you are migrating from.
+- **`program_entrypoint!` plus `no_allocator!`** lets you declare the entry point but skip the heap allocator entirely. If your program never allocates, you stop paying compute units to set up an allocator you do not use.
+- **`lazy_program_entrypoint!`** defers parsing altogether. It hands you an `InstructionContext` and you pull accounts on demand, which pays off for programs that often validate and early-return before touching every account.
+
+Feature flags follow the same philosophy: `alloc`, `cpi`, and `account-resize` are off by default, so you compile in only what you call. The tradeoff is honest. There is no Anchor-style account validation, no automatic discriminators, no IDL generated for you. You write more boilerplate by hand, and that surface is yours to get right.
+
+## When to reach for Pinocchio (and what your dApp tests won't notice)
+
+Most application programs do not need this. Anchor's validation, error handling, and IDL tooling are worth their compute cost when you are shipping features, not shaving microseconds. Pinocchio earns its keep on hot-path, high-frequency programs — token programs, AMMs, oracles — where the compute budget decides how many instructions fit in a transaction, or where a minimal audit surface is itself the goal.
+
+The detail worth holding onto: Pinocchio changes the *implementation*, not the *interface*. Same program ID, same instruction layout, same account ordering. A program rewritten on Pinocchio should be indistinguishable from the client's side, which makes a before-and-after regression test the cleanest proof that the rewrite changed nothing users can see. Drive that comparison at the wallet boundary — the actual Phantom connect, sign, and confirm flow rather than a mock — and a tool like [@avalix/chroma](https://chroma.avalix.dev) gives you the same E2E coverage on both builds, so a compute optimization can never quietly become a behavior change.
+
+So profile first. Measure where your compute units actually go, reach for Pinocchio where the budget is genuinely tight, and keep Anchor where ergonomics win. The framework is a scalpel, not a default — which is exactly why the programs that need it are the ones picking it up.
