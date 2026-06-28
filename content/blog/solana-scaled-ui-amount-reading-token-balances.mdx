@@ -1,0 +1,50 @@
+---
+title: "Solana Scaled UI Amount: Why Reading the Raw Balance Shows the Wrong Number"
+description: "Solana's Scaled UI Amount extension scales token balances by a mint-level multiplier. Read uiAmount, not the raw amount, or your dApp shows wrong numbers."
+date: 2026-06-28
+author: Chroma Team
+---
+
+Most Solana dApps treat a token balance as a fixed integer you divide by `10 ** decimals` to display. For ordinary SPL tokens that is correct. For tokens using the Token-2022 **Scaled UI Amount** extension it is not — and the failure is silent. The on-chain amount is real, the decimals are real, your math runs without error, and the number you show the user is wrong. With rebasing tokens, tokenized stock splits, and yield-bearing real-world assets shipping behind this extension, "balance display" has quietly become a place bugs hide.
+
+## What the multiplier changes — and what it doesn't
+
+Scaled UI Amount adds a single value to a mint: a multiplier. The displayed balance is `raw_amount × multiplier`. The raw amount stored in each token account never changes when the multiplier moves. That is the whole design — an issuer can double everyone's displayed balance (a 2-for-1 split) or accrue yield across all holders without touching a single token account or minting new supply.
+
+The mint stores a `ScaledUiAmountConfig` with four fields: an update `authority`, the current `multiplier`, a pending `new_multiplier`, and a `new_multiplier_effective_timestamp`. Issuers set the initial value at creation — with the CLI, `spl-token create-token --ui-amount-multiplier 1.5`.
+
+The critical rule for everyone *building against* such a token: **transfers and all program logic operate on raw amounts.** The multiplier is a display concern only. When you build a transfer, a swap, or a CPI, you pass raw amounts; Token-2022 never applies the multiplier to on-chain arithmetic. So you have two distinct number spaces — raw for the protocol, scaled for the human — and the bugs come from confusing them.
+
+One constraint worth knowing up front: a mint cannot enable Scaled UI Amount and Interest-Bearing Config at the same time. The Token Extension Program rejects that pairing, since both reinterpret the displayed amount.
+
+## Read `uiAmount`, never recompute it yourself
+
+The fix is small and the RPC does the work for you. `getTokenAccountBalance` (and `getAccountInfo` with the parsed encoding) returns the scaled values directly:
+
+```js
+// Solana — Token-2022, @solana/web3.js
+const { value } = await connection.getTokenAccountBalance(tokenAccount);
+
+// WRONG: ignores the mint's multiplier
+const shown = Number(value.amount) / 10 ** value.decimals;
+
+// RIGHT: already scaled by the current multiplier
+const shown = value.uiAmount;          // number, multiplier applied
+const display = value.uiAmountString;  // string — safe for large balances
+```
+
+`value.amount` is the raw integer. `value.uiAmount` and `value.uiAmountString` already include the multiplier, computed by the node against the mint's current config. Prefer `uiAmountString` for rendering — it avoids float rounding on large balances, and the recommendation is to truncate display to the token's decimals.
+
+The conversion has to run in both directions. When a user types "100" into a send field, that is a *scaled* amount; the transfer instruction needs *raw*. Don't reverse-engineer it with `value × 10 ** decimals` — that drops the multiplier and sends the wrong quantity. Use the `uiAmountToAmount` client helper (or the `UiAmountToAmount` instruction) so the conversion uses the same multiplier the node used to display the balance. If you need the config itself — to show an APY, or to label a token as rebasing — read it with `unpackMint` plus `getScaledUiAmountConfig` from `@solana/spl-token` rather than parsing the mint by hand.
+
+## The multiplier can change under you
+
+This is the part that turns a display detail into a correctness problem. `UpdateMultiplier` can apply a new value immediately or schedule it for a future Unix timestamp. Before `new_multiplier_effective_timestamp`, conversions use the old `multiplier`; at or after it, they switch to `new_multiplier` — automatically, with no transaction from your users.
+
+Two consequences follow. First, a multiplier you cached at page load goes stale the moment a scheduled update fires; re-fetch balances around any displayed effective time rather than trusting a snapshot. Second, any USD or price math must consistently use the scaled amount (`uiAmount × price`), never the raw integer — mixing the two understates or overstates value by exactly the multiplier. A position that looks flat can change in fiat terms purely because the multiplier moved, and your UI should reflect that the same way the user's wallet does.
+
+## What this means for your tests
+
+The interesting assertions are the ones a unit test with a hardcoded balance won't catch: that your UI renders `uiAmountString` and not a recomputed raw figure, that a send of "100" resolves to the correct raw amount through `uiAmountToAmount`, and that a scheduled multiplier change is reflected after its effective timestamp instead of showing a stale number. Those are end-to-end concerns — they live at the boundary between what the RPC returns and what the user sees and signs. If you exercise that boundary by driving a real Phantom popup with a tool like [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom), anchor the assertion on the displayed balance matching the wallet's own scaled figure, not on a raw read your code happened to format.
+
+The takeaway is a single discipline: for any Token-2022 mint, never derive a human-facing number from `amount` and `decimals` alone. Read `uiAmount`, convert input back through `uiAmountToAmount`, and re-fetch around effective timestamps. The protocol keeps two number spaces on purpose — your job is to never let them cross.
