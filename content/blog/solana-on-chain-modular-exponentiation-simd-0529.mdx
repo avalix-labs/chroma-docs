@@ -1,0 +1,43 @@
+---
+title: "Solana Adds On-Chain Modular Exponentiation: What sol_big_mod_exp (SIMD-0529) Unlocks"
+description: "Solana's SIMD-0529 adds sol_big_mod_exp for on-chain modular exponentiation. What it unlocks for RSA verification, and how it mirrors Ethereum's EIP-198."
+date: 2026-06-29
+author: Chroma Team
+---
+
+{/* Suggested meta description (<=155 chars): Solana's SIMD-0529 adds sol_big_mod_exp for on-chain modular exponentiation. What it unlocks for RSA verification, and how it mirrors EIP-198. */}
+
+If you have ever tried to verify an RSA signature or run wide integer arithmetic inside a Solana program, you have hit the same wall. The SVM gives you 64-bit registers and a compute-unit budget, and a 2048-bit modular exponentiation written in plain Rust burns through both. On-chain modular exponentiation has been technically possible and practically unaffordable, so most teams pushed that work to a backend and trusted the result. SIMD-0529, merged into the Solana specification on June 16, changes that math by adding a native `sol_big_mod_exp` syscall.
+
+## Why big-integer math was a compute sink on Solana
+
+A Solana program is stateless: it computes over accounts that are passed in as explicit inputs to each instruction, inside a fixed compute-unit (CU) budget for the transaction. Modular exponentiation — `b^e mod m` — is a tight loop of multiply-and-square steps over numbers hundreds of bits wide. On a 64-bit machine that means splitting each operand into many limbs and looping over all of them, repeatedly.
+
+Compiled to SBF bytecode, every one of those limb operations is a separate instruction the runtime meters. A single 2048-bit exponentiation can run into the hundreds of thousands of CUs — a large share of a transaction's budget spent before your program does anything else. That cost is why on-chain verification of RSA, or any number-theoretic scheme that leans on big integers, has mostly stayed off-chain.
+
+## What on-chain modular exponentiation actually computes
+
+The operation is exactly `b^e mod m`. That single primitive is the engine behind RSA verification (`s^e mod n`), Rabin signatures, modular inverses computed via Fermat's little theorem, and slices of the field arithmetic that STARK-style proof systems depend on. None of it is exotic — it is the same bignum routine cryptographers have leaned on for decades.
+
+`sol_big_mod_exp` hands that loop to the validator's native big-integer implementation instead of running it as metered SBF. Conceptually you give it three byte buffers — the base, the exponent, and the modulus — and it writes `b^e mod m` into an output buffer; the exact ABI lives in the SIMD. Because the heavy loop runs as native code rather than your compiled program, it is priced as a predictable CU cost scaled by operand size, not the runaway figure you get from doing it limb-by-limb in SBF.
+
+## The EIP-198 parallel — and where SVM and EVM diverge
+
+Ethereum solved the same problem back in 2017 with EIP-198, the modexp precompile at address `0x05`. It computes the same `b^e mod m`, takes its input as length-prefixed base, exponent, and modulus, and was later repriced by EIP-2565. SIMD-0529 deliberately aligns its cost model with EIP-198's, so the economics will feel familiar to EVM developers.
+
+The execution models, though, are not the same, and the terminology should not blur:
+
+- **EVM:** a precompile is a reserved contract address. You `CALL` `0x05` with ABI-encoded bytes and pay **gas**. The interaction looks like a message to another contract.
+- **SVM:** this is a **syscall** invoked from inside your program while an instruction executes. You pay **compute units**, not gas. Your program remains stateless — the modexp call reads no accounts; it operates purely on bytes you already loaded from accounts that were declared up front in the (versioned) transaction.
+
+Same arithmetic, two cost units, two invocation shapes. If you write about both ecosystems, keep "gas and a `CALL` to a precompile" and "compute units and an in-program syscall" distinct rather than describing one in the other's vocabulary.
+
+## What this unlocks — and the testing angle
+
+The cleanest new capability is **on-chain RSA verification**. A Solana program can now check an `RS256` JWT, a DKIM email signature, an eIDAS or passport signature, or a zkEmail-style claim without handing trust to an off-chain oracle. Beyond RSA, affordable big-integer arithmetic makes number-theoretic verifiers — including parts of STARK proof checking — viable building blocks rather than budget killers. Pairing-based schemes like BLS lean on wide-integer field math too, though full pairing verification rides its own companion syscall track (SIMD-0388); modexp is a piece of that puzzle, not the whole of it.
+
+It is worth being clear about the limits. `sol_big_mod_exp` is not a signature scheme, it does not promise constant-time execution for secret operands (it is built for public verification), and it will not rescue a badly scoped instruction — you still budget CUs and declare every account.
+
+From a dApp's perspective, none of this moves the wallet boundary. A user still signs one transaction that invokes your verifying program, and the approval still surfaces as an ordinary wallet popup. If you cover that flow end to end — for example with [@avalix/chroma](https://chroma.avalix.dev) driving the wallet's approve step — the syscall is just compute inside the instruction. Your test asserts what it always did: the user approved, the transaction landed, the UI updated.
+
+On-chain modexp will not be something most dApps call directly. But it quietly widens what a Solana program can verify for itself instead of trusting a backend. If you maintain a program that shells signature checks out to a server today, SIMD-0529 is worth revisiting once it reaches your cluster.
