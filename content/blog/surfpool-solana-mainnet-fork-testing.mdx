@@ -1,0 +1,37 @@
+---
+title: "Fork Solana Mainnet Locally: Testing Programs Against Real State with Surfpool"
+description: "Surfpool forks Solana mainnet state locally so you can test programs against real accounts, oracles, and tokens before you ever reach devnet."
+date: 2026-07-01
+author: Chroma Team
+---
+
+Your Solana program passes every test on a fresh `solana-test-validator`, then breaks the first time a real user routes through it on mainnet. The cause is almost always state. Local tests run against an empty ledger you seeded by hand — a couple of keypairs, a mint you created, no Pyth feed, no Token-2022 mint carrying a transfer hook, no live Jupiter route. Mainnet is none of those things. Surfpool closes that gap by making Solana mainnet-fork testing a local default: it pulls real mainnet state onto your machine on demand, so your program runs against the accounts it will actually meet. Anchor 1.0 leaned into this by shipping Surfpool as part of its default test stack.
+
+## How just-in-time forking clones only the accounts you touch
+
+Surfpool is a drop-in replacement for `solana-test-validator`. You start it with `surfpool start`, and it listens on the same local RPC endpoint (`127.0.0.1:8899`) your tooling already expects. The local network it spins up is called a Surfnet.
+
+The important difference is how it gets mainnet state. Instead of downloading a full ledger snapshot up front, it forks lazily. When a transaction references an account the Surfnet doesn't have locally, it fetches that account — and the program that owns it — from a mainnet RPC just in time, then caches it for the rest of the session.
+
+This fits the SVM execution model precisely. On Solana, every account an instruction reads or writes is passed into that instruction explicitly: the mint, your associated token accounts, the oracle price account, the program's own data account. Because those inputs are enumerated up front in the transaction, the Surfnet knows exactly which accounts to clone. That is a genuinely different mechanism from EVM fork tools like Anvil, which lazily fork a contract's storage trie as slots are read. On the SVM there is no per-contract storage trie to walk — state lives in discrete, independently addressed accounts, so forking happens account by account.
+
+The practical payoff: you can exercise a cross-program invocation into the real Token-2022 program, against a real mint with its real extensions, without deploying anything to a public cluster or spending real SOL.
+
+## Cheatcodes: bend the Surfnet to reproduce the state you need
+
+Cloning production state is only useful if you can also control it. Surfnet exposes cheatcodes — RPC methods that let you override rules the real network enforces. The documented capabilities cover the cases that are otherwise painful to set up:
+
+- **Universal Faucet** — fund any account with any token instantly, whether that is SOL or an arbitrary SPL mint. You stop hunting for a whale address or a working devnet faucet just to give a test wallet a balance.
+- **Time Travel** — move the validator's clock and slot forward so you can test anything gated on time: a vesting cliff, an unstake cooldown, an auction that settles at a deadline. No real waiting, no brittle sleeps.
+- **Scenarios** — mix live mainnet data with overridden account states. This is how you force an edge case that is hard to reproduce organically, such as an oracle account printing a stale or extreme price, or a token account sitting at a specific balance.
+- **Transaction Inspector** — see what a transaction actually did and why, which turns a cryptic simulation failure into something you can read.
+
+Taken together, these are the Solana counterpart to the cheatcodes EVM developers get from Foundry: the ability to script the world your code runs in, instead of hoping the network hands you the right conditions on the right slot.
+
+## Where this fits your end-to-end wallet tests
+
+Program-level tests are only half the story. The other half is the click-path a real user takes through your dApp's UI and their wallet — connecting, reviewing a transaction, approving or rejecting it. Because a Surfnet is just a standard RPC endpoint, you can point a browser-based end-to-end suite at the same fork your program tests use. If you drive those tests with @avalix/chroma, the real Phantom approval your test clicks through now runs against forked mainnet state rather than an empty devnet. The transaction the user signs is built from the same accounts production will use, so a fork-only failure — a missing token extension, a changed account layout, an oracle your instruction didn't expect — surfaces in CI instead of in a support ticket. The wallet interaction stays a genuine approval; only the chain underneath it changes.
+
+## The takeaway
+
+Stop treating "works on a blank validator" as a passing grade. A blank ledger tests your happy path against state you invented; mainnet tests it against state you didn't. Fork the accounts your program will actually encounter, use cheatcodes to script the awkward conditions, and run your wallet click-path against that same fork. `surfpool start` is a one-line way to begin, and the payoff is that the surprises move off mainnet and onto your laptop, where they are cheap to fix.
