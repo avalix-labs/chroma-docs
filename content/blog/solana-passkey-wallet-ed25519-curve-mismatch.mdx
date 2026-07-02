@@ -1,0 +1,40 @@
+---
+title: "Why a Solana Passkey Wallet Can't Sign Your Transaction — and How Wallets Bridge the Gap"
+description: "Solana passkey wallets can't sign transactions directly — a P-256 vs Ed25519 curve mismatch. Here's why, and the two architectures that bridge it."
+date: 2026-07-02
+author: Chroma Team
+---
+
+Passkeys are the most appealing onboarding story a Solana passkey wallet can offer right now: a user taps Face ID and lands in your dApp with a wallet, no seed phrase, no extension. A wave of 2026 wallets — LazorKit, Para, and others — are built on exactly that promise. But if you try to wire a passkey straight into a Solana transaction, you hit a wall that isn't obvious from the marketing: a passkey physically cannot sign a Solana transaction. Understanding why turns out to be the key to picking the right passkey wallet architecture — and to knowing what it costs you.
+
+## The curve mismatch: your passkey speaks the wrong language
+
+WebAuthn passkeys — the same primitive behind Face ID, Touch ID, Windows Hello, and hardware keys — sign with the P-256 curve, also called secp256r1. Solana transactions are signed with Ed25519 keypairs, and the runtime verifies every top-level transaction signature as Ed25519. Those two curves are not interchangeable, and browsers deliberately don't expose Ed25519 signing through the secure enclave that guards a passkey. So the private key that Face ID unlocks can produce a P-256 signature and nothing else.
+
+The one signature your transaction envelope demands is the one a passkey can never generate. That single fact is the reason "just sign in with a passkey" is harder than it looks on Solana.
+
+## What the SIMD-0075 precompile does — and what it doesn't
+
+In June 2025 Solana activated SIMD-0075, a precompile at address `Secp256r1SigVerify1111111111111111111111111` that verifies P-256 signatures on-chain, alongside the existing Ed25519 and secp256k1 precompiles. It works through instruction introspection: you attach a precompile instruction to your transaction carrying offsets to the signature, public key, and message, the runtime verifies them (rejecting high-S signatures to block malleability), and your program then reads that instruction to confirm it validated the passkey signature you expected.
+
+This is genuinely useful — a Solana program can now treat "a valid passkey signature over this message" as an authorization check. But read the boundary carefully: the precompile verifies a P-256 signature *inside* a transaction that has already been signed with Ed25519. It does not let a passkey sign the transaction itself. The envelope still needs an Ed25519 signer. SIMD-0075 closes the on-chain verification gap; it leaves the signing gap wide open.
+
+## Two ways passkey wallets bridge the gap
+
+Every passkey wallet on Solana resolves this the same two ways.
+
+**A passkey-gated session key.** The passkey never touches the transaction. Instead it authorizes a scoped session that unlocks an Ed25519 key held in MPC infrastructure — this is Para's model. The passkey is an authorization primitive; a conventional Ed25519 key, split across parties so no single party ever holds it whole, signs the envelope. Custody lives in the MPC setup, and the session dictates what that key is allowed to sign and for how long.
+
+**A passkey-controlled PDA.** Here the "wallet" is a Program Derived Address whose authority is the passkey's P-256 public key — LazorKit's approach. The user has no Ed25519 key at all. A relayer submits and Ed25519-signs the transaction (and pays the fee), while the program uses the SIMD-0075 precompile to verify the passkey signature in an instruction before it lets the PDA move funds. Authority lives in program logic plus the passkey, not in a keypair sitting on the user's device.
+
+The difference is not cosmetic. In the session model an MPC-held key signs on the user's behalf and the user's own funds cover fees; in the PDA model a relayer signs and pays, and the on-chain program is the gatekeeper. Which one your wallet uses changes your fee accounting, your custody story, and your failure modes.
+
+## What this means for connecting and testing
+
+The connect step stops looking like "detect an injected wallet, then pop up an approval." A passkey login is a biometric prompt plus an SDK call; depending on the architecture there may be no wallet popup and no human pressing "Approve" at all. That reshapes your tests. For a passkey or embedded path, assert on the post-authentication state — the session exists, the PDA is initialized, the transaction landed — not on how many popups appeared, because there may be none.
+
+If your dApp still offers an extension-wallet path alongside passkeys — a Phantom popup a user taps to confirm — that human step is exactly what an end-to-end tool like [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom) drives against a real Phantom extension, so both entry points get exercised the way each one actually behaves.
+
+## The takeaway
+
+Hold onto a single mental model: on Solana, a passkey authorizes — it does not sign. The secp256r1 precompile made passkey signatures verifiable on-chain, but the Ed25519 envelope requirement means every passkey wallet still leans on either an MPC session key or a relayer-driven PDA to get a transaction signed. Before you adopt one, find out which — because that choice, not the passkey itself, decides who holds custody, who pays fees, and what your tests need to assert.
