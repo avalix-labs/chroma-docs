@@ -1,0 +1,44 @@
+---
+title: "The Same Contract Address on Every Chain: What EIP-7997 Makes Guaranteed"
+description: "EIP-7997 turns the keyless CREATE2 factory into a protocol predeploy, so deterministic deployment gives your contract the same address on every EVM chain."
+date: 2026-07-03
+author: Chroma Team
+---
+
+If you ship contracts to more than one EVM chain, you have almost certainly relied on one address without thinking about it: `0x4e59b44847b379578588920cA78FbF26c0B4956C`. That is the CREATE2 factory Foundry deploys through by default, and it is the reason your token or router can land at the same address on Ethereum, Base, and Arbitrum. Deterministic deployment is the property that makes that possible — and it works right up until the chain you are deploying to has never seen the factory. EIP-7997 proposes to close that gap by baking the factory into the protocol itself. Here is what that changes.
+
+## Why "the same address everywhere" is harder than it looks
+
+A plain `CREATE` deployment derives the new contract address from the deployer account and its nonce. Nonces move every time an account sends a transaction, so the same deployer produces different addresses depending on order and history. That is fine for a one-off, and useless when you want byte-identical addresses across ten chains.
+
+`CREATE2` (EIP-1014) removes the nonce from the equation. The address becomes a pure hash:
+
+```
+address = keccak256(0xff ++ deployer ++ salt ++ keccak256(init_code))[12:]
+```
+
+Feed the same `deployer`, `salt`, and `init_code` and you get the same 20 bytes on any chain. The catch is the `deployer` term. If the factory that calls `CREATE2` sits at a different address on each chain, the whole hash shifts, and determinism is gone. So the real requirement is a factory that itself lives at one fixed address everywhere.
+
+## How the keyless CREATE2 factory works today
+
+The community solved this with a trick usually credited to Nick Johnson and Micah Zoltu, and packaged as Arachnid's deterministic deployment proxy. Instead of deploying the factory from a funded account, they pre-signed a single transaction with no chain ID and hardcoded gas parameters, using a signature that recovers to a throwaway sender. Anyone can fund that sender, broadcast the identical transaction on any network, and the factory lands at `0x4e59b4...` — the same address every time, because the sender and nonce are fixed.
+
+That bootstrapped factory then does exactly one job. You hand it calldata where the first 32 bytes are your salt and the remainder is your init code; it runs `CREATE2` and returns the 20-byte deployed address. Simple, and it has anchored most multi-chain deployments for years.
+
+The fragility is in the bootstrap. The pre-signed transaction carries a fixed gas price and gas limit and a pre-EIP-155 signature. On a chain that enforces a minimum base fee those parameters can't satisfy, that mandates EIP-155 replay protection, or that runs a different gas schedule, the deployment transaction simply cannot be replayed. The factory never appears. Deploy against that chain and Foundry stops with the familiar `CREATE2 Deployer not present on this chain` — and every downstream "same address" assumption breaks with it.
+
+## What EIP-7997 actually guarantees
+
+EIP-7997, a Draft Core proposal, promotes that same factory from "widely deployed by convention" to "present by protocol rule." It specifies that `0x4e59b44847b379578588920cA78FbF26c0B4956C` must hold a defined runtime bytecode and a nonzero nonce as a predeploy — injected into state by the fork rather than by a replayed transaction.
+
+The bytecode is deliberately minimal and behaves like the factory you already use: copy the calldata after the first word, `CREATE2` with the leading 32 bytes as salt, forward any call value, return the new address unpadded, and revert with empty data on failure. It intentionally avoids newer opcodes like `PUSH0` so the same bytecode is valid on any chain that activated EIP-1014 back in Constantinople.
+
+The practical effect is narrow but real: the bootstrap problem disappears. There is no gas-parameter negotiation, no chain where the factory is missing, no ordering dependency. The address you compute offline is the address you get, unconditionally. One caveat the spec is explicit about — a keyless factory makes front-running trivial, so only deploy *fully deterministic* init code through it. If your constructor reads `ORIGIN`, `NUMBER`, `TIMESTAMP`, or similar, an attacker can deploy at your address first with parameters of their choosing.
+
+## What deterministic addresses change for multi-chain testing
+
+When a contract has the same address on every network, your test configuration stops branching per chain. The contract address becomes a constant instead of a lookup table keyed by chain ID, and a suite you wrote against a local Anvil fork points at the identical address on a testnet or mainnet fork with no edits. That is worth leaning into for end-to-end wallet tests: if you drive a real MetaMask through a signing flow with @avalix/chroma, pinning the dApp's contract to one deterministic address across your fork and your staging environment removes a whole class of "works on one chain, wrong address on the next" flakiness before it reaches a wallet popup.
+
+## Where this leaves you
+
+You can adopt the pattern now — Foundry's `--create2-deployer` and a fixed salt already give you deterministic addresses on the chains where the factory exists. What EIP-7997 adds is the guarantee that "where the factory exists" becomes "everywhere," removing the one failure mode that forces per-chain workarounds today. If your deployment scripts special-case a chain because the CREATE2 deployer isn't there, that special case has an expiry date. Audit your init code for non-deterministic constructor inputs before you rely on a universal factory, and treat the deterministic address as the default it is about to become.
