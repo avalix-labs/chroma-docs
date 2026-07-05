@@ -1,0 +1,36 @@
+---
+title: "Jito BAM and Application-Controlled Execution: How Solana Block Building Became Programmable"
+description: "Jito BAM brings a TEE-based encrypted mempool and Application-Controlled Execution to Solana, letting your dApp define its own transaction ordering."
+date: 2026-07-05
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): Jito BAM brings a TEE-based encrypted mempool and Application-Controlled Execution to Solana, letting your dApp define its own transaction ordering. */}
+
+On Solana you write your instructions, set a priority fee, and hand the transaction off to whoever happens to be leader. Where it lands *inside* the block was never yours to decide. That gap is where MEV lives — sandwiches, frontrunning, quotes picked off mid-volatility — and it is why order books, perps venues, and options protocols kept eyeing L2s and appchains just to control their own sequencing. Jito's Block Assembly Marketplace (BAM), live on mainnet with more than half of Solana validators running it as of June 2026, moves the layer where ordering is decided. Its headline feature, Application-Controlled Execution, lets your app — not the leader — define the rules that govern Solana block building for its transactions.
+
+## Why transaction ordering was never yours to control
+
+Solana has no formal public mempool the way Ethereum does, but transactions still flow to the current leader, who sequences them into the block. Your only real lever over placement is the priority fee you attach through the Compute Budget program, and it is a blunt one. You can pay to be considered earlier, but you cannot express "cancel this order before any match runs against it" or "these two instructions must be adjacent." Because the leader sequences in the open, a searcher watching the flow can reorder around you — that is the sandwich, and priority fees do nothing to stop it.
+
+The historical fix was heavy: build your own execution environment, an L2 or an appchain, purely to own the ordering. BAM offers a third path that stays on Solana mainnet.
+
+## What BAM actually is: proposer-builder separation inside a TEE
+
+BAM splits block *building* from block *validation* — proposer-builder separation (PBS), applied to Solana. It has three parts. **BAM Nodes** are scheduler nodes that run inside Trusted Execution Environments (TEEs). **BAM Validators** run an updated Jito-Solana client that executes exactly the ordering the node hands them. **Plugins** are the programmable interface to the node's scheduler.
+
+The privacy comes from the enclave. Transactions enter an encrypted mempool *inside* the TEE, so neither the host machine nor a watching searcher can read them before they are ordered. That alone removes the visibility that frontrunning and sandwiching depend on — you cannot reorder around a transaction you cannot see. Crucially, privacy does not cost you accountability: both the BAM Node and the validator emit attestations, cryptographic proofs of the sequencing and execution that anyone can publicly verify. You can check that the builder ordered your transactions the way it claimed, rather than trusting a black box.
+
+## Application-Controlled Execution: ordering becomes a plugin
+
+Plugins are where this stops being infrastructure trivia and starts being something you build against. Instead of accepting whatever sequence a leader produces, an app supplies its own logic to the scheduler — Jito calls this Application-Controlled Execution (ACE).
+
+The examples are concrete. An options protocol can give cancel instructions priority over new orders, so market makers' quotes are not picked off during a volatility spike. An oracle-dependent app can require its price update and the trades that read it to be sequenced together, closing the window where someone trades against a stale price. A central limit order book or dark-pool venue can enforce its own matching order outright. The unlock is that you get application-specific ordering *without* standing up an L2 or an appchain — the rules run at the block layer on mainnet. And because plugin fees are shared across the developers who write them, node operators, validators, and stakers, the ordering logic you author is also a revenue path rather than a pure cost.
+
+## What this changes for your dApp — and its tests
+
+Two shifts are worth planning for. First, your MEV assumptions: if users route through BAM, the encrypted mempool removes a class of sandwich attacks that your current defaults — tight slippage, retry logic — exist to absorb. Re-check whether those are still doing useful work or just adding friction. Second, ordering is no longer a network-wide given. It now depends on which builder and which plugin handle a transaction, and since BAM is opt-in and still rolling out, your dApp will see mixed paths for a while. Test against outcomes, not placement: assert that a swap settled within slippage and that a cancel actually cancelled — not that either landed in a particular slot position.
+
+The one thing ACE does not touch is the wallet boundary. The user still signs the same versioned transaction your client assembled — same instructions, same compute budget, same fee payer — before any builder sees it. That human-layer step is worth exercising against a real extension: driving a Phantom approval through Playwright with [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom) confirms the bytes your dApp built are the ones the user actually signs, whatever plugin sequences them afterward.
+
+If sequencing is part of your product — perps, order books, options, anything MEV-sensitive — BAM is the first time that logic can live on Solana itself instead of a separate chain. Start by measuring how much of your current design exists only to work around ordering you could not control. That is exactly the surface ACE is built to reclaim.
