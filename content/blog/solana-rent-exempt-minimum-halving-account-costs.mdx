@@ -1,0 +1,66 @@
+---
+title: "Solana's Rent-Exempt Minimum Is Halving: Stop Hardcoding Account Costs"
+description: "Solana's rent-exempt minimum is halving under SIMD-0436. Here's the new formula and why your dApp should query it at runtime, never hardcode it."
+date: 2026-07-06
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): Solana's rent-exempt minimum is halving under SIMD-0436. Here's the new formula and why your dApp should query it at runtime, never hardcode it. */}
+
+Somewhere in most Solana dApps there is a magic number. It's the lamport amount you deposit when you create a token account, a PDA, or a fresh keypair for a user — pasted in once, months ago, from whatever `getMinimumBalanceForRentExemption` returned that day. It has worked ever since because the number never moved. Under SIMD-0436, it is about to move: Solana's rent-exempt minimum is being cut in half, and every hardcoded copy of that constant becomes wrong the moment the feature gate activates.
+
+The change is bundled into the Agave v4.2 release, whose feature-activation window targets mid-August 2026. It is a small, backwards-compatible relaxation — but it exposes an assumption a lot of client code and tests have quietly baked in.
+
+## What the rent-exempt minimum actually is
+
+On Solana, every account has to hold enough SOL to be *rent-exempt* before the runtime will let it persist. The word "rent" is a leftover: recurring rent collection was disabled years ago (SIMD-0084), so this balance is not a fee that drains over time. It's a one-time, fully refundable storage deposit — close the account and you get every lamport back.
+
+Because the SVM makes accounts explicit inputs to every instruction, this matters constantly. You don't get implicit contract storage the way you do on the EVM; you allocate an account, size it in bytes, and fund it to the exemption threshold. The threshold is a pure function of size:
+
+```
+effective_size = ACCOUNT_STORAGE_OVERHEAD + data_size_bytes   // overhead = 128
+min_balance    = effective_size * lamports_per_byte
+```
+
+A standard SPL token account is 165 bytes. With today's `lamports_per_byte` of 6960, that's `(128 + 165) * 6960 = 2,039,280` lamports — about 0.00204 SOL to open a single token account. Multiply that across every associated token account, PDA, and state account your dApp creates per user, and the deposit becomes a real line item in your onboarding cost.
+
+## What SIMD-0436 changes
+
+SIMD-0436 sets `lamports_per_byte` from 6960 to 3480 — a flat 50% reduction, applied through a single feature activation rather than a staged ramp. The same SPL token account drops from 2,039,280 lamports to `(128 + 165) * 3480 = 1,019,640` lamports, roughly 0.00102 SOL. Every account gets exactly half as expensive to create.
+
+Existing accounts are untouched: they keep whatever balance they already hold and keep functioning. The relaxation is that they're now *allowed* to withdraw down to the new, lower minimum — so a program that manages account balances can free up the difference if it wants to. This works safely because SIMD-0392 first relaxed the post-execution `min_balance` check, letting the runtime accept accounts sitting at the reduced threshold without treating them as underfunded.
+
+None of this touches your on-chain program logic if you already read the minimum from the runtime. Anchor's `init` constraint and any program calling `Rent::get()` compute the deposit from the live rent sysvar, so they pick up the new value automatically. The exposure is entirely on the client and test side, wherever a number was written down instead of asked for.
+
+## Why hardcoded rent constants break
+
+Two patterns break. The first is a client that funds account creation from a constant:
+
+```ts
+// Don't: a magic number SIMD-0436 will falsify.
+const RENT = 2_039_280n // 165-byte account, pre-SIMD-0436
+```
+
+Post-activation this over-funds by 2x — not fatal, but it silently locks up twice the SOL your users expect, and if you ever derived a *total* cost from it (rent + fees shown in your UI) that figure is now wrong. The fix is to ask the cluster at runtime:
+
+```ts
+// Solana — @solana/kit
+import { createSolanaRpc } from '@solana/kit'
+
+const rpc = createSolanaRpc('https://api.mainnet-beta.solana.com')
+
+// A standard SPL token account is 165 bytes.
+const rentExemptLamports = await rpc
+  .getMinimumBalanceForRentExemption(165n)
+  .send()
+```
+
+Line by line: `createSolanaRpc` builds a thin RPC client; `getMinimumBalanceForRentExemption` takes the account's data length in bytes and returns the exact lamports required *for the cluster's current `lamports_per_byte`*; `.send()` dispatches the request. The value tracks the feature gate without a redeploy. Query it once at startup and reuse it — it only changes on activation, not per block.
+
+The second pattern is subtler and lives in tests: an assertion that a newly created account's balance equals a literal lamport figure, or that a user's SOL dropped by exactly `RENT + fee`. Those pass today and fail the instant a devnet or fork picks up the reduced value. Assert on *behavior* — the account exists and is rent-exempt — not on a specific balance you transcribed by hand.
+
+## The testing angle
+
+This is where the account-creation step deserves an end-to-end check rather than a unit test with a frozen number. The full flow — your dApp building the create-account instruction, the user approving it in a real Phantom popup, the account landing on-chain and being usable — is exactly what a tool like [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom) drives against a real extension in Playwright. Anchor the assertion on the account being created and rent-exempt at whatever minimum the cluster reports, not on a lamport constant that SIMD-0436 is about to invalidate.
+
+The takeaway is small and durable: treat the rent-exempt minimum as a value you fetch, never a value you remember. SIMD-0436 is the first time in a long while that number has moved — but the code that queries it won't notice, and that's the whole point.
