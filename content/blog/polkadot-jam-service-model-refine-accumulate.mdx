@@ -1,0 +1,55 @@
+---
+title: "Polkadot JAM's Service Model: Why Your App Splits Into Refine and Accumulate"
+description: "Polkadot JAM replaces parachains with permissionless services. Here's how the Refine and Accumulate model splits your app across two execution layers."
+date: 2026-07-07
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): Polkadot JAM replaces parachains with permissionless services. Here's how the Refine and Accumulate model splits your app across two execution layers. */}
+
+For years, building on Polkadot meant choosing between two boxes: ship a **parachain** — a full runtime, its own coretime, a slot to acquire — or write a smart contract, lighter but with far less control. **Polkadot JAM**, the Join-Accumulate Machine now moving through testnet with dozens of conformant client implementations, collapses that choice. But it replaces it with an idea most developers haven't had to hold before: on JAM your application isn't one program running in one place. It's a small set of functions, and two of them run in completely different execution environments with different rules, budgets, and access to state. If you've only ever reasoned about a single runtime handling everything, that split is the first thing to understand — well before the SDKs stabilize.
+
+## From parachains to services: what JAM actually replaces
+
+Today, getting onto Polkadot's shared security means *being* a parachain. You acquire coretime, ship a complete runtime, and live inside a slot whose availability has historically been shaped by auctions and governance. The parachain is the unit of deployment.
+
+JAM removes the parachain as that unit. The new unit is a **service**, and adding one is permissionless — closer to deploying a smart contract than winning an auction. Crucially, a service still executes with the full data availability and security of the entire validator set behind it. You get the shared-security guarantee without the slot-acquisition ceremony.
+
+Parachains don't vanish; they become a special case. The first service expected to run on JAM is the **CoreChains service** (sometimes called the Parachains service), which executes existing Polkadot parachains on top of the new machine. So "parachain" stops being the machine and becomes one application built on a more general one — and a rollup, a coprocessor, or a domain-specific chain is just another service defined the same way.
+
+## Refine and Accumulate: two functions, two execution environments
+
+A JAM service is described mainly by two entry points, and the entire model hinges on *where* each one runs.
+
+- **`refine` runs in-core.** In-core means off the main chain, on validator cores, in parallel, and mostly *statelessly*. This is where the heavy lifting goes: validating a rollup block, transforming input data, verifying a proof. Because many cores share the load, Refine gets a large compute budget — but it cannot read or write the global chain state.
+- **`accumulate` runs on-chain.** It executes synchronously, in sequence, *with* access to state. It takes the outputs Refine produced and integrates them: it can read any service's state, write to key-value storage, and move funds. This is the authoritative step, so its budget is much tighter.
+
+There's a third entry point, usually called **`on_transfer`** (or `on_message`), which handles asynchronous messages arriving from other services — inter-service communication that doesn't block and returns no immediate value.
+
+The shape of a service, then, looks roughly like this:
+
+```
+// Conceptual shape of a JAM service.
+// Exact SDK signatures are still stabilizing — treat this as the model, not an API.
+service {
+  fn refine(input)     -> output   // in-core: parallel, ~stateless, large compute budget
+  fn accumulate(outputs)           // on-chain: sequential, reads/writes state, tight budget
+  fn on_transfer(message)          // async messages from other services
+}
+```
+
+Read that as a division of labor. `refine` is the expensive, parallel, stateless computation. `accumulate` is the cheap, serial, stateful commit that makes the result part of Polkadot's canonical state. `on_transfer` is how one service hands work to another without waiting on it. The craft of building on JAM is deciding what belongs in each — because getting that partition right is what determines whether your service scales.
+
+## What the split changes for how you build
+
+Because `refine` is stateless and runs across cores in parallel, throughput scales with the number of cores rather than with a single block pipeline — and that parallelism is where JAM's headline capacity comes from. The design lesson follows directly: push as much expensive work as possible into the refinable, in-core path, and keep the on-chain `accumulate` touch small and cheap.
+
+A few more things are worth internalizing now:
+
+- **Services compile to the PVM.** JAM executes on the Polkadot Virtual Machine, a RISC-V-based VM chosen because it's deterministic and inexpensive to meter. That's the same RISC-V direction PolkaVM already took for contracts, so it isn't a wholly new toolchain story — but you're targeting PVM, not a Wasm-first pipeline.
+- **Deployment is permissionless, but execution still costs coretime.** You don't need a slot auction or governance vote for your service to *exist*. You do buy coretime to get your work packages processed in-core, so capacity planning shifts from "win a slot" to "purchase the cores your workload needs."
+- **The user-facing seam stays stable.** For a dApp with real users, the part they actually touch — connecting a wallet and signing a transaction — sits above all of this and doesn't change just because the execution layer did. That signing boundary is exactly what an end-to-end tool like [@avalix/chroma](https://chroma.avalix.dev) drives against a real wallet extension, which is why a test written at the wallet level tends to survive changes much deeper in the stack.
+
+## Where this leaves you
+
+JAM is not open for general services yet. It's in the implementers'-prize and testnet phase, with multiple independent clients reaching conformance and the specification approaching its final form; parachains are expected to migrate first via the CoreChains service. So the actionable move today isn't to rewrite anything — it's conceptual. Take whatever you're building and sort its logic into two piles: *what could run in-core, statelessly and in parallel*, and *what must commit to shared on-chain state*. That partition is the skill JAM rewards, and practicing it now — against the graypaper and the Polkadot wiki's JAM material — is how you'll be ready to build a service the day the SDKs settle.
