@@ -7,8 +7,26 @@ export const Route = createFileRoute('/')({
   head: () => ({
     links: [{ rel: 'stylesheet', href: chromaHomeCss }],
   }),
+  loader: fetchWeeklyDownloads,
+  staleTime: 60 * 60 * 1000,
   component: HomePage,
 });
+
+async function fetchWeeklyDownloads(): Promise<{ weeklyDownloads: number | null }> {
+  try {
+    const res = await fetch('https://api.npmjs.org/downloads/point/last-week/@avalix/chroma', {
+      signal: AbortSignal.timeout(3000),
+    });
+    if (!res.ok) return { weeklyDownloads: null };
+    const data = (await res.json()) as { downloads?: number };
+    return { weeklyDownloads: typeof data.downloads === 'number' ? data.downloads : null };
+  } catch {
+    return { weeklyDownloads: null };
+  }
+}
+
+const formatDownloads = (n: number) =>
+  new Intl.NumberFormat('en', { notation: 'compact', maximumFractionDigits: 1 }).format(n);
 
 const INSTALL_CMD = 'npm install @avalix/chroma @playwright/test';
 
@@ -138,6 +156,7 @@ function useTerminal(ref: React.RefObject<HTMLDivElement | null>) {
 }
 
 function HomePage() {
+  const { weeklyDownloads } = Route.useLoaderData();
   const termRef = useRef<HTMLDivElement>(null);
   const [tab, setTab] = useState<'pjs' | 'mm' | 'tal'>('pjs');
   const [copied, setCopied] = useState(false);
@@ -189,6 +208,30 @@ function HomePage() {
               <span>
                 Built on <strong style={{ color: 'var(--ink-2)' }}>Playwright</strong>
               </span>
+              {weeklyDownloads !== null && (
+                <>
+                  <div className="sep" />
+                  <a
+                    href="https://www.npmjs.com/package/@avalix/chroma"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: 6,
+                      color: 'inherit',
+                      textDecoration: 'none',
+                    }}
+                    title={`${weeklyDownloads.toLocaleString('en')} downloads last week on npm`}
+                  >
+                    <DownloadIcon />
+                    <strong style={{ color: 'var(--ink-2)' }}>
+                      {formatDownloads(weeklyDownloads)}
+                    </strong>{' '}
+                    weekly downloads
+                  </a>
+                </>
+              )}
               <div className="sep" />
               <div className="chains-inline">
                 <span>
@@ -647,6 +690,26 @@ function PanelTalisman() {
 }
 
 /* ---------- Icons ---------- */
+
+function DownloadIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden
+    >
+      <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+      <polyline points="7 10 12 15 17 10" />
+      <line x1="12" y1="15" x2="12" y2="3" />
+    </svg>
+  );
+}
 
 function CopyIcon() {
   return (
