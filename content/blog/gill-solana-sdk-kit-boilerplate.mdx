@@ -1,0 +1,74 @@
+---
+title: "Kit Without the Ceremony: How gill Trims Your Solana Client Code"
+description: "gill is a Solana SDK built on @solana/kit that cuts client boilerplate: one createSolanaClient call, batteries-included token helpers, full kit compatibility."
+date: 2026-07-08
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): gill is a Solana SDK on @solana/kit that cuts client boilerplate: one createSolanaClient call, token helpers, full kit compatibility. */}
+
+Moving a Solana dApp from `solana-web3.js` v1 to `@solana/kit` buys you real things: tree-shaking, native `BigInt`, and types that catch mistakes at compile time. It also buys you ceremony. To send one transaction you build an RPC transport, a subscriptions transport, and a send-and-confirm factory, fetch a blockhash, pipe a message through a chain of pure functions, then sign. The **gill Solana SDK** keeps all of that machinery under the hood and hands you the common flows as single calls. If Kit felt like a downgrade in ergonomics even as it upgraded everything else, gill is the layer that gives the ergonomics back — without giving up `@solana/kit`.
+
+## What gill is (and isn't)
+
+gill is a wrapper, not a replacement. From the docs: "by utilizing the same types and functions under the hood, `gill` is compatible with `kit`." That compatibility is the whole point. A gill client and a hand-built Kit client produce the same `rpc` object, the same transaction message types, and the same signers, so they interoperate in the same file. gill is not a return to v1's mutable, class-based objects, and it is not a fork — it is a thinner surface over the exact primitives you would otherwise assemble yourself.
+
+## One client instead of three transports
+
+Raw Kit makes you construct `createSolanaRpc`, `createSolanaRpcSubscriptions`, and a `sendAndConfirmTransactionFactory` separately, threading the same endpoint through each. gill collapses that into one call:
+
+```ts
+import { createSolanaClient } from "gill";
+
+const { rpc, rpcSubscriptions, sendAndConfirmTransaction } =
+  createSolanaClient({ urlOrMoniker: "devnet" });
+```
+
+`urlOrMoniker` takes a moniker (`"mainnet"`, `"devnet"`, `"testnet"`, `"localnet"`) or a full RPC URL. The returned `rpc` and `rpcSubscriptions` are the same Kit objects you would have built by hand, and `sendAndConfirmTransaction` comes pre-wired to both transports — no factory to configure.
+
+## Building and sending without the pipe
+
+Kit asks you to pipe a message through `createTransactionMessage`, `setTransactionMessageFeePayer`, `setTransactionMessageLifetimeUsingBlockhash`, and `appendTransactionMessageInstructions`. gill's `createTransaction` sets all of that in one object literal:
+
+```ts
+import { createTransaction, signTransactionMessageWithSigners } from "gill";
+
+const { value: latestBlockhash } = await rpc.getLatestBlockhash().send();
+
+const transaction = createTransaction({
+  version: "legacy",
+  feePayer: signer,
+  instructions, // your program instructions
+  latestBlockhash,
+});
+
+const signedTransaction = await signTransactionMessageWithSigners(transaction);
+await sendAndConfirmTransaction(signedTransaction);
+```
+
+Line by line: you pull a recent blockhash from the `rpc` client, hand `createTransaction` the fee payer, instruction list, and blockhash lifetime, sign with `signTransactionMessageWithSigners` (re-exported unchanged from Kit), and submit. Set `version: 0` instead of `"legacy"` when you want a versioned transaction with address lookup tables — gill turns the SVM's versioned-transaction choice into a field rather than a separate construction path. Nothing about the account or signing model changes; each instruction still lists every account it touches, and compute-unit and priority-fee settings remain yours to add.
+
+For token flows, gill ships assembled builders under `gill/programs`:
+
+```ts
+import { buildTransferTokensTransaction } from "gill/programs";
+
+const transferTx = await buildTransferTokensTransaction({
+  feePayer: signer,
+  latestBlockhash,
+  mint,
+  authority: signer,
+  amount: 900,
+  destination,
+});
+```
+
+This resolves the associated token accounts, selects the correct token program, and builds the instructions for you — sign and send it exactly like the transaction above. Alongside it, `buildCreateTokenTransaction` and `buildMintTokensTransaction` cover mint creation and minting, `gill/node` adds `loadKeypairSignerFromFile` for scripts and tests, and `getExplorerLink` turns a signature into a browsable URL for logging.
+
+## Where gill stops and your tests start
+
+gill makes building and submitting a transaction terse, but it cannot tell you whether your user actually approved it. The bytes gill assembles still pass through the wallet's approval popup — the one surface no unit test touches. That gap between "transaction built" and "user approved" is what an end-to-end test covers: drive a real Phantom extension against your running dApp and assert the balance moved. That is the slice [@avalix/chroma](https://chroma.avalix.dev) automates — a real wallet in a real browser, so the flow gill kicks off gets verified the way a user experiences it, approval popup and all. gill trims the wiring; it does not change what a human still has to click.
+
+## Where to start
+
+If you are already on `@solana/kit`, adopt gill incrementally. Import `createSolanaClient` in one new file, keep your existing Kit code untouched, and let them share types across the boundary. Start where the boilerplate is thickest — client setup and token operations — and reach back for raw Kit only where you need lower-level control. You keep the tree-shaking and type safety that made you migrate, and you drop the transport-wiring and transaction-piping that made the migration feel like a chore.
