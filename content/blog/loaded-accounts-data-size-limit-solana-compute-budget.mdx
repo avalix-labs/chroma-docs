@@ -1,0 +1,61 @@
+---
+title: "Loaded Accounts Data Size: The Solana Transaction Budget You're Probably Not Setting"
+description: "Every Solana transaction defaults to a 64 MiB loaded accounts data size limit that quietly reserves 16,384 CU. Set it tight to reclaim compute and land faster."
+date: 2026-07-09
+author: Chroma Team
+---
+
+Most Solana developers who tune a transaction reach for a compute unit limit and a priority fee, then stop. But there is a second resource every transaction declares whether you set it or not — the **loaded accounts data size limit** — and its default quietly eats compute units you paid to reserve. Solana Kit v7 just made this budget easier to see by shipping an estimator that sizes both limits together, which is a good moment to understand what it actually is.
+
+## The 64 MiB budget every transaction ships with
+
+On the SVM, a program does not hold its own state. Every account an instruction touches is an explicit input, loaded by the runtime before execution begins. That includes the accounts you pass in, the programs you invoke, and any accounts those programs read along the way. The combined byte size of everything loaded is metered as its own resource: the loaded accounts data size.
+
+If you never declare a limit, the runtime clamps it to `MAX_LOADED_ACCOUNTS_DATA_SIZE_BYTES` — 64 MiB. That ceiling applies to your transaction regardless of how little it actually loads.
+
+## Why the default reserves ~16,384 compute units
+
+Loaded data is not free against your compute budget. The runtime charges **8 CU per 32 KiB page** of account data. Work the default through: 64 MiB is 2,048 pages of 32 KiB, so the default ceiling reserves 2,048 × 8 = **16,384 CU** before your program runs a single instruction.
+
+A transaction that really loads a couple of token accounts and one program — comfortably under a megabyte — still carries that full reservation unless you say otherwise. And if you are already setting a tight compute unit limit to improve scheduling, those 16,384 phantom CUs are competing against the budget you meant to hand your program. This is the part that surprises people: the data-size default silently inflates the compute cost the scheduler sees.
+
+## Reclaiming the loaded accounts data size limit
+
+The compute budget program exposes an instruction to declare a smaller ceiling. In Kit, via `@solana-program/compute-budget`:
+
+```ts
+import {
+  getSetComputeUnitLimitInstruction,
+  getSetLoadedAccountsDataSizeLimitInstruction,
+} from '@solana-program/compute-budget';
+
+// Cap the data budget at 256 KiB instead of the 64 MiB default.
+const dataSizeIx = getSetLoadedAccountsDataSizeLimitInstruction({
+  accountDataSizeLimit: 256 * 1024,
+});
+
+const message = prependTransactionMessageInstructions(
+  [getSetComputeUnitLimitInstruction({ units: 120_000 }), dataSizeIx],
+  baseMessage,
+);
+```
+
+Line by line: `getSetLoadedAccountsDataSizeLimitInstruction` takes a single `accountDataSizeLimit` field, a byte count. The value must be non-zero — passing `0` fails with `InvalidLoadedAccountsDataSizeLimit`. You then prepend it, alongside your compute unit limit, onto the transaction message so the runtime reads both declarations before execution.
+
+Set the limit to the real footprint of what your transaction loads, plus a margin: sum the data length of each writable and readonly account, add the size of every program in the call graph (the SPL Token program alone is tens of KiB), and round up. If the transaction loads more than you declared, it fails with `MaxLoadedAccountsDataSizeExceeded` rather than silently overspending — so the margin is not optional. (On solana-web3.js v1 the equivalent is `ComputeBudgetProgram.setLoadedAccountsDataSizeLimit({ bytes })`; reach for the Kit instruction in new code.)
+
+## Let Kit v7 size it for you
+
+Guessing the footprint by hand is error-prone, which is exactly what the v7 change addresses. Kit v7's `estimateResourceLimitsFactory` replaces the older compute-unit-only estimator and returns estimates for **both** the compute unit limit and the loaded accounts data size limit, derived by simulating the transaction against a live RPC. You feed the results into `getSetComputeUnitLimitInstruction` and `getSetLoadedAccountsDataSizeLimitInstruction` and prepend them.
+
+Because the estimate reflects what the transaction actually loaded during simulation, the two limits stay in sync as your instruction set changes — there is no hardcoded constant to drift out of date when you add an account or swap a program.
+
+## Where this surfaces in end-to-end tests
+
+A wrong data-size limit is the kind of bug that passes locally and fails against real state. On a fresh local validator the accounts your transaction loads are small; against mainnet-forked state, a token account carrying extensions or a larger program can push the true footprint past a limit you tuned on toy data. That is a wallet-boundary failure — the user clicks approve, signs, and the transaction bounces with `MaxLoadedAccountsDataSizeExceeded`.
+
+An E2E test that drives a real wallet approval against realistic state catches it before a user does. If you test that flow with @avalix/chroma, the approval runs in a real Phantom extension in the browser, so the transaction it submits carries the same resource limits your production build sets — not a mocked stand-in that skips the check entirely.
+
+## The takeaway
+
+The compute unit limit gets all the attention, but the loaded accounts data size limit is a second dial on the same dashboard, and its default is rarely what you want. Measure the footprint — or let the v7 estimator do it — set a limit with a margin, and you hand those 16,384 reserved CUs back to your program. Then exercise it against realistic state, because that is the only place the ceiling actually bites.
