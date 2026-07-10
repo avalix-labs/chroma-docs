@@ -1,0 +1,62 @@
+---
+title: "A Confirmed Signature Isn't Proof: Solana Transaction Introspection in Your Tests"
+description: "Solana Kit v7's transaction-introspection parses the instructions of a landed transaction, so your E2E tests prove your dApp built the right one."
+date: 2026-07-10
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): Kit v7's transaction-introspection reads the instructions of a landed Solana transaction so your tests prove your dApp built the right one. */}
+
+Your end-to-end test drives the wallet popup, the user approves, the transaction lands, and the assertion goes green. It feels like coverage. But "confirmed" is a weaker claim than it looks: it only tells you the signature was valid and no instruction in the transaction returned an error. It says nothing about whether your dApp assembled the transaction you actually intended. This is where **Solana transaction introspection** earns its place in a test suite — and Kit v7 just shipped a package built for exactly this.
+
+## What "confirmed" verifies, and what it hides
+
+On the SVM, a transaction is an ordered list of instructions. Each instruction names a program and passes it an explicit set of accounts plus a byte blob of data — programs hold no internal state, so every account they touch is an input you supplied at build time. The runtime executes the instructions in order; success means none of them errored.
+
+Notice what that leaves unchecked. Your client code is the thing that chose the accounts, encoded the amount, ordered the instructions, and decided whether to prepend a compute-budget instruction. A transaction can be perfectly valid and still be the wrong transaction: a transfer built against the wrong associated token account, an amount off by a decimal because you skipped the mint's scaling, a compute-unit limit instruction you meant to include but didn't, or an address lookup table that resolved to a stale address. Every one of those still "confirms."
+
+Wallet simulation previews the balance changes *before* you sign, which catches some of this — but a simulation is a prediction, and it runs on the transaction your client built, so it can't tell you the build itself matches your intent. Introspection works from the other end: it reads back what actually landed.
+
+## Reading a transaction back with @solana/transaction-introspection
+
+Kit v7 added `@solana/transaction-introspection`, a package that turns an RPC transaction response into structured, inspectable instructions. It does the tedious parts correctly: it decodes the wire transaction, resolves each instruction's account indices against the static keys *plus* the addresses loaded from any address lookup tables, and normalizes the inner instructions the runtime recorded in `meta.innerInstructions` — the cross-program invocations (CPIs) your top-level instructions triggered.
+
+That last point matters on Solana specifically. Much of what a program does happens in CPIs it makes on your behalf, so checking only the outer instruction list misses half the story. `walkInstructions` flattens outer and inner instructions into one list in explorer order.
+
+```ts
+import { createSolanaRpc } from '@solana/kit'
+import {
+  decodeTransactionFromRpcResponse,
+  walkInstructions,
+} from '@solana/transaction-introspection'
+
+const rpc = createSolanaRpc('http://127.0.0.1:8899')
+
+// `signature` is what the wallet returned after the user approved
+const rpcTx = await rpc
+  .getTransaction(signature, {
+    maxSupportedTransactionVersion: 0,
+    encoding: 'base64',
+  })
+  .send()
+
+const decoded = decodeTransactionFromRpcResponse(rpcTx)
+
+const instructions = walkInstructions({
+  compiledMessage: decoded.compiledMessage,
+  loadedAddresses: decoded.loadedAddresses,
+  meta: rpcTx.meta, // inner instructions are recorded here
+})
+```
+
+Line by line: `getTransaction` fetches the landed transaction by signature, with `maxSupportedTransactionVersion: 0` so v0 (lookup-table) transactions come back instead of erroring. `decodeTransactionFromRpcResponse` gives you the compiled message and the ALT-loaded addresses. `walkInstructions` returns every instruction — outer and CPI — with its accounts already resolved to real addresses, so you never work with raw index numbers.
+
+From there you assert on intent. The package ships helpers like `isInstructionForProgram` to filter the list by program and `identifyTokenInstruction` to name a Token-program instruction, and any resolved instruction can be handed straight to a generated program client's parse function. So "exactly one Token transfer, to the recipient I expected, for the amount I expected, preceded by my compute-budget instruction" becomes a concrete check against the bytes that reached the validator — not against the object your client thinks it built.
+
+## Wiring it into a wallet test
+
+Introspection pairs naturally with an end-to-end wallet test, because the signature you feed it should come from a real approval, not a mock. If you drive an actual Phantom popup through Playwright with [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom), your test clicks through the genuine approve flow and captures the signature the wallet returns. Introspecting that transaction closes the loop: you've verified the human-facing step *and* that the bytes the human signed are the ones your dApp meant to send.
+
+That combination catches the class of bug unit tests structurally can't — a client that builds a subtly wrong transaction, gets it signed and confirmed, and reports success. The wallet approval proves a person could complete the flow; the introspection proves they approved the right thing.
+
+The takeaway: stop treating a confirmed signature as the end of a test. It's the point where introspection begins. Pull the landed transaction back, walk its instructions, and assert your dApp composed what it claimed — including the CPIs and lookup-table addresses you never see in your own build code.
