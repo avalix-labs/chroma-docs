@@ -1,0 +1,73 @@
+---
+title: "The 64-Instruction Limit Is Really 16: Solana Kit v7's Transaction Planner"
+description: "Solana Kit v7's transaction planner now caps a message at 16 instructions, not 64, because inner instructions count too. Here's why, and what it splits."
+date: 2026-07-11
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): Solana Kit v7 caps a transaction message at 16 instructions, not 64, because CPIs count too. Here's why the planner splits, and how to configure it. */}
+
+Batch a dozen instructions into one Solana transaction and it lands. Add a few more and, on `@solana/kit` v7, the same code quietly produces *two* transactions — and your user signs twice. That is not a bug; it is the new default in Kit's transaction planner, which now caps a planned transaction message at 16 top-level instructions instead of letting it grow to the protocol ceiling of 64. If you compose transactions from instruction plans, this **Solana instruction limit** is a default worth understanding before it surprises you in production.
+
+## Why 64 instructions was never really 64
+
+On the SVM, a transaction is an ordered list of instructions, and the runtime enforces a hard limit of 64 instructions per transaction. The catch is what counts toward it. That 64 is not just the instructions *you* add — it includes every inner instruction: the cross-program invocations (CPIs) a program makes while it executes. When your top-level instruction calls into a program that itself invokes the Token program, the System program, and an associated-token-account program, each of those is an instruction the runtime tallies against the same 64.
+
+You do not control that number from your client, and you usually cannot even see it at build time. Programs hold no internal state, so every account is an explicit input you supply — but the CPIs a program fans out to are its business, not yours. A single instruction that looks cheap in your code can expand into four or five inner instructions on-chain. Pack 20 top-level instructions expecting to sit comfortably under 64, and a handful of CPI-heavy ones can push the executed transaction over the edge — a failure that shows up only when it runs, not when you build it.
+
+## What Kit v7's transaction planner changed
+
+Kit's transaction planner and message packer take an instruction plan and pack instructions into as few transaction messages as will hold them. In v7 that packing gained a configurable ceiling, `maxInstructionsPerTransaction`, and it defaults to 16.
+
+The reasoning is a budget: 16 top-level instructions, times an assumed ~3 inner instructions each, lands right around 64. Rather than let you fill a message with 60 top-level instructions and discover the CPI overflow at runtime, Kit reserves headroom up front and splits the plan into multiple transaction messages once it crosses the cap.
+
+Set the ceiling when you create a planner:
+
+```ts
+import { createTransactionPlanner } from '@solana/kit'
+
+const planner = createTransactionPlanner({
+  createTransactionMessage,
+  maxInstructionsPerTransaction: 16, // the v7 default
+})
+
+const plan = await planner(instructionPlan)
+```
+
+`createTransactionMessage` is your message factory; `maxInstructionsPerTransaction` is the new cap applied to every plan this planner produces. You can also override it for a single planning call, or when packing a message directly:
+
+```ts
+const plan = await planner(instructionPlan, { maxInstructionsPerTransaction: 8 })
+
+const packed = messagePacker.packMessageToCapacity(message, { maxInstructions: 32 })
+```
+
+Two error codes keep the soft limit distinct from the hard one. Exceed your configured cap and the planner throws `SOLANA_ERROR__INSTRUCTION_PLANS__MAX_INSTRUCTIONS_PER_TRANSACTION_EXCEEDED`; the format-enforced 64-instruction ceiling still throws `SOLANA_ERROR__TRANSACTION__TOO_MANY_INSTRUCTIONS`. A cap that is not a positive integer at or below 64 throws `SOLANA_ERROR__INSTRUCTION_PLANS__INVALID_MAX_INSTRUCTIONS_PER_TRANSACTION`.
+
+If your app deliberately relied on packing 17 to 64 top-level instructions into a single transaction, v7 is a breaking change. Restore the old behavior explicitly, and you take on the CPI-overflow risk yourself:
+
+```diff
+ const planner = createTransactionPlanner({
+   createTransactionMessage,
++  maxInstructionsPerTransaction: 64,
+ })
+```
+
+## When your plan splits, your user signs twice
+
+Here is the part that reaches your users. Each transaction message the planner emits is a separate transaction, with its own signature and its own wallet approval. A plan that fit in one message before v7 and now splits into two means one extra signing prompt — and, because separate transactions are not atomic, a real chance the first lands and the second is rejected or fails, leaving the user half-done.
+
+That seam is exactly what an end-to-end test should cover. If you drive a real Phantom extension with [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom), a split plan surfaces as more than one signing request, and the test has to approve each:
+
+```ts
+// Your dApp submits the plan; a two-message split
+// asks Phantom to sign twice, in a row.
+await phantom.approve() // first transaction message
+await phantom.approve() // second transaction message
+```
+
+The value is not just a passing test. It is noticing — in a test rather than a support ticket — that an action you thought was one signature is now two. From there you decide deliberately: raise the cap, split the work into distinct user-facing steps, or restructure the plan so it fits in one message.
+
+## The takeaway
+
+Kit v7's default is a reminder that on Solana the instruction budget you spend is not the one you write — CPIs spend it too. Treat `maxInstructionsPerTransaction` as a choice, not a default to inherit silently, and exercise the path where a plan splits across transactions. A single action that quietly becomes two signatures is a UX change, and the cheapest place to catch it is before a user does.
