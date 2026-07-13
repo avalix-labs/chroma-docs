@@ -1,0 +1,64 @@
+---
+title: "EIP-7843's SLOTNUM Opcode: Reading Ethereum's Beacon Slot On-Chain Without Hardcoding 12 Seconds"
+description: "EIP-7843 adds the SLOTNUM opcode in Glamsterdam, exposing Ethereum's beacon slot number on-chain — no hardcoded slot length, no EIP-4788 proofs."
+date: 2026-07-13
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): EIP-7843 adds the SLOTNUM opcode in Glamsterdam, exposing Ethereum's beacon slot number on-chain — no hardcoded slot length, no EIP-4788 proofs. */}
+
+If a contract needs to know "what time is it on Ethereum right now," you have two mediocre options today. You can read `block.timestamp` and divide by a slot length you hardcoded, or you can verify an EIP-4788 beacon root proof and pay gas for the privilege. Both leak an assumption the protocol never actually promised to keep. EIP-7843, scheduled for inclusion in the Glamsterdam upgrade, adds a third path: a `SLOTNUM` opcode that hands your contract the beacon chain slot number directly. It is a small change — one opcode, two gas — but it removes a hardcoded constant that a surprising number of contracts quietly depend on.
+
+## Why block.timestamp and block.number don't give you the slot
+
+The instinct is to reach for the two time-like globals Solidity already exposes. Neither one is the slot.
+
+`block.number` is the **execution-layer block height** — how many blocks have been produced, not how many slots have elapsed. On Ethereum, slots can be missed: a validator goes offline, no block lands, and the slot passes empty. Every missed slot pushes `block.number` and the true slot count further apart. A contract that assumes "one block ≈ 12 seconds" is already wrong by however many slots the network has skipped, and that drift only grows.
+
+`block.timestamp` gets you closer, because the timestamp of a block is its slot's wall-clock time. You can recover the slot with `slot = (block.timestamp - GENESIS_TIME) / SECONDS_PER_SLOT`. But now you have hardcoded two constants — the beacon genesis time and the 12-second slot length — into contract code that lives for years. If the slot length ever changes, or you deploy the same source to a chain with different consensus timing, the math silently returns the wrong slot. EIP-7843's motivation names this directly: the goal is to "abstract away the slot length from applications."
+
+## What SLOTNUM (0x4b) actually returns
+
+`SLOTNUM` is opcode `0x4b`. It takes no stack inputs and pushes one value: the slot number for the current block, encoded as a `uint64` in big-endian. The gas cost is a flat **2**, priced to match the other cheap environment opcodes like `NUMBER` and `TIMESTAMP`.
+
+The interesting design decision is *where* the value comes from. The slot number is computed in the **consensus layer** and passed to execution through the Engine API rather than derived inside the EVM, because "values pertaining to the beacon chain" belong on the consensus side. And because the slot number lands in the block header, the block stays "self-contained for proving; no extra inputs to the circuit are required" — a real convenience for ZK-VM and light-client work.
+
+One practical note: this is a raw opcode. Until Solidity and Vyper add a builtin to surface it, you reach it through inline assembly rather than a `block.slot`-style global. Don't invent a keyword that isn't shipped yet — check your compiler's release notes once Glamsterdam lands.
+
+## Where a native slot number earns its keep
+
+The clearest win is any contract that keys behavior to consensus time. Auctions that close at a specific slot, vesting cliffs, commit-reveal windows, and rate limiters all currently express "when" through timestamp arithmetic with a baked-in slot length. `SLOTNUM` lets them reference the slot the beacon chain itself is counting, so the on-chain deadline and the off-chain schedule stay in lockstep even if timing parameters shift.
+
+It also helps anything that cross-references beacon data. Attestations, RANDAO values, and many oracle feeds are indexed by slot, not block, so reading the slot natively keeps your contract and the off-chain source on the same integer. And it retires a small but real class of bug: the shared "time math" helper with `SECONDS_PER_SLOT = 12` baked into a constant — a landmine on any chain where the assumption doesn't hold.
+
+## Testing time-gated logic before Glamsterdam ships
+
+Whichever primitive you use, the bug almost always lives at the boundary — the transaction submitted one slot after the deadline that the UI still let through, or the "auction closed" state that never renders. That is a wallet-level failure, invisible to a unit test that calls the contract directly. With `@avalix/chroma`, you advance your local chain past the closing slot and then push the user through the actual MetaMask flow:
+
+```ts
+import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test('bid is rejected once the auction slot has passed', async ({ page, wallets }) => {
+  const metamask = wallets.metamask
+  await metamask.importSeedPhrase({ seedPhrase: process.env.TEST_SEED! })
+
+  await page.goto('http://localhost:3000/auction')
+  await metamask.authorize()
+
+  // Local node has already advanced past the auction's closing slot
+  await page.getByRole('button', { name: 'Place bid' }).click()
+  await metamask.reject() // the user backs out of a bid that can no longer win
+
+  await expect(page.getByText('Auction closed')).toBeVisible()
+})
+```
+
+Line by line: `importSeedPhrase` loads a funded test account, `authorize()` handles the connection popup, and `metamask.reject()` exercises the path where the user declines a doomed transaction. The assertion checks that your dApp actually surfaces the closed state instead of leaving the button live. Swap `reject()` for `confirm()` to test the happy path just before the deadline.
+
+## Where this leaves you
+
+`SLOTNUM` won't change how most contracts are written, but it quietly fixes the ones that reason about Ethereum's clock. If you maintain a library with a hardcoded slot length, flag it now — Glamsterdam is in its devnet phase, and this is the kind of constant worth deleting before it drifts. And whether your deadlines key off timestamps or slots, test the boundary through a real wallet — that is where users hit the bug first.
