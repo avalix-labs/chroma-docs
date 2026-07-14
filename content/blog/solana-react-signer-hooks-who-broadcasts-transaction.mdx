@@ -1,0 +1,72 @@
+---
+title: "Who Broadcasts Your Solana Transaction? Choosing an @solana/react Signer Hook"
+description: "@solana/react gives you two signer paths: let the wallet broadcast, or sign in your dApp and send it yourself. Here's how to pick and wire each into Kit."
+date: 2026-07-14
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): @solana/react offers two signer paths — wallet broadcasts, or your dApp sends. Here's how to pick between them and wire each into a Kit transaction pipe. */}
+
+You have migrated your Solana dApp to `@solana/kit`, the Wallet Standard registers the installed wallet, and you are holding a `UiWalletAccount`. Now you need a transaction signed and on-chain. `@solana/react` hands you more than one hook to do that, and they differ in a way the names hide: who actually *broadcasts* the transaction — the wallet, or your own dApp. Picking the wrong one for the job does not throw. It quietly moves control over the RPC endpoint, the retry loop, and the priority fee to a place you did not intend. That distinction is the whole of good **Solana transaction signing** on the client, so it is worth pinning down before it surprises you under load.
+
+## Two shapes: a signer that sends, and a signer that only signs
+
+On the SVM, a transaction is a message — a fee payer, a blockhash lifetime, and an ordered list of instructions, each naming the explicit accounts it touches. Signing produces a 64-byte ed25519 signature over the compiled message. What happens *after* signing is where `@solana/signers` draws its line:
+
+- A **`TransactionModifyingSigner`** (or partial signer) signs the message and hands the signatures back. Your code decides where and when to submit.
+- A **`TransactionSendingSigner`** signs *and* submits in one step, returning the signature of the transaction it already broadcast.
+
+This split is not academic on Solana. Mobile wallets and several browser wallets prefer to submit transactions themselves — over their own RPC, with their own priority-fee bump, retrying while the blockhash is still valid. Others just return a signature and leave the send to you. It maps directly onto the two Wallet Standard features a wallet can advertise: `signAndSendTransaction` versus `signTransaction`.
+
+## The hooks, mapped to who sends
+
+`@solana/react` gives you a hook for each shape:
+
+- `useSignAndSendTransaction(account, chain)` — the direct path. Pass it transaction bytes; the wallet signs and broadcasts, and you get back `{ signature }`.
+- `useWalletAccountTransactionSendingSigner(account, chain)` — returns a `TransactionSendingSigner` you drop into a Kit message pipe. The wallet still owns the broadcast.
+- `useWalletAccountTransactionSigner(account, chain)` — returns a `TransactionModifyingSigner`. The wallet signs only; your dApp submits.
+
+(For off-chain flows there are `useSignMessage` and `useWalletAccountMessageSigner`, the ones a Sign In With Solana flow reaches for.)
+
+Here is the sending-signer path composed into a Kit pipe:
+
+```tsx
+const signer = useWalletAccountTransactionSendingSigner(account, 'solana:mainnet-beta');
+
+const { value: latestBlockhash } = await rpc.getLatestBlockhash().send();
+const message = pipe(
+  createTransactionMessage({ version: 0 }),
+  m => setTransactionMessageFeePayerSigner(signer, m),
+  m => setTransactionMessageLifetimeUsingBlockhash(latestBlockhash, m),
+  m => appendTransactionMessageInstruction(getAddMemoInstruction({ memo: 'gm' }), m),
+);
+const signature = await signAndSendTransactionMessageWithSigners(message);
+```
+
+Line by line: the hook turns the wallet account into a signer; `createTransactionMessage({ version: 0 })` starts a versioned (v0) message that can carry address lookup tables; `setTransactionMessageFeePayerSigner` marks the wallet as fee payer *and* the signer to use; the blockhash sets the lifetime; `appendTransactionMessageInstruction` adds your instruction. The important line is the last one. Because the fee-payer signer is a *sending* signer, `signAndSendTransactionMessageWithSigners` recognizes it and delegates the whole submit to the wallet. You never call a send function, and you never chose the RPC that broadcast the transaction.
+
+## When your dApp should send instead
+
+Reach for the modifying signer when you need something the wallet will not hand over: a specific RPC (a staked connection to land under congestion), your own priority-fee estimation, retry logic wired to your UI, or a chance to introspect and simulate the exact bytes before they go out.
+
+```tsx
+const signer = useWalletAccountTransactionSigner(account, 'solana:mainnet-beta');
+const sendAndConfirm = sendAndConfirmTransactionFactory({ rpc, rpcSubscriptions });
+
+const message = pipe(
+  createTransactionMessage({ version: 0 }),
+  m => setTransactionMessageFeePayerSigner(signer, m),
+  m => setTransactionMessageLifetimeUsingBlockhash(latestBlockhash, m),
+  m => appendTransactionMessageInstruction(instruction, m),
+);
+const signed = await signTransactionMessageWithSigners(message);
+await sendAndConfirm(signed, { commitment: 'confirmed' });
+```
+
+Now the wallet returns signatures and *you* broadcast, over the RPC you configured, retrying against the blockhash-expiry race yourself. That is the trade: more control, more of the landing problem on your plate. Do not pick the sending signer just because it is two lines shorter — on a busy network, who broadcasts and at what priority fee is often the difference between a transaction that lands and one that expires unsigned in a queue.
+
+## Where this shows up in your tests
+
+Whichever path you choose, the human step is identical: a Phantom popup asking the user to approve. That boundary is the one thing you cannot mock. Driving a real Phantom popup through [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom) exercises the genuine approve-and-reject flow, and the signature it returns is what your assertions hang on. The signer choice just changes what the test waits on afterward: with a sending signer, assert the returned signature confirms; when your dApp sends, assert your own send-and-confirm path fired and recovered if the first broadcast dropped.
+
+The takeaway: the hook name is the less important half. Read the signer *type* it returns. Default to the wallet's sending signer for simple flows and the widest mobile reach; take the modifying signer when landing under load, priority fees, or pre-send introspection are yours to own — and decide that on purpose, not by whichever hook you imported first.
