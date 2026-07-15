@@ -1,0 +1,77 @@
+---
+title: "EIP-7778: Gas Refunds Will Still Cut Your Bill, but Stop Buying Block Space"
+description: "EIP-7778 stops gas refunds from reducing block gas usage. Refunds still lower your transaction bill, but block accounting now counts gross gas."
+date: 2026-07-15
+author: Chroma Team
+---
+
+Most gas discussions treat one number as the answer: how much a transaction costs. But the EVM tracks gas twice — once against your transaction, and once against the block it lands in. Those two counters have quietly disagreed for years, and **EIP-7778** (Block Gas Accounting without Refunds) is the proposal that finally splits them apart. It is part of the Glamsterdam bundle now moving through its final devnet phase, alongside a target block gas limit near 200M. Nothing about the fix changes what your users pay — but it changes how much real computation a block is allowed to do, and that has knock-on effects for anyone who reasons about block capacity.
+
+## Two gas counters, one refund
+
+When a transaction sets a storage slot from non-zero back to zero, the EVM issues a refund. After EIP-3529 (London, 2021) that refund is 4,800 gas per cleared slot, capped at `gas_used / 5` — at most 20% of the transaction. The refund exists to reward developers for cleaning up state they no longer need.
+
+```solidity
+// Clearing a slot triggers the storage-clearing refund
+function close(address user) external {
+    balances[user] = 0; // ~4,800 gas refunded, post-EIP-3529
+}
+```
+
+Here is the part that surprises people. Today that refund is subtracted from *both* counters:
+
+```text
+// Today
+user pays:        max(tx_gas_used - gas_refund, calldata_floor)
+block.gas_used += max(tx_gas_used - gas_refund, calldata_floor)
+```
+
+So a transaction that executed 130k gas of real work but earned a 30k refund charges the user for 100k *and* only consumes 100k of the block's budget. Multiply that across a full block and the block can perform more computation than its gas limit nominally permits. The EIP cites a real mainnet block whose net usage was 28.5 MGas but whose gross usage — the work validators actually did — reached 32.51 MGas, exceeding the limit by 2.51 MGas.
+
+## What EIP-7778 changes
+
+The proposal leaves the user-facing side alone and rewrites only the block side:
+
+```text
+// After EIP-7778
+user pays:        max(tx_gas_used - gas_refund, calldata_floor)  // unchanged
+block.gas_used += max(tx_gas_used, calldata_floor)               // no refund subtracted
+```
+
+The block now counts *gross* gas — the actual execution cost, before any refund. Refunds keep flowing to the transaction, so your storage-clearing pattern is still worth writing and your bill is unchanged. What disappears is the ability for refunds to "overclock" a block: the gas limit once again bounds the real computational load, which makes block processing time more predictable and closes a mild denial-of-service vector. That predictability matters more, not less, as the limit climbs toward 200M.
+
+## Where this actually bites
+
+For a developer sending a single transaction, this is a non-event — same gas limit, same final charge. The effects land one layer up, on anything that reasons about *how much fits in a block*:
+
+- **Batchers and multicall sizing.** If you pack operations up to the block gas limit and credit refunds toward headroom, you will over-pack after the upgrade. Size batches against gross execution gas, not net.
+- **Relayers and block builders.** A storage-heavy transaction now occupies its full gross cost in the block. Under congestion, refund-laden transactions compete for space as if the refund did not exist, so inclusion economics shift slightly against them.
+- **Anyone snapshotting `cumulativeGasUsed`.** Receipt-level cumulative gas and block `gasUsed` will read higher for refund-heavy blocks, because they now reflect gross work.
+
+The one thing you should *not* do is stop clearing storage to dodge the change. The refund still lands on the user's bill; only the block's accounting moved.
+
+## The testing angle
+
+If your suite asserts on block-level gas — `gasUsed`, `cumulativeGasUsed`, or a custom "how many actions fit in one block" check — rerun those assertions against a devnet or fork that includes EIP-7778 before you assume your numbers hold. Per-transaction receipts for your users stay put; block totals are what move.
+
+This is also worth confirming end to end. If your E2E suite drives a real wallet — for example, submitting the transaction through MetaMask with [@avalix/chroma](https://chroma.avalix.dev) and asserting on the mined receipt — those assertions exercise the real signing-and-broadcast path, so a block-accounting shift shows up in your test output rather than in production.
+
+```ts
+import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({ wallets: [{ type: 'metamask' }] })
+
+test('withdraw clears storage and mines', async ({ page, wallets }) => {
+  const metamask = wallets.metamask
+  await metamask.importSeedPhrase({
+    seedPhrase: 'test test test test test test test test test test test junk',
+  })
+  await page.goto('https://your-dapp.example.com')
+  await page.getByRole('button', { name: 'Connect Wallet' }).click()
+  await metamask.authorize()
+  await page.getByRole('button', { name: 'Withdraw' }).click()
+  await metamask.confirm() // approve the storage-clearing tx in MetaMask
+})
+```
+
+The takeaway is small but easy to get wrong: after EIP-7778, a gas refund is a discount on your bill, not a coupon for extra block space. Keep clearing your storage — just stop assuming those refunds buy the network any more room to work.
