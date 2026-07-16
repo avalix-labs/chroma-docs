@@ -1,0 +1,75 @@
+---
+title: "Polkadot Just Removed Nominator Slashing: What Your Staking dApp Needs to Unlearn"
+description: "Polkadot removed nominator slashing and cut unbonding to ~48 hours. Here's what your staking dApp's UX, validator filtering, and E2E tests must change."
+date: 2026-07-16
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): Polkadot removed nominator slashing and cut unbonding to ~48 hours. Here's what your staking dApp's UX, validator filtering, and E2E tests must change. */}
+
+If your dApp lets users nominate validators, some of its most stable code just became wrong. The 28-day unbonding warning, the "your DOT can be slashed if your validator misbehaves" banner, the validator list sorted by commission — those were correct for years, which is exactly why they are easy to miss. On July 8, 2026, two OpenGov referenda changed the assumptions underneath all of them. This is a Polkadot staking change, and it touches the parts of a nomination dApp that developers rarely revisit.
+
+## The two referenda that changed staking overnight
+
+Referenda **1909** and **1910** were approved on July 6 and took effect on July 8. Keep the two roles straight, because the changes split cleanly along them: **nominators** are users who back validators with DOT, and **validators** are the operators who produce blocks.
+
+**Referendum 1910** targets nominators. It removes slashing for nominators entirely — misbehavior by a validator no longer burns the DOT that nominated it — and cuts the unbonding period from roughly 28 days to about 48 hours.
+
+**Referendum 1909** targets validators. Validators must now post a meaningful minimum self-stake (on the order of 10,000 DOT), commission is pushed toward 0% with a revised upper cap, and a permissionless "chill" lets anyone remove a validator that falls below the self-stake floor from the active set. Slashing risk did not disappear; it moved onto the validator's own capital, which is why nominators can be released from it.
+
+For a dApp, that is three separate assumptions to re-check: the risk you warn about, the numbers you display, and the validators you recommend.
+
+## The nominator risk model flipped — audit your UI copy
+
+Start with the text your users read. Any nomination flow that shows a slashing warning on the nominator path is now describing a risk that no longer exists for them. Leaving it in isn't just stale copy; it pushes users away from staking for a reason that stopped being true. Slashing warnings still belong on the *validator* onboarding path, where self-stake is genuinely at risk — but the nominate button should stop inheriting them.
+
+The unbonding countdown is the other piece. Any "funds available in ~28 days" string, progress bar, or reminder derived from that number now overstates the wait by roughly two weeks. If your app feeds that figure into liquid-staking math or an XCM lockup assumption elsewhere, those paths inherit the same error.
+
+## Validator selection now has to read self-stake
+
+Validator lists that rank purely by commission are about to look strange, because commission is trending to zero across the set — it stops being a differentiator. The signal that now matters is self-stake and whether a validator is safe from a permissionless chill.
+
+That second point is the one to surface. Anyone can call `staking.chillOther` against a validator sitting below the minimum self-stake, which drops it from the active set. A nominator pointed at an under-bonded validator can quietly stop earning until they re-nominate. If your dApp shows a validator's self-stake next to its commission and flags ones near the floor, users avoid nominating a target that can be chilled out from under them. The data is on-chain — read the validator's ledger and compare against the runtime's minimum-validator-bond constant rather than a value you hardcode.
+
+## Don't hardcode 48 hours — and test the exit flow
+
+It is tempting to swap the `28` in your codebase for a `2` and move on. Don't. The unbonding window is a runtime constant (`bondingDuration`, measured in eras), and it just proved it can change by governance. Read it from the chain, combine it with `currentEra`, and compute each unlocking chunk's ready time from the `era` recorded in the staking ledger. Then your countdown stays correct through the next referendum without a redeploy.
+
+The exit itself is unchanged in shape — `staking.unbond(value)`, wait out `bondingDuration`, then `staking.withdrawUnbonded(...)` — only the wait got shorter. Because each of those is an extrinsic the user signs in their wallet, the reliable way to confirm your dApp displays the new window is to drive the real signing popup end to end.
+
+That is the kind of flow [@avalix/chroma](https://github.com/avalix-labs/chroma) was built to cover. It runs the real Polkadot.js extension inside Playwright, so the nominate and unbond popups are the ones your users see:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'polkadot-js' }],
+})
+
+test('nominates, then starts an unbond', async ({ page, wallets }) => {
+  const polkadotJs = wallets['polkadot-js']
+
+  // Import a funded test account before the dApp loads
+  await polkadotJs.importMnemonic({
+    seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk',
+  })
+
+  await page.goto('http://localhost:3000/staking')
+  await page.click('button:has-text("Connect")')
+  await polkadotJs.authorize()
+
+  // Bonding + nominating signs a staking extrinsic in the real popup
+  await page.click('button:has-text("Nominate")')
+  await polkadotJs.approveTx()
+
+  // Start unbonding, then assert the dApp shows the new ~48h window
+  await page.click('button:has-text("Unbond")')
+  await polkadotJs.approveTx()
+
+  await expect(page.locator('.unbond-eta')).toContainText('2 days')
+})
+```
+
+`importMnemonic` seeds the account before your dApp queries it, `authorize()` clears the connect popup, and `approveTx()` signs each staking extrinsic in the real signing dialog. The final assertion is the one that catches a hardcoded `28` still lurking in a component — the value the runtime returns and the value your UI renders have to agree.
+
+The staking rules changed once by governance and can change again. The durable fix isn't editing a constant; it's reading the risk model and the timing from the chain, then pinning the nominate-to-unbond flow with a test that signs against the real extension. Do that, and the next referendum is a green test run instead of a support ticket.
