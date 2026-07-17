@@ -1,0 +1,53 @@
+---
+title: "Solana Stake Program v5: What SIMD-0490 Changes for Your Staking dApp"
+description: "Solana Stake Program v5 (SIMD-0490) is live: a 1 SOL minimum delegation, deprecated rent_exempt_reserve, and optional sysvars. What staking dApps must update."
+date: 2026-07-17
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): Solana Stake Program v5 (SIMD-0490) is live: a 1 SOL minimum delegation, deprecated rent_exempt_reserve, and optional sysvars. What staking dApps update. */}
+
+If your dApp creates, delegates, splits, or merges native stake accounts, the ground moved under you on June 18, 2026. That is when **Solana Stake Program v5** activated on mainnet under SIMD-0490, and it quietly changes three things a lot of staking dApps have hardcoded: the minimum you can delegate, where you read a stake account's rent reserve, and which accounts an instruction actually needs. None of these break existing stake accounts — but the code you use to build *new* stake transactions needs a second look.
+
+The Stake Program is one of Solana's native programs, so this is not an SPL package you can pin to an old version. Once the runtime ships v5, every stake instruction on mainnet runs the new rules. Here is what actually changed and what to audit.
+
+## The 1 SOL minimum delegation is now a hard floor
+
+Before v5, the minimum stake delegation was 1 lamport. In practice you could open a stake account with almost nothing. v5 raises that floor to **1 SOL** for any newly delegated stake account. The program itself enforces it: a `DelegateStake` instruction that would leave the account below the minimum is rejected, not silently clamped.
+
+Two things matter for dApp authors. First, existing delegations below 1 SOL are untouched — the rule applies only to new stake accounts created after activation. Second, do not hardcode the number. Solana exposes the current minimum through the `getStakeMinimumDelegation` RPC method, and reading it at runtime keeps your validation aligned with the network instead of a magic constant that a future SIMD can move again:
+
+```ts
+// @solana/kit — read the enforced minimum, don't assume 1 SOL forever
+const { value: minLamports } = await rpc.getStakeMinimumDelegation().send()
+```
+
+`minLamports` is the floor in lamports. Compare the user's intended delegation against it *before* you build the transaction so you can show a useful error instead of surfacing a raw program failure.
+
+## Rent-exemption no longer lives in `Meta.rent_exempt_reserve`
+
+Every stake account carries a `Meta` struct, and it has long held a `rent_exempt_reserve` field. Plenty of dApps read that field to figure out how many lamports are "locked" for rent versus actually delegatable. v5 deprecates that path. The program now prioritizes the live `Rent` sysvar for its own math, and it pins `rent_exempt_reserve` on new accounts to a fixed `2_282_880` lamports for backward compatibility rather than treating it as a source of truth.
+
+The takeaway is the same lesson rent reductions keep teaching on Solana: compute rent-exemption from the `Rent` sysvar at runtime, not from a value baked into an account you decoded. If you were subtracting `Meta.rent_exempt_reserve` to display a withdrawable balance, switch to the rent calculation for the account's data length. The field will keep returning a number; it just is not the number you want to build logic on anymore.
+
+## Sysvar accounts are optional — smaller transactions, simpler CPI
+
+This is the change most likely to shrink your transactions. Older stake instructions required you to pass sysvar accounts — clock, stake history, and friends — as explicit inputs. Because Solana transactions are instruction-based and every account is an explicit input, those sysvars ate into your account list and your byte budget on every stake operation.
+
+v5 makes all sysvar account inputs **optional**. The program still gracefully accepts instructions that include them, so nothing you already deployed breaks. But new builders can drop the sysvars, which trims the account array and the serialized transaction size — and, importantly, lets programs that CPI into the Stake Program stop forwarding those accounts too. Updated instruction builders in the SDKs land after the mainnet rollout, so check your `@solana/kit` or Anchor stake helpers before you manually assemble the account list yourself.
+
+## Split, merge, and testing the rejection path
+
+Two behavioral fixes ride along. The `Split` processor was rewritten to fix long-standing bugs with deactivated stakes, with one deliberate breaking change: **self-splitting is now an error**. And merging an activating stake now moves *all* lamports from the source account, not just the delegated portion plus reserve. If your dApp offers "split my stake" or "consolidate my stakes" flows, re-test both against v5 devnet behavior.
+
+The 1 SOL floor is the sharpest new failure mode for users, and it lives at the wallet boundary — a user tries to stake 0.4 SOL, and the transaction the wallet signs comes back rejected by the program. That rejection path is exactly what an end-to-end test should assert, because it only exists once a real wallet has approved a real transaction. Driving a live Phantom extension with [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom), the approval step is a genuine click, and your test can confirm the dApp surfaces the right error instead of a spinner that never resolves:
+
+```ts
+// Phantom signs the delegate transaction; your dApp
+// must handle the program-level minimum-delegation reject.
+await phantom.approve()
+```
+
+## Where to start
+
+Grep your codebase for three things: a hardcoded stake minimum, any read of `rent_exempt_reserve`, and manually-built stake instructions that still pass sysvar accounts. Swap the first for a `getStakeMinimumDelegation` call, the second for a runtime `Rent` calculation, and let updated SDK builders handle the third. Then run your staking flows against a real wallet so the 1 SOL floor shows up in a test, not a support ticket.
