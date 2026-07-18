@@ -1,0 +1,65 @@
+---
+title: "LiteSVM: Test Solana Programs Without Booting a Validator"
+description: "LiteSVM runs the Solana runtime in-process, so program tests skip the validator. Here's the account and clock control model, and where E2E tests take over."
+date: 2026-07-18
+author: Chroma Team
+---
+
+Every Solana program starts its life being tested against `solana-test-validator`. It works, but it is slow: spinning up a local validator, waiting for it to warm up, and pushing each test through a real RPC round-trip turns a tight feedback loop into a coffee break. LiteSVM takes a different route. It runs the actual Solana Virtual Machine in-process — inside your test file, with no validator, no networking, and no consensus. A test that used to take seconds now takes milliseconds, and Anchor 1.0 made LiteSVM one of its default test tools, so it is where a lot of new Solana program testing now begins. This post covers how the in-process model works, how you build and bend state, and the boundary where it hands off to a real wallet.
+
+## What running the SVM in-process actually means
+
+LiteSVM is a library, not a process. `new LiteSVM()` constructs a fresh, empty SVM: the same transaction-processing and account rules mainnet runs, minus the parts that need a network — gossip, block propagation, the vote loop, RPC.
+
+Because it is in-process, `sendTransaction` executes synchronously and returns immediately. You get back either a `TransactionMetadata` on success or a `FailedTransactionMetadata` on failure — logs, compute units consumed, and return data are right there in the object, with no `getTransaction` polling.
+
+Nothing is "confirmed" or "finalized" here, because there is no cluster to confirm against. The transaction either executes against the current account state or it doesn't. That is the trade you are making: you give up everything about the network — fee markets, leader scheduling, real confirmation — and keep everything about execution: the runtime, the account model, and compute-unit metering.
+
+```ts
+import { LiteSVM } from 'litesvm'
+import { Keypair, LAMPORTS_PER_SOL } from '@solana/web3.js'
+
+const svm = new LiteSVM()
+const payer = Keypair.generate()
+
+svm.airdrop(payer.publicKey, BigInt(LAMPORTS_PER_SOL))
+const result = svm.sendTransaction(tx)
+```
+
+`new LiteSVM()` builds the in-process runtime. `airdrop` credits lamports with no faucet and no waiting. `sendTransaction` runs the instruction and hands back the result object right away — no callback, no subscription.
+
+## Building state instead of forking it
+
+This is where LiteSVM differs from a mainnet-fork tool. A fork clones production accounts on demand; LiteSVM starts blank, and you construct exactly the state a test needs.
+
+- `addProgramFromFile(programId, path)` loads your compiled `.so` into the runtime. This is how the program under test gets deployed — no `solana program deploy`, no upgrade authority.
+- `setAccount(pubkey, { lamports, data, owner, executable })` writes an account's raw bytes directly. That is the escape hatch for placing a token account, a PDA, or an oracle account in exactly the shape your instruction expects, without running the sequence of transactions that would normally create it.
+- `getAccount(pubkey)` and `getBalance(pubkey)` read the ledger back so you can assert on it.
+
+The SVM model makes this precise. Because every account an instruction touches is passed in explicitly, you always know the full set of inputs to prepare — there is no hidden global state to mock. When a test fails, it fails because of accounts you can see and set, not a background service you can't reach.
+
+## Controlling the clock and blockhash
+
+Fast tests are half the value; deterministic control over time is the other half.
+
+`getClock()` and `setClock()` move the SVM's clock. Read the clock, bump `unixTimestamp`, set it back, and a vesting cliff or an unstake cooldown that gates on `Clock::get()` triggers instantly — no real waiting, no brittle `sleep`.
+
+```ts
+const clock = svm.getClock()
+clock.unixTimestamp = clock.unixTimestamp + 604800n // +7 days
+svm.setClock(clock)
+```
+
+`expireBlockhash()` forces the current blockhash to lapse, so you can exercise how your program and client behave when a transaction is submitted with a stale blockhash — the `BlockhashNotFound` path that is otherwise awkward to reproduce on demand.
+
+One recent addition worth tracking: the LiteSVM maintainers are wiring up a `getProgramAccounts` interface (in the July 2026 releases) so a test can query the harness for every account owned by a program and assert that a program-derived account was actually created — a check that previously meant decoding a specific PDA by hand.
+
+## Where LiteSVM stops and your wallet tests begin
+
+LiteSVM tests your program. It does not test the two things that most often break in front of real users: production account state your instruction never anticipated, and the wallet approval a human actually clicks.
+
+For the first, a mainnet-fork tool like Surfpool runs the same program against real cloned accounts. For the second, the signature has to come from a genuine wallet popup, not a generated keypair — and that is a browser-level, end-to-end concern that an in-process runtime, by design, never sees. If you drive that layer with [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom), the test clicks through a real Phantom approval, so you cover the human step that LiteSVM cannot reach. The three layers stack cleanly: LiteSVM for millisecond program logic, a fork for real state, and an E2E wallet test for the approval itself.
+
+## The takeaway
+
+Reach for LiteSVM when you want your program's logic under test in a loop tight enough to run on every save. Build the exact accounts each case needs with `setAccount`, script time with `setClock`, and read results straight off the returned metadata instead of polling an RPC. Then be honest about its edge: it is a runtime, not a network and not a wallet. Layer a fork and an E2E wallet suite on top, and your fast tests stay fast without pretending to cover what they can't.
