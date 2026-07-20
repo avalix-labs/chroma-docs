@@ -1,0 +1,49 @@
+---
+title: "Solana's Block Rewards Are About to Reach Delegators: What SIMD-123 Changes for Staking dApps"
+description: "SIMD-123 makes Solana share block rewards with delegators each epoch. Here's how the vote-account commission works and what staking dApps must update."
+date: 2026-07-20
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): SIMD-123 makes Solana share block rewards with delegators each epoch. How the vote-account commission works and what staking dApps must update. */}
+
+If your staking dApp shows a delegator their expected yield, there is a good chance the number is about to be wrong. Today, Solana shares only *inflation* rewards with delegators. The fees a validator earns for producing blocks — priority fees and other block revenue — go entirely to the validator. SIMD-123, "Block Revenue Distribution," closes that gap: it routes a validator-set portion of block rewards back to the stake accounts that made those blocks possible. The proposal cleared governance with roughly 75% in favor and is nearly code-complete against the Agave 4.1 target, so this is worth understanding now rather than after your APY figures drift.
+
+## Two reward streams, and why stakers only ever saw one
+
+A Solana validator earns from two sources. Inflation rewards come from the protocol's issuance schedule and have always flowed to delegators, minus the validator's inflation commission. Block revenue is different: it is the fee income a validator collects for producing a block, dominated by priority fees. Because more delegated stake means more blocks assigned to a validator, delegators already drive block revenue — they just never received any of it. The protocol had no mechanism to split that income and no field to accrue it into.
+
+That asymmetry is why so much reward tooling reads one number and calls it "staking rewards." The JSON-RPC `getInflationReward` method returns exactly what its name says: the inflation portion for a set of addresses at a given epoch. It does not, and after SIMD-123 still will not, include block revenue. Block distribution is tracked through a separate epoch-rewards path and never touches the inflation sysvar's `total_rewards` or `distributed_rewards`. So a dApp that sums `getInflationReward` results and presents them as total staker earnings will under-report the moment this ships.
+
+## How the vote account splits block revenue
+
+SIMD-123 rides on Vote Account v4 (SIMD-0185), which adds two fields that do the accounting:
+
+- `block_revenue_commission_bps` (u16) — the validator's cut of block revenue, in basis points, capped at 10,000 (100%).
+- `pending_delegator_rewards` (u64) — the running total of post-commission block revenue awaiting distribution.
+
+After a block is processed, the protocol finds the producer's vote account and splits that block's revenue in two. The commission portion is sent to a collector account; the remainder accrues into `pending_delegator_rewards`. Crucially, the commission is a forward-looking setting — a validator cannot change it retroactively to claw back revenue already earned in the current epoch. That mirrors how inflation commission behaves and matters for any UI that lets users compare validators.
+
+Note that this is a *second, independent* commission. A validator you display as "5% commission" today is quoting inflation commission. After SIMD-123, "commission" is two numbers, and a validator can set them differently. Collapsing them into one field is the first bug this change will surface in staking frontends.
+
+## Distribution lands at the epoch boundary, not per block
+
+Delegators do not see block rewards trickle in transaction by transaction. Accrual happens per block into the vote account, but distribution happens once, at the start of the next epoch. Pending rewards move into the epoch-rewards sysvar and are paid out proportionally to each stake account's active delegation during the *prior* epoch (N-1). The share each delegator receives is:
+
+```
+reward = active_stake × pending_delegator_rewards ÷ total_active_stake
+```
+
+In plain terms: your slice of the pool equals your active stake divided by all active stake behind that validator, times the pool. Two consequences fall out of this. First, freshly delegated stake that was not active in epoch N-1 earns nothing in the first distribution — the same warm-up delay that already applies to inflation rewards. Second, reward history in your dApp needs a per-epoch, per-source breakdown, because the block-reward line item and the inflation line item now arrive on the same schedule but from different accounts.
+
+## What staking dApps have to update
+
+Three concrete changes:
+
+1. **Reward totals.** Stop treating `getInflationReward` as "total rewards." Add block-reward accounting, or your earnings and realized-APY numbers will be low.
+2. **Validator comparison.** Read and display both `block_revenue_commission_bps` and inflation commission. A validator with low inflation commission but 100% block-revenue commission is not the deal it looks like.
+3. **Projected yield.** Any APY estimate built only on issuance now understates real return, because priority-fee income is part of the delegator's take.
+
+Every one of these lives in the boundary between your UI and a real wallet — the delegate transaction the user signs, and the reward figures they read back afterward. That boundary is exactly what an end-to-end test should exercise against a real extension rather than a mock; @avalix/chroma drives the Phantom flow so your delegate-and-verify path is checked the way a user actually experiences it.
+
+The protocol is doing the hard part at the epoch boundary. Your job is to make sure the numbers you show a delegator add up to what actually landed in their stake account — across both reward streams, not just the one your tooling has always read.
