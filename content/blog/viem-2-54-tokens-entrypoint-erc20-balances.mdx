@@ -1,0 +1,72 @@
+---
+title: "viem 2.54's tokens Entrypoint: Reading ERC-20 Balances Without the Decimals Dance"
+description: "viem 2.54 adds a tokens entrypoint that carries ERC-20 metadata, so reading a balance returns amount, decimals, and formatted in one Amount object."
+date: 2026-07-21
+author: Chroma Team
+---
+
+Reading an ERC-20 balance is the most common thing an EVM dApp does, and until recently it was also one of the fussiest. A single balance number on screen usually hides three or four RPC reads and a formatting step that half your codebase gets subtly wrong. **viem 2.54** adds a `viem/tokens` entrypoint that folds the metadata a token carries — its decimals, its symbol, its address per chain — into a first-class object, and changes ERC-20 balance reads to return a fully formatted result. If you have ever hardcoded `6` for USDC and had it break on a chain where the bridged variant uses a different value, this is the change worth wiring in.
+
+## The four-call ritual behind one balance number
+
+`balanceOf` returns a raw `bigint`. On its own that number is meaningless to a user — 1 USDC is `1000000`, because USDC has 6 decimals, while 1 DAI is `1000000000000000000` because DAI has 18. To render a balance correctly you need the token's `decimals()`, usually its `symbol()`, and then `formatUnits` to turn the raw integer into a human string:
+
+```ts
+const raw = await publicClient.readContract({
+  address: usdc,
+  abi: erc20Abi,
+  functionName: 'balanceOf',
+  args: [user],
+})
+const decimals = await publicClient.readContract({
+  address: usdc,
+  abi: erc20Abi,
+  functionName: 'decimals',
+})
+const display = formatUnits(raw, decimals) // "12.5"
+```
+
+Nobody wants three sequential reads for one number, so teams cut corners. They hardcode `decimals` as a constant, or bake it into a token list, or batch the reads through multicall and still keep a hand-maintained decimals map alongside. Each shortcut is a place for the decimals to drift out of sync with the token that is actually deployed on the chain you are talking to — and when they drift, the balance renders off by a factor of `10^12` and the bug looks like a corrupted number rather than a metadata mismatch.
+
+## What the tokens entrypoint moves into viem
+
+viem 2.54 ships a curated registry of token definitions. You import the token you need and attach it to the client:
+
+```ts
+import { createPublicClient, http } from 'viem'
+import { mainnet } from 'viem/chains'
+import { usdc } from 'viem/tokens'
+
+const client = createPublicClient({
+  chain: mainnet,
+  tokens: [usdc],
+  transport: http(),
+})
+```
+
+A token imported from `viem/tokens` already carries its decimals and its address per chain, so you are no longer maintaining that data by hand. 2.54.1 added convenience collections for when you do not want to list tokens one by one — `tokens.all`, `tokens.popular`, and `tokens.tempo` — each assignable straight to the client's `tokens` property. The important shift is that ERC-20 token actions now resolve a symbol against the client's `tokens` array instead of built-in chain config. Once `usdc` is attached, `'usdc'` becomes a valid reference the client knows how to resolve to an address and a decimals count.
+
+## Reading a balance returns an Amount, not a bigint
+
+With a token attached, the read collapses to one call, and what comes back is no longer a bare integer:
+
+```ts
+const balance = await client.token.getBalance({
+  account: user,
+  token: 'usdc',
+})
+
+balance.amount     // 12500000n      — the raw bigint, if you need it
+balance.decimals   // 6              — resolved from the token definition
+balance.formatted  // "12.5"         — decimals already applied
+```
+
+`getBalance` returns an `Amount`: `{ amount: bigint; decimals: number; formatted: string }`. The `amount` field is the raw integer you would have gotten from `balanceOf`, kept for arithmetic where precision matters. The `formatted` field is the display string, with decimals already applied — no separate `formatUnits` call, no decimals constant to keep in sync. You reach for `amount` when you are doing math and `formatted` when you are rendering, and you stop shuttling a decimals value between the two by hand.
+
+The practical win is that the decimals used for formatting and the decimals used for the token are guaranteed to be the same value, because they come from the same definition. The most common ERC-20 display bug — right digits, wrong magnitude — comes from those two numbers disagreeing. Sourcing both from one object removes the disagreement.
+
+## Where this meets your end-to-end tests
+
+Most of what changes here lives in your read path, but it surfaces at the assertion boundary too. If you drive MetaMask through [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/metamask), a balance-display test does the wallet half — `await metamask.confirm()` on a transfer, say — and then asserts on the number your UI renders afterward. When that number comes from viem's `formatted` Amount rather than a hand-rolled `formatUnits` plus a local decimals constant, the "off by `10^12`" class of failure moves out of your own code and into a library path the ecosystem exercises. Your test still asserts the balance updated; it just no longer doubles as a regression test for your decimals bookkeeping, because there is no bookkeeping left to regress.
+
+That is the shape of a good tooling change: it does not add capability so much as remove a category of mistake. Reading a balance was never supposed to be four calls and a formatting map. In 2.54 it is one call that hands you both the raw value and the string, sourced from the same place — which is where token metadata should have lived all along.
