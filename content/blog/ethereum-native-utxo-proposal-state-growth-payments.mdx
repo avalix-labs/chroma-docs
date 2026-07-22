@@ -1,0 +1,66 @@
+---
+title: "Ethereum's Native UTXO Proposal: How One-Shot Payments Attack State Growth"
+description: "Ethereum's native UTXO proposal brings one-shot payments to cut the permanent state footprint of simple transfers by ~99.8%. Here's how it works."
+date: 2026-07-22
+author: Chroma Team
+---
+
+Every time you fund a fresh wallet, airdrop an ERC-20 to a new holder, or spin up a throwaway account for a test, Ethereum writes a leaf into its state trie and keeps it there forever. The transfer confirms in seconds; the storage it created outlives the reason you made it. Multiply that by every first-time recipient in the network's history and you get the quiet problem underneath most scaling debates: state only grows, and simple payments are among the worst offenders. A July 2026 research proposal from Ethereum Foundation researcher Toni Wahrstätter tackles this directly with **native, optional UTXOs on Ethereum** — Bitcoin-style one-shot payments that leave no permanent trace.
+
+This is research, not a shipped feature — but the problem it targets is real today, and the design is a sharp lens on how Ethereum stores value.
+
+## Why every payment leaves a permanent mark
+
+Ethereum's account model is stateful by definition. Each address is a leaf in the state trie holding a balance, a nonce, and — for contracts — storage. The first time an address receives ETH or a token, the protocol creates that leaf, and every full node keeps it in active state indefinitely. There is no built-in way to say "this account is done, forget it."
+
+For contracts and long-lived accounts, that is exactly what you want. For payments, it is pure overhead. A one-time transfer to an address that never transacts again still costs the network a permanent slot. The research frames the impact bluntly: for payment-style workloads, one-shot payment objects could cut the permanent state footprint by roughly **99.8%** while leaving the account model untouched.
+
+## How native UTXOs prune what accounts can't
+
+A UTXO — unspent transaction output — has a different lifecycle. It is created once, spent once, and then removed. Instead of a persistent balance leaf, the only thing active state has to track is a single bit per output: spent or unspent. The full details of an output are validated against historical block data on demand, not held in the hot state every node carries.
+
+The proposal builds this on **EIP-8141 Frame Transactions**, which package a transaction's inputs, outputs, and account flows into a signed, *value-conserving* transition — the sum of inputs must equal the sum of outputs plus fees, the same conservation rule that makes Bitcoin's model auditable. Spend an output and it disappears from the set the network must remember.
+
+Two design choices matter for developers:
+
+- **It is optional and additive.** The account model and every smart contract keep working exactly as they do today. A dApp that only touches account-model state notices nothing. This is a dual-model chain, not a migration.
+- **It is scoped to payments.** UTXOs here are for moving value, not for arbitrary contract state. The proposal deliberately avoids turning every interaction into a UTXO.
+
+If this sounds familiar, it should: Cardano's eUTXO model has worked this way for years. The Ethereum version is narrower — an overlay on an account chain, not the base model.
+
+## What a dual-model Ethereum changes for wallets and indexers
+
+The account model lets a wallet answer "what's my balance?" with a single lookup. A UTXO set does not. A wallet holding one-shot outputs has to do **coin selection** — pick which outputs to spend — and produce **change outputs** for the remainder, exactly like a Bitcoin wallet. Balance becomes a sum over a set you have to track, not a field you read.
+
+Indexers and explorers feel it too. Reading value flow means reading outputs created and consumed, not just account-balance diffs. And several questions are still openly debated: how outputs interact with privacy, how much historical data must be retained to validate spends, how wallets discover their own outputs, and whether outputs need a protocol-level data field at all. None of these are settled, which is a good reason to treat the design as a way to think, not a spec to build against yet.
+
+## Testing transfers when the model underneath shifts
+
+Whatever ships, the lesson for how you test payment flows is available now. The riskiest failures in value transfer are rarely "the transaction reverted" — they are wrong change amounts, a stale output spent twice, a balance that reads correctly in one model and wrong in the other. Tests that only assert *the transaction was submitted* miss all of it. Tests that assert the **final on-chain balance** after the wallet signs catch it.
+
+That is the boundary an E2E wallet test owns. With [@avalix/chroma](https://chroma.avalix.dev), you drive the real MetaMask extension through the signing prompt and then check what actually landed:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test('transfer updates the recipient balance', async ({ page, wallets }) => {
+  const metamask = wallets.metamask
+
+  await page.click('button:has-text("Send")')
+  await metamask.approve()           // sign the transfer in the real popup
+
+  await expect(page.locator('.recipient-balance')).toHaveText('10.0')
+})
+```
+
+The `approve()` call confirms the transaction in the actual wallet UI; the assertion checks the resulting balance, not just that a request fired. Swap `approve()` for `reject()` and you cover the cancel path in the same way.
+
+## Where this leaves you
+
+Native UTXOs are one thread in the broader "Lean Ethereum" roadmap Vitalik Buterin outlined in July 2026, and like most of that roadmap they would need community review and a hard fork before anything changes. Watch the discussion if you build wallets, indexers, or payment rails — a dual-model chain would reshape how each reads value.
+
+The durable takeaway needs no fork: state growth is now a first-class design constraint, and the simple transfer is where it hides. Write the test that asserts the balance, not the one that trusts the receipt.
