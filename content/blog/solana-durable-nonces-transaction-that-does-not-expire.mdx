@@ -1,0 +1,63 @@
+---
+title: "Solana Durable Nonces: Signing a Transaction That Doesn't Expire"
+description: "Solana durable nonces swap the recent blockhash for a stored nonce, so a signed transaction stays valid for offline signing, multisig approvals, and retries."
+date: 2026-07-23
+author: Chroma Team
+---
+
+Every Solana transaction you sign is on a timer. The recent blockhash you stamp into it is only valid for about 150 slots — roughly 90 seconds — and once that window closes, the network drops the transaction as expired no matter how correct it is. For a user clicking "confirm" in a wallet, 90 seconds is plenty. But the moment your flow needs a human to sign now and the transaction to land later — an air-gapped key, a multisig that collects approvals over an afternoon, a scheduled release — that timer becomes the thing that breaks. Solana durable nonces exist to turn the timer off, and the July 2026 engineering update, which shipped a new nonce program for durable transaction execution alongside refreshed SDKs, is a good reason to understand how they actually work.
+
+## Why a Solana transaction expires in about 90 seconds
+
+The recent blockhash is not decoration. It is Solana's replay-protection and liveness mechanism rolled into one. Validators keep a sliding window of recent blockhashes; a transaction is only processable while its blockhash is still inside that window, and each blockhash can back a given transaction signature exactly once. That design keeps the mempool-free runtime honest — there is no pending pool where a stale transaction can linger and re-land unexpectedly.
+
+The cost is that the blockhash doubles as an expiry clock. In `@solana/kit`, this is explicit: you build a transaction message and then call `setTransactionMessageLifetimeUsingBlockhash` to give it a lifetime. The word *lifetime* is the tell. The transaction is born with a deadline, and if the signer and the sender are more than ~90 seconds apart, the deadline wins.
+
+## What a nonce account swaps in
+
+A durable nonce replaces that blockhash lifetime with a value that only changes when *you* change it. The mechanism is a **nonce account** — a small, rent-exempt, system-owned account that stores two things: a nonce value (which is itself a blockhash the runtime captured) and a nonce authority allowed to advance it.
+
+Instead of stamping a recent blockhash, a durable transaction stamps the nonce currently stored in that account. Two rules make this safe:
+
+- The transaction's **first instruction must be `AdvanceNonceAccount`**. Nothing else may come before it.
+- Advancing the nonce, signed by the nonce authority, rotates the stored value to a new blockhash *as the transaction executes*. The nonce that authorized this transaction is now gone, so the same signed bytes can never be replayed.
+
+That is the whole trick: replay protection moves from a global time window onto a single account you control. Until someone advances the nonce, the transaction you signed against it stays valid — minutes, hours, or days later. In `@solana/kit`, you express this by calling `setTransactionMessageLifetimeUsingDurableNonce` in place of the blockhash version; it points the message at the nonce account and authority and ensures the advance instruction sits first. The account stays an explicit input to the transaction, the way every account on Solana is — nothing is hidden in program state.
+
+```ts
+// A durable-nonce transaction. Same v0 message, different lifetime:
+// the stored nonce stands in for a recent blockhash, and the
+// AdvanceNonceAccount instruction is placed first automatically.
+const message = pipe(
+  createTransactionMessage({ version: 0 }),
+  (m) => setTransactionMessageFeePayer(feePayer, m),
+  (m) => appendTransactionMessageInstruction(transferInstruction, m),
+  (m) =>
+    setTransactionMessageLifetimeUsingDurableNonce(
+      { nonce, nonceAccountAddress, nonceAuthorityAddress },
+      m,
+    ),
+)
+```
+
+The advance does consume a little compute and adds one instruction and one writable account to the message, so budget for it — durable nonces are not free, they trade a small per-transaction cost for a lifetime you decide.
+
+## Where durable nonces earn their place
+
+Three patterns are hard to build without them. **Offline and air-gapped signing:** the signing device never touches the internet, so it can never fetch a blockhash that would still be fresh by the time the transaction is broadcast — a stored nonce it can read once is the only workable lifetime. **Multi-party approval:** a treasury multisig where three signers approve over an afternoon would blow past 90 seconds every time; against a durable nonce, each signer adds their signature to the same valid transaction whenever they get to it. **Resilient submission and scheduled actions:** a vesting claim or a pre-signed contingency transaction can be prepared now and landed at the right moment, and a stuck submission can be retried without re-signing.
+
+The new nonce program highlighted in Solana's July 2026 update leans into exactly these programmatic-signer use cases, where a service holds pre-authorized transactions and submits them on a schedule rather than in a live user session.
+
+## What this changes for your dApp tests
+
+The failure modes durable nonces introduce live at the wallet boundary, which is where they should be tested. A user might sign against a nonce that a *different* transaction has already advanced — a stale-nonce reject your UI has to explain rather than spin on. And because the advance is instruction zero, a builder that prepends a compute-budget instruction in front of it produces a transaction the runtime refuses outright.
+
+Both are behaviors you only see once a real wallet has signed real bytes. Driving a live Phantom extension with [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom), the approval is a genuine click, and your test can assert the dApp recovers cleanly when the nonce is already spent:
+
+```ts
+// Phantom signs the durable-nonce transaction; the test then
+// asserts the dApp surfaces a stale-nonce error, not a dead spinner.
+await phantom.approve()
+```
+
+Durable nonces are one of the few Solana primitives that change *when* a transaction is valid rather than *what* it does. Reach for them the moment signing and sending stop happening in the same 90 seconds — and put the stale-nonce path in a test before a user finds it for you.
