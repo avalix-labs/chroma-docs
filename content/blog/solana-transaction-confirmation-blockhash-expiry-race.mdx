@@ -1,0 +1,89 @@
+---
+title: "How Solana Transaction Confirmation Actually Works: Winning the Blockhash-Expiry Race"
+description: "Solana transaction confirmation is a race between signature status and blockhash expiry. See how @solana/kit's confirmers work and how to test the wait."
+date: 2026-07-24
+author: Chroma Team
+---
+
+You send a Solana transaction, get a signature back, show the user a spinner — and it spins forever. The transaction never landed, but nothing threw. This is the most common way Solana transaction confirmation goes wrong, and it comes from treating a returned signature as proof of inclusion. It isn't. On Solana, sending and confirming are two separate problems, and the gap between them is where dApps quietly break.
+
+## sendTransaction returns before your transaction lands
+
+`sendTransaction` hands your signed bytes to an RPC node and returns a signature immediately. That signature is just the hash of what you submitted — it exists whether or not the transaction is ever included in a block.
+
+```ts
+const signature = await rpc
+  .sendTransaction(base64Tx, { encoding: 'base64' })
+  .send()
+// `signature` exists now. The transaction may still never land.
+```
+
+Two things can go wrong after this point. The RPC node's leader schedule may drop the packet under load and, unlike an EVM mempool, Solana has no durable pending pool that keeps rebroadcasting for you. And every transaction carries a recent blockhash that is only valid for about 151 blocks — roughly 90 seconds — after which the runtime rejects it outright. Miss that window and the transaction is dead, permanently.
+
+## Confirmation is a race, not a wait
+
+The correct mental model is not "wait for success." It is a race between two outcomes:
+
+1. **The signature reaches your commitment level** (`processed`, `confirmed`, or `finalized`).
+2. **The chain's block height passes the transaction's `lastValidBlockHeight`** — the expiry point tied to the blockhash you signed with.
+
+Whichever resolves first decides the outcome. If confirmation wins, you're done. If expiry wins, the transaction can never land under that blockhash and you must give up or rebuild and resign. Polling `getSignatureStatuses` alone can't tell these apart — a status of `null` means both "not yet" and "never will," and only the block height disambiguates them.
+
+## Kit turns the race into composable pieces
+
+The old `web3.js` v1 buried all of this inside `Connection.confirmTransaction`, which is exactly why so many teams reimplemented it badly. [@solana/kit](https://www.solanakit.com) exposes the race as separate primitives you can read and compose:
+
+- `createRecentSignatureConfirmationPromiseFactory()` — resolves when the signature reaches your commitment, over a WebSocket subscription rather than a polling loop.
+- `createBlockHeightExceedencePromiseFactory()` — throws the moment the network progresses past `lastValidBlockHeight`.
+- `waitForRecentTransactionConfirmation()` — races the two together, which is the actual definition of "confirmed or expired."
+
+Most of the time you use the factory that wires them up for you:
+
+```ts
+import {
+  sendAndConfirmTransactionFactory,
+  createSolanaRpc,
+  createSolanaRpcSubscriptions,
+} from '@solana/kit'
+
+const rpc = createSolanaRpc('https://api.mainnet-beta.solana.com')
+const rpcSubscriptions = createSolanaRpcSubscriptions('wss://api.mainnet-beta.solana.com')
+
+const sendAndConfirmTransaction = sendAndConfirmTransactionFactory({ rpc, rpcSubscriptions })
+
+// Resolves on confirmation; throws when block height passes lastValidBlockHeight.
+await sendAndConfirmTransaction(signedTx, { commitment: 'confirmed' })
+```
+
+Note the factory needs *both* `rpc` and `rpcSubscriptions`. The HTTP transport submits and reads block height; the WebSocket transport carries the signature notification. Skip the subscriptions client and you fall back to polling, which is slower to notice confirmation and easy to get wrong.
+
+## Rebroadcasting is the part the factory doesn't do for you
+
+`sendAndConfirmTransaction` watches for confirmation, but it submits your transaction only once. Under congestion, one submission is often not enough — the packet gets dropped and there's nothing left to confirm. The fix is to re-send the *same signed bytes* repeatedly until the transaction either confirms or its window closes:
+
+```ts
+const wire = getBase64EncodedWireTransaction(signedTx)
+const { value: { lastValidBlockHeight } } = await rpc.getLatestBlockhash().send()
+
+while ((await rpc.getEpochInfo().send()).blockHeight <= lastValidBlockHeight) {
+  await rpc.sendTransaction(wire, { skipPreflight: true, maxRetries: 0, encoding: 'base64' }).send()
+  const { value } = await rpc.getSignatureStatuses([signature]).send()
+  if (value[0]?.confirmationStatus === 'confirmed') break
+}
+```
+
+`maxRetries: 0` stops the RPC node from running its own retry logic so *you* control the cadence, and `skipPreflight: true` avoids re-simulating identical bytes on every attempt. Re-sending the same signature is safe: the runtime deduplicates it, so at most one copy ever executes.
+
+## What this means for your E2E tests
+
+The confirmation loop runs *after* the user clicks approve, so a wallet mock never exercises it — the mock resolves instantly and your expiry and rebroadcast paths go untested. Those are precisely the paths users hit on a busy day.
+
+Driving a real Phantom extension with [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom), the approval is a genuine click, and the test can then assert on what your dApp does while it waits:
+
+```ts
+await phantom.approve()
+// Assert the UI resolves to a real state, not an endless spinner.
+await expect(page.getByText('Confirmed')).toBeVisible()
+```
+
+Solana confirmation is a distributed-systems problem wearing a single function's clothing. Treat it as a race you can lose, give your transactions a way to be resent inside their window, and put the expiry branch in a test before a congested slot puts it in front of a user.
