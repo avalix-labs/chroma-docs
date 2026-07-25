@@ -1,0 +1,73 @@
+---
+title: "Polkadot's Products Devnet: Test Your dApp Against Features That Aren't Live Yet"
+description: "Polkadot's Products Devnet lets you test dApps against unreleased mainnet features. How it differs from Paseo, and where your E2E wallet tests fit."
+date: 2026-07-25
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): Polkadot's Products Devnet lets you test dApps against unreleased mainnet features. How it differs from Paseo, and where your E2E wallet tests fit. */}
+
+Most testnet bugs get found too late — after a runtime upgrade has already shipped to mainnet, when your dApp suddenly signs a call the chain now rejects. Polkadot's testing story just added a tier aimed squarely at that gap. On July 23, 2026, the Paseo team and the Polkadot Community Foundation opened the **Polkadot Products Devnet**, a public sandbox for building and testing against network features that are headed for mainnet but haven't arrived yet. If you've only ever tested against a local node or a stable testnet, it's worth understanding where this environment fits — because the environment you test in decides which class of bug you can catch at all.
+
+## Three environments, three classes of bug
+
+Think of Polkadot's test surfaces as a ladder, each rung catching failures the one below can't see.
+
+- **A local node** (spun up with tools like Chopsticks or Zombienet, optionally forking live state) is where you catch *logic* bugs. It's fast, disposable, and fully under your control, but its runtime is whatever you pinned — it won't tell you what a future upgrade breaks.
+- **Paseo**, the community-run testnet that officially became *the* Polkadot testnet, mirrors the current mainnet runtime. It's where you catch *runtime and upgrade* bugs: a weight change, a new signed extension, a pallet whose call signature moved. PAS is its test token, free from the Polkadot faucet, and smart-contract teams get a dedicated Passet Hub chain for Solidity-on-PolkaVM work.
+- **The Products Devnet** sits above Paseo — it's built on Paseo — and runs *preview* versions of features expected on mainnet later. This is where you catch the bug class nobody else can reach yet: your dApp meeting an unreleased feature before your users do.
+
+## What the Products Devnet actually runs
+
+The devnet exists so builders can work against Polkadot's upcoming product system without touching real funds. It hosts developer builds of Polkadot's Mobile, Desktop, and Web applications, each carrying features slated for a future mainnet release. Alongside them is a Product SDK and command-line tooling: you can scaffold a web app, register a `.dot` name through DotNS, publish the app bundle, and list it in the Browse section so other builders can find it.
+
+For a dApp developer, the point isn't the specific product surface — it's the timing. On Paseo, you test against what mainnet *is*. On the Products Devnet, you test against what mainnet is *about to become*, which turns a class of post-upgrade fire drills into pre-upgrade test runs. Because it runs on Paseo underneath, the account model, PAS balances, and faucet flow you already know still apply.
+
+## Match the environment to the failure you fear
+
+The practical move is to stop asking "which testnet is best" and start asking "which failure am I trying to rule out."
+
+- Iterating on contract or pallet logic → a local node; instant feedback, no network flakiness.
+- Preparing for a runtime upgrade already scheduled for mainnet → Paseo; it mirrors that runtime.
+- Building against a feature that's announced but unreleased → the Products Devnet; nothing else has it.
+
+A healthy pipeline promotes the *same* test suite up the ladder rather than maintaining three separate ones. The thing that changes between rungs is configuration — the RPC endpoint your dApp points at — not the assertions.
+
+## Where the wallet test stays constant
+
+That last point is what makes the promotion cheap, and it's where an end-to-end wallet test earns its place. The connect-and-sign boundary — a user reviewing a decoded extrinsic in the Polkadot.js extension and approving it — behaves the same whether the dApp is talking to a local node, Paseo, or the Products Devnet. Only the endpoint moves.
+
+[@avalix/chroma](https://github.com/avalix-labs/chroma) drives the real Polkadot.js extension inside a Playwright test, so the same test travels up the ladder untouched:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'polkadot-js' }],
+})
+
+test('signs a transfer against the target network', async ({ page, wallets }) => {
+  const polkadotJs = wallets['polkadot-js']
+
+  // Fund a known account; the dApp under test points at a local
+  // node, Paseo, or the Products Devnet through its own config
+  await polkadotJs.importMnemonic({
+    seed: 'bottom drive obey lake curtain smoke basket hold race lonely fit walk',
+  })
+
+  await page.goto('http://localhost:5173')
+  await page.click('button:has-text("Connect")')
+  await polkadotJs.authorize()
+
+  await page.click('button:has-text("Transfer")')
+  await polkadotJs.approveTx()
+
+  await expect(page.locator('.tx-status')).toHaveText('Confirmed')
+})
+```
+
+`importMnemonic` seeds the account before the dApp loads, `authorize()` clears the connection popup, and `approveTx()` signs the extrinsic in the real signing dialog. Because the assertions only touch your UI and the extension, pointing the dApp at a different network is a config change, not a test rewrite. The bug the Products Devnet surfaces early — a preview feature that alters what the popup decodes or what the chain accepts — turns the same green test red.
+
+## Where to start
+
+Grab PAS from the Polkadot faucet, point a throwaway dApp at the Products Devnet, and run one signing flow end to end. The goal isn't to adopt every preview feature; it's to move the moment you discover a breaking change from *after* it reaches mainnet to *before*. A three-rung testnet ladder only helps if your tests actually climb it — and the wallet boundary is the part that climbs for free.
