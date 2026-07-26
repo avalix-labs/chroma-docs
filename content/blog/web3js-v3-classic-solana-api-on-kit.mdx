@@ -1,0 +1,49 @@
+---
+title: "web3.js v3 Isn't the Migration You Think: The Classic Solana API, Now Running on Kit"
+description: "@solana/web3.js v3 (RC) rebuilds the classic Connection, Keypair, and Transaction API on @solana/kit internals. Here's what it is and when to pick it."
+date: 2026-07-26
+author: Chroma Team
+---
+
+If you maintain a Solana dApp on `@solana/web3.js` v1, you have probably been told the library is over — succeeded by `@solana/kit`, functional, tree-shakable, and waiting for you to rewrite every `Connection` and `Keypair` you own. That story is half true. The functional Kit SDK is real and it is the default for new code. But there is now a third option most migration guides skip: **web3.js v3**, currently shipping as `@solana/web3.js@rc`, which keeps the classic class-based API you already write and runs it on Kit internals underneath. If a full rewrite has been sitting on your backlog because it never justified the risk, this changes the math.
+
+## What web3.js v3 actually is
+
+web3.js v3 is not a new API to learn. It is the *old* one — `Connection`, `Keypair`, `Transaction`, `PublicKey` — rebuilt so its internals call into `@solana/kit` rather than the v1 codebase. The class surface your app imports stays recognizable; what moved is everything behind it.
+
+Two details matter for anyone reading types. `PublicKey` is now a deprecated alias of Kit's `Address`, so the two are interchangeable at the boundary instead of needing a conversion call on every hop. And a v3 `Keypair` structurally satisfies Kit's `KeyPairSigner` — the signer shape Kit and Codama-generated clients expect. You can hand a v3 `Keypair` straight to a Kit API or a generated program client with no adapter in between.
+
+That interop is the whole point. v3 is a bridge, not a destination: the RC docs are explicit that new apps should build on Kit directly, and that v3 exists so a large v1 codebase can move without a big-bang rewrite.
+
+## Three doors off v1 — and they are not the same door
+
+There are now three distinct ways off `@solana/web3.js` v1, and confusing them wastes weeks:
+
+- **A full Kit rewrite.** You adopt the functional SDK: no classes, transaction messages built as a `pipe()` of pure functions, RPC as a thin proxy. Best for new code and modules you are touching anyway.
+- **`@solana/web3-compat`.** A compatibility layer that lets existing v1 code run on the Kit runtime by swapping one import, file by file. Best when you want the Kit engine now but can't stop to rewrite call sites.
+- **web3.js v3 (`@rc`).** The classic class API, preserved, running on Kit internals. Best when your team knows the v1 surface, your code leans on `Connection`/`Keypair`/`Transaction`, and you want the maintained path without relearning the ergonomics.
+
+None of these change the SVM model underneath. However you build it, a Solana transaction is still a versioned message of instructions over explicitly listed accounts, still bounded by a compute-unit limit and priority fee, still signed against a recent blockhash or a durable nonce. The migration is about the *client's* shape, not the chain's.
+
+## Pick by what you are optimizing for
+
+If you are starting fresh, build on Kit — the RC docs steer you there and you collect the tree-shaking payoff. If you have a working v1 app and the priority is landing on a maintained runtime with a minimal diff, web3-compat's import swap is the least invasive move. If your team's muscle memory is the class API and you would rather keep `new Connection(...)` and `Keypair.generate()` than rewrite every call into a pipe, v3 is the path that keeps your code legible while retiring the dead v1 engine.
+
+One caution: v3 is a release candidate. Pin exact versions and expect churn between RCs — this is not the line to build a launch around this week, but it is the line to prototype your migration against.
+
+## Where this leaves your wallet tests
+
+Here is the reassuring part: none of this reaches your end-to-end tests. Kit, web3-compat, and v3 all produce the same signed bytes at the wallet boundary, because that boundary is the SVM transaction, not the SDK that assembled it. A test that drives a real Phantom approval doesn't know — or care — which client built the message.
+
+That is exactly why a wallet-level E2E test is the safety net that survives a migration. With [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom) you drive the actual extension:
+
+```ts
+// The dApp built this transaction with v1, web3-compat, or v3 —
+// the test asserts the same user-visible outcome either way.
+await phantom.approve()
+await expect(page.getByText('Confirmed')).toBeVisible()
+```
+
+Run that test before you switch clients and after. `phantom.approve()` clicks through the genuine approval popup, and the assertion checks the state your user actually sees. If the outcome holds on both sides, the migration changed nothing that matters.
+
+web3.js v3 isn't a rename or a dead end. It is a deliberate interop layer for teams who want off the v1 engine without abandoning the class API they already know. Prototype against the RC, pick the door that matches how your team writes Solana code, and let a wallet-boundary test prove the swap is invisible to the people using your dApp.
