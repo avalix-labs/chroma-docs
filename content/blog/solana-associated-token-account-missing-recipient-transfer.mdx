@@ -1,0 +1,86 @@
+---
+title: "Sending SPL Tokens to a Fresh Wallet: The Associated Token Account You Forgot to Create"
+description: "A Solana transfer to a wallet that never held the mint fails without a recipient associated token account. Derive it, create it idempotently, test it."
+date: 2026-07-27
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): A Solana transfer to a wallet that never held the mint fails without a recipient associated token account. Derive it, create it idempotently, test it. */}
+
+Your Solana token transfer passes every test, ships, and then a user reports that sending USDC to a friend's brand-new wallet throws `AccountNotFound`. Nothing about your instruction is wrong. The problem is the account you never created: the recipient's **associated token account**. In development, your test wallets already hold the mint, so the receiving account exists and the bug stays invisible. The first real transfer to someone who has never touched that token is where it surfaces.
+
+On Solana, this is not an edge case — it is the default state of every new wallet. Here is why it happens and how to handle it without guessing.
+
+## Why a fresh wallet has nowhere to receive tokens
+
+An SPL token balance does not live on the wallet's system account. It lives in a separate token account owned by the SPL Token program, and the canonical one for a given owner and mint is the *associated token account* (ATA). Its address is a program-derived address, deterministic from three inputs: the owner, the mint, and the token program.
+
+Deterministic does not mean it exists. Deriving the address is pure math; the account only exists on-chain once someone creates and rent-funds it. A wallet that has never held a particular mint simply has no ATA for it, and a transfer whose destination account does not exist fails. Because SVM instructions take every account as an explicit input — programs hold no per-user state internally — the runtime cannot lazily conjure the destination for you. The creating instruction has to be in the transaction.
+
+## Derive the associated token account, then create it idempotently
+
+The current `@solana-program/token` package (v0.15.0, shipped in the July 2026 Solana SDK batch) gives you both halves. Derive the address, then attach a create instruction that is safe to send unconditionally:
+
+```ts
+import {
+  findAssociatedTokenPda,
+  getCreateAssociatedTokenIdempotentInstructionAsync,
+  TOKEN_PROGRAM_ADDRESS,
+} from '@solana-program/token'
+
+// The recipient's ATA address is deterministic: owner + mint + token program.
+const [ata] = await findAssociatedTokenPda({
+  owner: recipient,
+  mint,
+  tokenProgram: TOKEN_PROGRAM_ADDRESS,
+})
+
+// Create it only if it isn't there yet — safe to include on every transfer.
+const createIx = await getCreateAssociatedTokenIdempotentInstructionAsync({
+  payer, // funds the account's rent-exempt reserve; the signer, not the recipient
+  owner: recipient,
+  mint,
+})
+```
+
+Two details matter. First, *idempotent*: the instruction succeeds whether or not the ATA already exists, so you never have to read the account first and branch on the result. That also closes a race — if two transfers to the same fresh recipient land in the same slot, the non-idempotent create would revert the second one. Second, *who pays*: the `payer` funds the account's rent-exempt reserve, not the recipient. That is a real cost (roughly 0.002 SOL per token account today) borne by whoever signs the transaction, so query the rent-exempt minimum at runtime rather than hardcoding it.
+
+## One helper for the whole transfer-to-ATA dance
+
+If the transfer itself is all you need, the package now ships a helper that derives the destination, creates it when missing, and appends the transfer in one call:
+
+```ts
+import { getTransferToATAInstructionPlanAsync } from '@solana-program/token'
+
+const plan = await getTransferToATAInstructionPlanAsync({
+  payer,            // signs and funds a new ATA when the recipient has none
+  mint,
+  authority: payer, // owner or delegate of the source account
+  recipient,        // wallet address; its ATA is derived and created for you
+  amount: 1_000_000n,
+  decimals: 6,
+})
+```
+
+It returns an *instruction plan*, not a single instruction — you feed that to Kit's transaction planner, which composes the create and transfer into a versioned (v0) message and can split it across signatures if the account list grows past the message limit. The helper removes the boilerplate, but the underlying model is unchanged: creating the destination adds accounts and compute units to the transaction, so a batch airdrop to many fresh wallets is bounded by transaction size, not just by your loop.
+
+## The bug only a fresh wallet reveals
+
+Here is the trap for test suites: reuse a funded wallet across runs and the recipient ATA already exists, so the missing-account path never executes. The whole point of an end-to-end test is to hit the state your unit tests skip. Drive a real [Phantom](https://chroma.avalix.dev/docs/wallets/phantom) extension with [@avalix/chroma](https://chroma.avalix.dev/docs) against a recipient that has genuinely never held the mint:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({ wallets: [{ type: 'phantom' }] })
+
+test('transfer lands on a wallet with no token account', async ({ phantom, page }) => {
+  await phantom.importSeedPhrase({ seedPhrase: process.env.TEST_SEED! })
+  await page.getByRole('button', { name: 'Send' }).click()
+  await phantom.approve() // signs the create-ATA + transfer bundle
+  await expect(page.getByText('Transfer confirmed')).toBeVisible()
+})
+```
+
+Because the extension signs the real bytes, the test proves your dApp actually built the create instruction — not that a mock returned success. Flip the same test to `phantom.reject()` and assert the UI recovers, and you have covered both the path users hit first and the one they hit when they change their mind.
+
+The takeaway is small but load-bearing: on Solana, "send tokens" is really "make sure the destination account exists, then send tokens." Derive the ATA, attach the idempotent create, and test against a wallet that starts with nothing — because that is exactly the wallet your first real user brings.
