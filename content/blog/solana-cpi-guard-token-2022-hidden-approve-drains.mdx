@@ -1,0 +1,60 @@
+---
+title: "Solana CPI Guard: The Token-2022 Flag That Refuses Hidden Approvals"
+description: "Solana CPI Guard is a Token-2022 flag that blocks Approve, CloseAccount, and owner changes made via CPI, so a hidden inner instruction can't drain tokens."
+date: 2026-07-28
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): Solana CPI Guard is a Token-2022 flag that blocks Approve, CloseAccount, and owner changes made via CPI, so a hidden inner instruction can't drain tokens. */}
+
+Solana's delegation surface keeps growing. The Subscriptions program shipped its Delegation Authority to mainnet, sRFC-00012 standardized cold-wallet delegation, and the July changelog added subscription cancellation to the Token-2022 SDK. Every one of those flows leans on the same primitive — one account granting another the right to move its tokens — and that primitive is exactly what wallet-drainers abuse. **Solana CPI Guard** is the Token-2022 extension that closes the gap, and most dApp developers have never enabled it.
+
+## How a drain hides inside a cross-program invocation
+
+When you sign a Solana transaction, your wallet shows you the program you meant to call. What it usually does not show, clearly, is the tree of *inner* instructions — the cross-program invocations (CPIs) that top-level program makes on your behalf during execution. A CPI can carry your account's owner authority into a program you never intended to authorize.
+
+That is the drainer's opening. You click "claim airdrop." The top-level program looks harmless, but buried in a CPI is an `Approve` instruction that names the attacker's wallet as a delegate over your USDC account — for the full balance. You signed the transaction, so from the token program's view your owner authority approved it. Nothing looks wrong until the delegate quietly transfers everything out in a later block. The same trick works with `SetAuthority` to hand over ownership of the account outright.
+
+The root problem is that the token account trusts your owner signature identically whether it arrives as a top-level instruction you can read or as an inner instruction you can't.
+
+## What CPI Guard refuses (and the one thing it still allows)
+
+CPI Guard is a flag on the *token account*, toggled by the owner with the extension's `Enable` and `Disable` instructions. Once on, the Token Extensions program refuses a specific set of privileged actions **whenever they are performed within a CPI** — that is, invoked by another program rather than signed by you at the top level:
+
+- **`Approve`** — granting a delegate through a CPI is prohibited outright. Delegation can only happen as a top-level instruction you can see.
+- **`Transfer` and `Burn`** — allowed through a CPI only when the signing authority is an established *delegate*, not the owner. Your raw owner authority is not honored across a CPI.
+- **`CloseAccount`** — the lamport (rent) destination must be the account owner. A program can't sweep reclaimed rent to an arbitrary address.
+- **`SetAuthority` for the close authority** — setting one via CPI is prohibited (you can still unset an existing one).
+- **`SetAuthority` that changes the owner** — prohibited. Account ownership cannot be transferred through a CPI.
+
+The unifying rule: anything that hands lasting control of your account to someone else must be a top-level action your wallet can render, never something a program slips in while you look at a friendlier instruction. Direct, top-level calls keep working exactly as before — CPI Guard only narrows the CPI path.
+
+## Building with the delegate exception
+
+The `Transfer`/`Burn` carve-out is not a loophole; it is the intended pattern for legitimate programs. A DEX, escrow, or subscription contract that needs to move your tokens should not rely on your owner authority reaching it through a CPI. Instead:
+
+1. Your dApp submits a **top-level `Approve`** granting the program's authority (usually a PDA) a delegate allowance for a *bounded* amount.
+2. Later, the program transfers as that delegate via CPI — capped at what you approved, and revocable.
+
+The grant becomes a visible, reviewable step, and the program never gets unlimited reach. If you are shipping any allowance-style feature on Solana right now, this is the shape to build toward: a small, explicit approval instead of a broad one buried in execution. Note that CPI Guard needs room in the account for the extension — associated token accounts and reallocated accounts carry it, and wallets like Backpack and Phantom expose a toggle.
+
+## Proving the guarded flow in an end-to-end test
+
+CPI Guard changes what a *correct* dApp must do: surface the approval as its own signable step. That is precisely the kind of thing a mocked wallet will happily fake and a real one won't. Driving an actual Phantom extension with [@avalix/chroma](https://chroma.avalix.dev) lets you assert the grant is really rendered and signed:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({ wallets: [{ type: 'phantom' }] })
+
+test('program can only move tokens after a visible top-level approve', async ({ phantom, page }) => {
+  await phantom.importSeedPhrase({ seedPhrase: process.env.TEST_SEED! })
+  await page.getByRole('button', { name: 'Grant spending access' }).click()
+  await phantom.approve() // signs the bounded, top-level Approve
+  await expect(page.getByText('Delegate active')).toBeVisible()
+})
+```
+
+The first line imports a real seed into the extension; `phantom.approve()` signs the actual `Approve` bytes, so the test proves your dApp built a top-level grant rather than trusting a program to reach through a CPI. Swap in `phantom.reject()` and assert the balance is untouched to cover the user who reads the prompt and backs out.
+
+CPI Guard won't stop a user from approving a malicious top-level instruction — clear signing and simulation still matter for that. What it does is remove the *invisible* path entirely. Enable it on the accounts your users care about, design your own flows around the top-level `Approve`, and test that the grant is a step your wallet actually shows.
