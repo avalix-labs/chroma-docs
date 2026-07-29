@@ -1,0 +1,39 @@
+---
+title: "Solana's Block Limit Is Heading to 100M CUs — but Your Hot Account Is Still Capped at 12M"
+description: "SIMD-0286 raises Solana's block compute limit to 100M CUs, but the per-writable-account limit stays at 12M. Here's why bigger blocks won't unclog a contended account."
+date: 2026-07-29
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): SIMD-0286 raises Solana's block compute limit to 100M CUs, but the 12M per-writable-account cap holds. Why a bigger block won't unclog a hot account. */}
+
+SIMD-0286 proposes raising Solana's maximum block compute limit to 100M compute units — up from 60M, which itself only recently climbed from 50M. More block space sounds like more room for everyone's transactions, and at the aggregate level it is. But if your dApp funnels writes through one contended account — a popular AMM pool, a shared vault, a single mint authority — a bigger block does nothing for you. The limit that actually gates that transaction is a different number, and SIMD-0286 leaves it exactly where it was: **12M compute units per writable account, per block.** Understanding the gap between those two numbers is the difference between a program that scales with the network and one that jams up while the block sits half empty.
+
+## Two limits, only one of which is moving
+
+Solana's cost tracker enforces several ceilings on every block at once. Two matter here:
+
+- **Max block units** — the total compute a single block may consume across all transactions. This is the number rising to 100M.
+- **Max writable account units** — the total compute that transactions writing to any *single* account may consume within one block. This is fixed at 12M and SIMD-0286 explicitly does not touch it.
+
+The second limit exists because of how Solana parallelizes. Every transaction declares, up front, the accounts it will read and the accounts it will write. The runtime (Sealevel) schedules transactions with non-overlapping write sets onto different cores at the same time. Two transactions that write to disjoint accounts run in parallel; two that write to the *same* account cannot — one has to wait. The 12M cap is the block-level budget for all the compute that piles up behind a single writable account. Once transactions writing to that account have consumed 12M CUs in a block, every further transaction touching it is bumped to a later block, even if the block as a whole has 80M CUs to spare.
+
+## Why raising the block limit doesn't help a contended account
+
+Picture an AMM pool account that a swap program writes to on every trade. During a launch, thousands of swaps all name that one pool as a writable account. They serialize against each other by definition — the runtime can't parallelize writes to the same account — and collectively they can only spend 12M CUs of that pool per block. If each swap costs ~40,000 CUs, that's roughly 300 swaps per block against that pool, no matter how large the block gets.
+
+Doubling the block limit to 100M raises how many *unrelated* transactions can share a block. It raises nothing for the swaps queued behind your pool. That's the trap in reading "block limit goes to 100M" as "my dApp gets more throughput": aggregate capacity and per-account capacity are governed by separate numbers, and the one your hot path hits isn't the one in the headline.
+
+## Designing so the cap is never your bottleneck
+
+The fix is to stop routing unrelated work through a single writable account. A few patterns:
+
+- **Shard state per user.** A PDA derived from the user's key is written only by that user's transactions, so they never contend with each other. This is the single biggest lever — it turns one 12M-capped account into thousands of independent ones.
+- **Split read-heavy from write-heavy accounts.** An account you only *read* is never a write-lock contention point; many transactions can read it in parallel. Keep hot configuration or price data in read-mostly accounts and don't fold a frequently-written counter into the same account.
+- **Right-size the writes you can't shard.** For a genuinely shared account like an AMM pool, every CU a transaction spends counts against that shared 12M. Trimming the per-instruction compute of the hot path directly raises how many transactions fit under the cap each block.
+
+You can't measure contention from a single happy-path transaction — it only shows up under concurrent load, when many signers hit the same account in the same slot. Reproducing that means driving real signed transactions through the wallet, in parallel, and watching which ones fail to land. If you exercise those flows with real wallet approvals via a tool like [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom), the retry-and-resubmit UX your users will actually experience under a hot account becomes something you can test, not just reason about.
+
+## The takeaway
+
+Bigger blocks are real capacity, but they're capacity for the network, not a raise for any single account. SIMD-0286 makes that explicit by moving the block limit and freezing the writable-account limit in the same breath. Before you assume the upgrade buys your dApp headroom, find the accounts every transaction writes to — those are the ones still capped at 12M, and they're where your scaling story actually lives.
