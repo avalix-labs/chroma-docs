@@ -1,0 +1,97 @@
+---
+title: "ERC-7811 Wallet Asset Discovery: Reading a User's Balances Without Polling Every Chain"
+description: "ERC-7811 adds a wallet_getAssets RPC so your dApp reads a user's balances across chains from the wallet itself, instead of polling per-chain RPCs."
+date: 2026-07-30
+author: Chroma Team
+---
+
+Rendering a user's balances sounds like a solved problem until your dApp spans more than one chain. You end up fanning out `eth_getBalance` and a batch of `balanceOf` calls across every network you support, praying none of your RPC endpoints rate-limit you, and still missing the token a user bridged to an L2 you never thought to query. **ERC-7811 wallet asset discovery** proposes a different source of truth: ask the wallet. Its `wallet_getAssets` RPC lets your dApp request a user's assets — across chains, in one call — from the party that already knows them.
+
+## Why reading balances turned into a polling problem
+
+On-chain reads are scoped to one chain and, for tokens, one contract at a time. A dApp that supports mainnet, Optimism, Base, and Arbitrum has to loop over four networks, and for each one issue a native-balance read plus a `balanceOf` per token it cares about. That is a fan-out of RPC requests before the page can render a single number.
+
+Two things make it worse. First, latency and rate limits scale with the number of chains and tokens, so the multi-chain dApps that most need fast balance reads are the ones that get throttled. Second, and more subtly, your dApp only finds what it thinks to look for. If a user holds a token your frontend has no address for, or funds on a chain you did not enumerate, on-chain polling will never surface it. Modern wallets — especially chain-abstracted ones — often track assets your dApp has no way to enumerate ahead of time.
+
+## What wallet_getAssets returns
+
+ERC-7811 defines a single JSON-RPC method, `wallet_getAssets`. You pass the account and, optionally, narrow the request:
+
+```ts
+// EVM / ERC-7811 — ask the wallet, not four RPC endpoints
+const assets = await provider.request({
+  method: 'wallet_getAssets',
+  params: [{
+    account: '0xA0b8…',                    // required: whose assets to list
+    chainFilter: ['0x1', '0xa'],           // optional: only mainnet + Optimism
+    assetTypeFilter: ['native', 'erc20'],  // optional: skip NFTs
+  }],
+})
+```
+
+`account` is the only required field. `chainFilter` restricts the response to specific EIP-155 chain IDs, `assetTypeFilter` limits it to asset types, and `assetFilter` lets you request particular assets by address. Omit them all and the wallet returns everything it knows.
+
+The response is an object **keyed by chain ID** (hex), with each chain holding an array of assets:
+
+```ts
+{
+  '0x1': [
+    { address: null, balance: '0x2386f26fc10000', type: 'native',
+      metadata: { decimals: 18, name: 'Ether', symbol: 'ETH' } },
+    { address: '0xA0b8…', balance: '0x5f5e100', type: 'erc20',
+      metadata: { decimals: 6, name: 'USD Coin', symbol: 'USDC' } },
+  ],
+  '0xa': [ /* the same shape, for Optimism */ ],
+}
+```
+
+Each asset carries an `address` (`null` for the chain's native token), a hex `balance`, a `type` — `native`, `erc20`, and extensible to others — and a `metadata` object with `decimals`, `name`, and `symbol`. That metadata is the part that saves you work: you no longer make separate calls to resolve a token's decimals and symbol before you can format its balance. One request returns everything the UI needs to render, already grouped by chain.
+
+## Feature-detect with EIP-5792 before you call
+
+`wallet_getAssets` is not universal yet, so calling it blindly will break on wallets that do not implement it. ERC-7811 layers onto EIP-5792's capability system: a wallet that supports asset discovery advertises it through `wallet_getCapabilities` under an `assetDiscovery` key.
+
+```ts
+// EVM / EIP-5792 — check support, then decide
+const caps = await provider.request({
+  method: 'wallet_getCapabilities',
+  params: ['0xA0b8…'],
+})
+
+if (caps['0x1']?.assetDiscovery?.supported) {
+  // safe to call wallet_getAssets
+} else {
+  // fall back to your existing per-chain reads
+}
+```
+
+Treat this as required, not optional. Read capabilities first, use `wallet_getAssets` when the wallet reports support, and keep your on-chain polling path as the fallback for wallets and chains that are not there yet.
+
+## What this changes for your E2E tests
+
+Once balances come from the wallet, the code path that renders them depends on real wallet behavior — which asset list the wallet returns, and how your UI groups it by chain. That is exactly the kind of boundary a mock hides and a real wallet exposes. With [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/metamask) you can drive the connect flow against a real MetaMask and assert on what the dApp actually shows:
+
+```ts
+// EVM / @avalix/chroma — assert the wallet-reported balance renders
+import { createWalletTest } from '@avalix/chroma'
+import { expect } from '@playwright/test'
+
+const test = createWalletTest({ wallets: [{ type: 'metamask' }] })
+
+test('dApp lists wallet-reported assets after connect', async ({ page, metamask }) => {
+  await metamask.importSeedPhrase({ seedPhrase: process.env.SEED_PHRASE! })
+  await page.goto('/portfolio')
+
+  await page.getByRole('button', { name: 'Connect' }).click()
+  await metamask.authorize()
+
+  // Your dApp calls wallet_getAssets and renders the result.
+  await expect(page.getByTestId('balance-USDC')).toContainText('100')
+})
+```
+
+`importSeedPhrase` sets up the account, `authorize()` completes the connection, and the assertion checks the balance your dApp rendered from the wallet's response — not from a stubbed number. Keep a second test that exercises the fallback path, so the on-chain reads stay honest for wallets without asset discovery.
+
+## Where this leaves you
+
+ERC-7811 reframes balance reading as a question you ask the wallet rather than a fan-out you run yourself. The immediate wins are fewer RPC round-trips and metadata you no longer have to resolve separately; the longer-term one is surfacing assets your frontend could not have enumerated. Feature-detect through EIP-5792, wire in a fallback, and update your tests to assert on wallet-reported balances — because the moment the wallet becomes your data source, its behavior belongs in your test suite.
