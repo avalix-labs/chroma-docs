@@ -1,0 +1,68 @@
+---
+title: "One Call for Solana Transaction History: What getTransactionsForAddress Replaces"
+description: "getTransactionsForAddress folds the getSignaturesForAddress + getTransaction loop into one call, with ATA-aware, filterable, paginated Solana history."
+date: 2026-07-31
+author: Chroma Team
+---
+
+If you have ever built an activity feed, a portfolio view, or a "recent transactions" list for a Solana dApp, you have written the same loop twice. Call `getSignaturesForAddress` to page through an address's signatures, then fire a `getTransaction` for each one to hydrate the details. It works, but it is an N+1 fan-out: one request to list, then a request per row, repeated every time the user scrolls. `getTransactionsForAddress` — a Helius RPC method that landed in the RPC 2.0 wave this year — collapses that whole dance into a single call, and fixes a blind spot the old method never covered.
+
+## The getSignaturesForAddress loop, and why it doesn't scale
+
+On Solana, an address's "history" is really the set of confirmed transactions that referenced that account. The core RPC gives you two primitives to reconstruct it. `getSignaturesForAddress` returns signatures (newest first, capped at 1,000, walked backward with a `before` cursor). Then, for anything beyond a signature and a status, you call `getTransaction` per signature to pull the message, instructions, and metadata.
+
+Two problems compound. First, latency: a 100-row page means 1 list call plus 100 detail calls, and archival `getTransaction` reads against old slots are the slow ones. Second — and this is the trap — `getSignaturesForAddress` only sees the *exact* address you pass. A wallet's SPL token movements do not live on the wallet; they live on associated token accounts (ATAs), each a separate program-derived address keyed by owner and mint. So a user's token history is scattered across N ATAs that your query never touched. To show "all of this wallet's activity," you have to derive every ATA, query each one, and merge the streams yourself.
+
+## What getTransactionsForAddress returns in one call
+
+`getTransactionsForAddress` (gTFA) merges the list and the hydrate into one method, and it can resolve a wallet's associated token accounts server-side so token transfers show up without you enumerating ATAs. You choose how much detail comes back: request full transaction payloads (up to 100 per page) or signatures only (up to 1,000 per page).
+
+```json
+{
+  "jsonrpc": "2.0",
+  "id": "1",
+  "method": "getTransactionsForAddress",
+  "params": [
+    "6XU36wCxWobLx5Rtsb58kmgAJKVYmMVqy4SHXxENAyAe",
+    {
+      "transactionDetails": "full",
+      "sortOrder": "desc",
+      "limit": 100,
+      "filters": {
+        "blockTime": { "gte": 1735689600 },
+        "status": "succeeded"
+      }
+    }
+  ]
+}
+```
+
+Line by line: the first param is the address whose history you want. `transactionDetails: "full"` asks for hydrated transactions rather than bare signatures. `sortOrder: "desc"` returns newest first (`"asc"` walks oldest first — useful for backfills). `limit` caps the page. The `filters` object narrows the scan before it hits the wire: `blockTime` with `gte`/`lte` bounds a time window, and `status: "succeeded"` drops failed transactions you would otherwise fetch and discard. Because the filtering happens server-side, you stop paying to download rows you are only going to throw away.
+
+## Paging and filtering a real history view
+
+For an infinite-scroll feed, the pattern is: request the first page newest-first, render it, and use the pagination cursor the response hands back to fetch the next page on scroll. Flip `sortOrder` to `"asc"` and the same cursor mechanics drive a one-time backfill from the account's first transaction forward, which is what you want when seeding a database rather than serving a UI.
+
+The filters are where the method earns its place. A "swaps only, last 30 days, successful" view that used to mean fetching everything and filtering in your app becomes a single bounded query. If you only need who-sent-what-to-whom rather than raw instruction data, the companion `getTransfersByAddress` returns parsed transfer records — mint, amount, direction, counterparty — so you skip decoding balances from pre/post token balances yourself. One caveat worth stating plainly: gTFA is a Helius extension, not part of standard Solana RPC, so it belongs behind your indexing/RPC provider layer, not in code that must run against any vanilla validator.
+
+## Testing the history your dApp actually renders
+
+A history view has a subtle failure mode: the transaction confirms on-chain, but your feed never shows it — a decoding bug, a missed ATA, or a filter that quietly excludes the row. Unit tests that mock the RPC response cannot catch that, because they assert against the shape you *expected*, not the bytes the wallet actually signed. This is where an end-to-end test pays off. Drive a real [Phantom](https://chroma.avalix.dev/docs/wallets/phantom) wallet through the send flow with [@avalix/chroma](https://chroma.avalix.dev/docs), then assert the activity feed — reading back through `getTransactionsForAddress` — renders the new row:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({ wallets: [{ type: 'phantom' }] })
+
+test('a confirmed transfer appears in the activity feed', async ({ phantom, page }) => {
+  await phantom.importSeedPhrase({ seedPhrase: process.env.TEST_SEED! })
+  await page.getByRole('button', { name: 'Send' }).click()
+  await phantom.approve() // signs the real transaction bytes
+  await expect(page.getByText('Transfer confirmed')).toBeVisible()
+  await expect(page.getByTestId('activity-feed')).toContainText('Sent')
+})
+```
+
+`phantom.approve()` signs the actual transaction, so the test proves the round trip: your dApp built and sent a real transfer, and your history query surfaced it. Flip the last step to a token send and you catch the ATA case the old two-call loop silently dropped.
+
+The takeaway is small: fewer round trips, filters that run before the download, and token history that no longer requires you to hand-enumerate ATAs. If you are still stitching `getSignaturesForAddress` to `getTransaction` by hand, a single-call method with server-side filtering is the upgrade to reach for first.
