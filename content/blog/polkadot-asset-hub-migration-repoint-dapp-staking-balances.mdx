@@ -1,0 +1,69 @@
+---
+title: "Polkadot's Asset Hub Migration Moved Staking Off the Relay Chain — Repoint Your dApp"
+description: "Polkadot's Asset Hub Migration moved staking and balances off the Relay Chain. Repoint your dApp's RPC and descriptors before your calls silently break."
+date: 2026-08-01
+author: Chroma Team
+---
+
+{/* Suggested meta description (≤155 chars): Polkadot's Asset Hub Migration moved staking and balances off the Relay Chain. Repoint your dApp's RPC and descriptors before your calls silently break. */}
+
+If your Polkadot dApp still opens a connection to `wss://rpc.polkadot.io` and reads a user's DOT balance from it, there is a good chance it is now reading a number close to zero for accounts that are very much funded. The **Asset Hub Migration** — completed on Polkadot on November 4, 2025, after a Kusama dry run in October — moved balances, staking, and governance off the Relay Chain and onto Asset Hub in a single atomic step. The pallets your dApp calls did not change their names or their arguments. They changed their address. If you have not repointed your client, your reads and writes are aimed at a chain that no longer hosts them.
+
+## What the Asset Hub Migration actually moved
+
+For most of Polkadot's history the Relay Chain was where user state lived: your DOT balance sat in its `System.Account` storage, `staking.bond` and `staking.nominate` were dispatched against it, and OpenGov referenda ran on it. The Relay Chain was also responsible for shared security and consensus across every parachain. That double duty was the problem — user-facing traffic competed with the block-space the network needs for validation.
+
+The migration split those jobs. The Relay Chain is now a consensus-and-security layer, and the **Balances**, **Staking**, and **Governance** (including Treasury) pallets were moved to Asset Hub, a system parachain with lower fees and a lower existential deposit. Because the move was atomic, there is no coexistence period to code around: after the migration block, those pallets are gone from the Relay Chain and live on Asset Hub. For integrators the upside is real — most dApps now only need to connect to one chain for everything a user does.
+
+## The one line in your dApp that now points at the wrong chain
+
+The good news is that the fix is small and mechanical, because the pallets themselves are unchanged. A nominate call takes the same `targets`; a balance read hits the same `System.Account` item. Only the **transport** and the **generated types** move.
+
+Here is the shape most dApps had before, using [Polkadot-API (PAPI)](https://docs.polkadot.com/reference/tools/papi/):
+
+```ts
+import { createClient } from "polkadot-api"
+import { getWsProvider } from "polkadot-api/ws-provider/web"
+import { dot } from "@polkadot-api/descriptors"
+
+// Relay Chain endpoint + Relay Chain descriptors
+const client = createClient(getWsProvider("wss://rpc.polkadot.io"))
+const api = client.getTypedApi(dot)
+
+const { data } = await api.query.System.Account.getValue(address) // now ~0
+await api.tx.Staking.nominate({ targets }).signAndSubmit(signer)   // pallet not here
+```
+
+Regenerate descriptors against Asset Hub and swap the provider URL:
+
+```bash
+npx papi add assetHub -w wss://polkadot-asset-hub-rpc.polkadot.io
+```
+
+```ts
+import { assetHub } from "@polkadot-api/descriptors"
+
+// Asset Hub endpoint + Asset Hub descriptors
+const client = createClient(getWsProvider("wss://polkadot-asset-hub-rpc.polkadot.io"))
+const api = client.getTypedApi(assetHub)
+
+const { data } = await api.query.System.Account.getValue(address) // the real balance
+await api.tx.Staking.nominate({ targets }).signAndSubmit(signer)   // dispatched on Asset Hub
+```
+
+Line by line: `papi add` pulls Asset Hub's metadata and writes a typed `assetHub` descriptor. `getWsProvider` swaps to the Asset Hub endpoint. `getTypedApi(assetHub)` binds the typed surface to that metadata. Every `api.query` and `api.tx` call site below stays byte-for-byte identical — you are not rewriting logic, you are moving where it lands. The same substitution applies to Dedot (`new WsProvider("wss://polkadot-asset-hub-rpc.polkadot.io")` with `@dedot/chaintypes` regenerated for Asset Hub) and to `@polkadot/api` if you are still on it.
+
+## Two migration-specific gotchas worth a test
+
+Repointing the URL is necessary but not sufficient. Two things are genuinely different on Asset Hub, and both are the kind of change that passes a smoke test and fails a real user.
+
+- **The existential deposit is lower.** Asset Hub's ED is smaller than the Relay Chain's, and Asset Hub can also keep an account alive with *sufficient assets* (a stablecoin balance, for example) rather than DOT alone. If your dApp hardcodes the old ED to decide whether a transfer would reap an account, that check is now wrong. Read the ED from chain constants instead.
+- **`fast_unstake` is gone.** Fast-unstake was not migrated — its computational overhead did not fit Asset Hub — so any code path that dispatches `fastUnstake.registerFastUnstake` will fail. Ordinary `staking.unbond` and `withdrawUnbonded` remain; only the fast path was removed.
+
+Neither is caught by unit tests that assert on your SDK's call objects, because the call objects did not change — the chain underneath them did.
+
+That is exactly the boundary an end-to-end test pins down. [@avalix/chroma](https://github.com/avalix-labs/chroma) drives the real Polkadot.js extension in Playwright, so a test that runs `polkadotJs.authorize()` and `polkadotJs.approveTx()` against your repointed dApp confirms the extension shows the right decoded call, on the right chain, and that your UI reads back the balance it actually has — not the one the Relay Chain used to report. Run it once against Asset Hub before you ship the endpoint change, and "I think the migration is transparent" becomes something you can see pass.
+
+## Where this leaves you
+
+The Asset Hub Migration is not a proposal on a roadmap; it shipped, and the Relay Chain no longer answers for balances, staking, or governance. Audit your dApp for any hardcoded `rpc.polkadot.io`, regenerate your client descriptors against Asset Hub, stop hardcoding the existential deposit, and delete any fast-unstake path. It is an afternoon of work, and most of it is find-and-replace — but skip it and your users see stale balances and failing extrinsics against a chain that moved out from under them.
