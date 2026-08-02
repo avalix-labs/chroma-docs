@@ -1,0 +1,70 @@
+---
+title: "When a Valid Smart-Account Signature Turns Invalid: Block-Pinned Verification in viem 2.55"
+description: "ERC-1271 smart-account signatures verify against contract state, so validity is block-dependent. How viem 2.55's blockHash and requireCanonical pin it."
+date: 2026-08-02
+author: Chroma Team
+---
+
+A signature you verified as valid this morning can read as invalid this afternoon, with the signature bytes and the signed message both unchanged. For a plain externally owned account (EOA) that is impossible. For a smart-account signature it is routine, and it is the source of a class of bugs that only surface once your users stop signing with private keys and start signing with contracts. **viem 2.55** adds the parameters that make smart-account signature verification deterministic: you can now pin a check to a specific block. This post explains why that matters and how to wire it in.
+
+## Why smart-account signatures are state-dependent
+
+When an EOA signs a message, verification is `ecrecover`: a pure function of the message hash and the 65-byte signature. It reads no chain state, so it returns the same answer at block 1 and at block 20,000,000.
+
+Smart accounts do not work that way. A contract signature is verified through [ERC-1271](https://eips.ethereum.org/EIPS/eip-1271), which calls `isValidSignature(hash, signature)` on the account contract and lets that contract decide. That call reads storage. A Safe checks its current owner set and threshold. A session-key account checks whether the presented key is still authorized and not past its expiry. A social-recovery wallet checks whoever the last recovery left in control.
+
+So "is this signature valid?" is really "is this signature valid against the state at some block?" viem's `verifyMessage`, `verifyTypedData`, `verifyHash`, and `verifySiweMessage` actions already handle deployed accounts via ERC-1271, pre-deployed (counterfactual) accounts via [ERC-6492](https://eips.ethereum.org/EIPS/eip-6492), and pre-delegated EIP-7702 accounts. What they did not let you control, until now, was *which* block that state comes from — the default is always `latest`.
+
+The gap bites when signing and verifying are separated in time. You collect a signature for an off-chain order, a login session, or a gasless meta-transaction at block N. Between then and when your backend checks it, the user rotates a signer or lowers their multisig threshold. Verified against `latest`, the still-unchanged signature now fails, even though it was valid for the state the user signed against.
+
+## What viem 2.55 adds: blockNumber, blockTag, and blockHash
+
+viem 2.55.1 adds `blockNumber`, `blockTag`, `blockHash`, and `requireCanonical` to all four verification actions. They select the block whose state the smart-account check runs against:
+
+```ts
+const valid = await publicClient.verifyTypedData({
+  address: account,      // the smart account that signed
+  domain,
+  types,
+  primaryType: 'Order',
+  message: order,
+  signature,
+  blockNumber: 21_000_000n, // verify against this block's state
+})
+```
+
+`blockNumber: 21_000_000n` tells viem to run the ERC-1271 call at that block instead of the chain tip. `blockTag` takes `'latest' | 'earliest' | 'pending' | 'safe' | 'finalized'` and defaults to `'latest'`. Pick the block your payload already commits to — for a SIWE message that carries an `issued-at` or a block reference, verify against that block, not against whatever the chain looks like now.
+
+One detail worth internalizing: these parameters only affect the smart-account path. EOA verification is stateless, so an EOA signature returns the same result regardless of the block you pass. You do not have to branch on account type — pass the block unconditionally and it is simply ignored when it does not apply.
+
+## requireCanonical and the reorg trap
+
+Pinning by `blockHash` introduces a hazard that `blockNumber` does not. A block hash can point at a block that a reorg later orphans. If you verify against an orphaned block, you are validating against state that never really settled.
+
+`requireCanonical` closes that hole:
+
+```ts
+const valid = await publicClient.verifyMessage({
+  address: account,
+  message: 'Sign in to Acme',
+  signature,
+  blockHash: '0x89644bbd5c8d682a2e9611170e6c1f02573d866d286f006cbf517eec7254ec2d',
+  requireCanonical: true, // fail if that block is no longer canonical
+})
+```
+
+With `requireCanonical: true`, if the pinned block is not on the canonical chain, verification returns `false` instead of being evaluated against it. It is only allowed together with `blockHash`, and both are viem's implementation of [EIP-1898](https://eips.ethereum.org/EIPS/eip-1898). For anything that grants access or moves value off the back of a signature, treat it as the default rather than an option.
+
+## Where this lands in your tests
+
+Signature verification is a code path, and the most reliable way to exercise it is to produce a real signature the way a user would. In an end-to-end test with [@avalix/chroma](https://chroma.avalix.dev), your dApp triggers a signing prompt and the wallet approves it, handing your app a genuine signature to run through `verifyTypedData`:
+
+```ts
+// EVM / MetaMask
+await page.click('button:has-text("Sign in")')
+await metamask.approve() // approves the signing prompt
+```
+
+`metamask.approve()` handles both the connection and the signing popup, so the signature that reaches your verifier is the one production will see. If your users connect smart accounts, that verifier is doing the state-dependent ERC-1271 call this post is about — so pin it to the block your payload references, and your test asserts exactly what the backend will.
+
+The takeaway is small but easy to miss: for smart-account signatures, "valid" is always relative to a block. Decide which block that is, pass it explicitly, and require it to be canonical before you trust it.
