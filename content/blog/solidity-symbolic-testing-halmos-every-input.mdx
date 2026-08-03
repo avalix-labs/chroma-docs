@@ -1,0 +1,63 @@
+---
+title: "Symbolic Testing for Solidity: Proving an Invariant Holds for Every Input, Not Just the Fuzzed Ones"
+description: "Fuzzing samples inputs; symbolic testing checks all of them. How to prove Solidity invariants with Halmos, read a counterexample, and where it stops."
+date: 2026-08-03
+author: Chroma Team
+---
+
+Fuzz testing has quietly become the default way to harden a Solidity contract. You write a property, the fuzzer throws thousands of random inputs at it, and if nothing breaks you ship with more confidence than a handful of hand-written unit tests ever gave you. But there is a gap hiding in that workflow, and 2026 is the year it stopped being ignored: Foundry shipped a native symbolic testing MVP, and Halmos — the a16z symbolic execution engine that pioneered the approach — matured into something you can run in CI. Symbolic testing is the missing rung above fuzzing, and it is worth understanding before you rely on it.
+
+## Why fuzzing leaves a gap
+
+A fuzzer samples. It picks concrete inputs — `amount = 4291`, `to = 0x1a2b...` — runs your test, and moves on. A good corpus explores a lot of the input space, but "a lot" is not "all." The single adversarial value that triggers an overflow, an off-by-one, or a rounding error only gets caught if the fuzzer happens to generate it. On a 256-bit integer, the odds of stumbling onto one exact boundary value are effectively zero.
+
+Symbolic testing inverts the model. Instead of concrete inputs, it runs your contract with *symbolic* ones — placeholder values that stand for every possible input at once. The engine explores each feasible execution path, and for each path it asks a solver a precise question: is there any assignment of these symbols that makes an assertion fail? If the answer is no, the property is proven for the entire input space. If the answer is yes, you get the exact input that breaks it. This is bounded formal verification, and the important part is that it reuses tests you already know how to write.
+
+## How a symbolic test is structured
+
+Halmos runs inside your existing Foundry project — it reads `foundry.toml`, compiles with `forge`, and discovers test functions by naming convention. A symbolic test is a function prefixed with `check_`, and its parameters are treated as symbolic automatically:
+
+```solidity
+import {SymTest} from "halmos-cheatcodes/SymTest.sol";
+import {Test} from "forge-std/Test.sol";
+
+contract TokenSymTest is SymTest, Test {
+    Token token;
+
+    function setUp() public {
+        token = new Token(1_000_000e18);
+        token.transfer(address(0xBEEF), 500_000e18);
+    }
+
+    // `to` and `amount` are symbolic: Halmos explores every value.
+    function check_transferPreservesSupply(address to, uint256 amount) public {
+        address from = svm.createAddress("from"); // a symbolic sender
+        vm.assume(from != to);                     // skip the self-transfer path
+
+        uint256 sumBefore = token.balanceOf(from) + token.balanceOf(to);
+        vm.prank(from);
+        token.transfer(to, amount);
+        uint256 sumAfter = token.balanceOf(from) + token.balanceOf(to);
+
+        assert(sumBefore == sumAfter);
+    }
+}
+```
+
+Reading it line by line: the function parameters `to` and `amount` become symbolic the moment Halmos runs. `svm.createAddress("from")` mints an additional symbolic value — here, an arbitrary sender — using the `svm` cheatcode instance that `SymTest` provides. `vm.assume(from != to)` constrains the search to inputs you care about, pruning the self-transfer path rather than sampling around it. `vm.prank(from)` sets the caller. The property itself is the last line: the combined balance of sender and receiver must be identical before and after a transfer, for *any* `to`, `amount`, and `from`. Prefer `vm.assume` over Foundry's `bound()` here — the solver handles assumptions more efficiently than a remapped range.
+
+## Reading a counterexample
+
+Run it the same way you run everything else:
+
+```bash
+halmos --function check_transferPreservesSupply
+```
+
+Halmos focuses on assertion violations. If the property holds across every path, the check passes and you have a proof, not a sample. If it fails, you get a counterexample: concrete values for `to`, `amount`, and `from` that violate the assertion. That output is the payoff — it is a reproducible bug you can drop straight into a normal Foundry unit test to confirm and then fix. A passing fuzz run tells you "I didn't find anything." A passing symbolic check tells you "there is nothing to find, within these bounds." Those are very different statements, and the second is the one you want backing a token's core accounting.
+
+## Where symbolic testing stops
+
+Symbolic execution proves things about contract logic in isolation. It says nothing about the browser, the wallet extension, or the human who has to approve the transaction — and that boundary is where a surprising share of dApp bugs actually live. A symbolically-verified `transfer` still ships behind a UI that can request the wrong amount, chain, or recipient. That layer needs end-to-end coverage against a real wallet; a tool like [@avalix/chroma](https://chroma.avalix.dev) drives an actual MetaMask popup through Playwright so the confirm-and-reject path is tested the way a user meets it. The two techniques cover different failure modes: symbolic testing proves the math, E2E proves the flow.
+
+The practical takeaway is not "replace your fuzzer." Keep fuzzing as the fast, broad first pass. Reach for symbolic testing on the handful of invariants that must hold unconditionally — supply conservation, access control, no-free-mint — where a single missed input is a real exploit. Start with one `check_` function on your most important property, read the counterexample if it fails, and expand from there.
