@@ -1,0 +1,58 @@
+---
+title: "Your Solana Address Lookup Table Won't Work in the Slot You Create It"
+description: "A Solana address lookup table compresses account references in v0 transactions, but warm-up and cool-down timing rules trip up builders. Here's the fix."
+date: 2026-08-04
+author: Chroma Team
+---
+
+{/* Meta description: A Solana address lookup table compresses account references in v0 transactions, but warm-up and cool-down timing rules trip up builders. Here's the fix. */}
+
+Solana blocks now clear 100 million compute units, and the transaction size ceiling is on its way from 1,232 to 4,096 bytes. Both changes point the same direction: transactions are carrying more instructions and touching more accounts than they used to. The mechanism that makes that affordable is the Solana address lookup table (ALT) — and it is also the piece most likely to fail in a way that looks like broken code when it isn't. The failures are almost always about timing, not logic.
+
+## What a Solana address lookup table actually compresses
+
+Every account a transaction touches is an explicit input — that is the SVM model, where programs hold no internal state and each instruction names the accounts it reads or writes. In a legacy transaction, each of those accounts costs a full 32-byte public key in the message. A v0 (versioned) transaction can instead point at an on-chain lookup table and reference an account by its 1-byte index in that table. One byte instead of thirty-two, for every account the table covers.
+
+A single table holds up to 256 addresses, and only v0 transactions can resolve them — a legacy transaction ignores the table entirely. That is the whole trick: you are not changing what the transaction does, only how compactly it names the accounts it needs.
+
+## Create, extend, and the slot you have to wait for
+
+Building a table is two steps against the Address Lookup Table program (the `@solana-program/address-lookup-table` client in the Kit toolchain): create the account, then extend it with the addresses you want to store. Because each extend instruction is itself a transaction bound by the size limit, you can only append roughly twenty to thirty addresses at a time — large tables take several extends.
+
+Here is the rule that catches people: an address you append in slot N cannot be looked up until slot N+1. The runtime only resolves addresses that were extended in a slot *before* the one currently executing. Create a table, extend it, and immediately submit a transaction that references it in the same slot, and that transaction fails — not because the address is wrong, but because the table isn't warm yet. In production this is usually invisible; a few hundred milliseconds pass between building a table and using it. In a fast local test or a tight script, it is a coin flip.
+
+Once the table is warm, Kit does the compression for you:
+
+```ts
+import {
+  fetchAddressLookupTable,
+  compressTransactionMessageUsingAddressLookupTables,
+} from '@solana/kit';
+
+// Read the on-chain table — it must already be warm
+const table = await fetchAddressLookupTable(rpc, lookupTableAddress);
+
+// Swap full 32-byte keys for 1-byte indices where the table covers them
+const compressed = compressTransactionMessageUsingAddressLookupTables(
+  txMessage,
+  { [table.address]: table.data.addresses },
+);
+```
+
+`fetchAddressLookupTable` reads the account; `compressTransactionMessageUsingAddressLookupTables` rewrites your message so any account the table covers is referenced by index. Accounts the table doesn't hold stay as full keys. Nothing about the instructions or the signers changes — only the encoding.
+
+## Deactivate and close come with their own clock
+
+The same caution applies at the other end of the lifecycle. Reclaiming the rent locked in a table is a two-step process: `deactivate`, then `close`. But you cannot close immediately after deactivating. A deactivated table stays usable until its deactivation slot falls out of the SlotHashes sysvar — roughly 512 slots, a few minutes. That cool-down exists so a transaction already in flight, built against the table, can still land instead of failing because someone closed the table out from under it. Only after the cool-down will the close instruction succeed and return the rent. A script that deactivates and closes in the same breath will see the close rejected.
+
+Freezing is the third option, and the most final: a frozen table can never be extended, deactivated, or closed. Reach for it only on tables you intend to keep forever.
+
+## Where the timing bites your tests
+
+End-to-end tests are where warm-up and cool-down surface most, because tests do in seconds what production spreads across minutes. A test that creates a table, extends it, and then asks the user to sign a transaction referencing it will pass or fail depending on whether a slot happened to tick over in between. The fix is not a retry loop — it is to wait for the next slot (poll `getSlot` until it advances, or confirm the extend transaction before building the next one) so the table is genuinely warm before anything signs.
+
+That ordering matters even more once a wallet is in the loop. If you drive the real Phantom approval through @avalix/chroma, the versioned transaction is already fully built by the time the wallet popup appears — so a table that wasn't warm produces a failure the user sees, not one your setup code quietly swallows. Getting the slot timing right before the signing step keeps the test measuring your dApp, not the ALT lifecycle.
+
+## The takeaway
+
+Address lookup tables are the reason a single Solana transaction can touch dozens of accounts without blowing the size limit, and that headroom matters more now that blocks and transactions are both getting bigger. But treat the table as a stateful account with a clock, not a static config value: warm before you use, cool down before you close. Build those two waits into your scripts and tests, and the failures that look like broken code disappear.
