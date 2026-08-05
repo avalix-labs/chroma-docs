@@ -1,0 +1,74 @@
+---
+title: "Gasless Solana Transactions: How the Fee-Payer Model Lets Users Sign Without Holding SOL"
+description: "Gasless Solana transactions work because the fee payer is a separate signer. Here's the relayer co-signing flow, SPL-token fees, and how to test it."
+date: 2026-08-05
+author: Chroma Team
+---
+
+{/* Meta description: Gasless Solana transactions work because the fee payer is a separate signer. Here's the relayer co-signing flow, SPL-token fees, and how to test it. */}
+
+Onboarding a new user to your Solana dApp runs into a chicken-and-egg problem: to do anything on-chain — mint an NFT, claim an airdrop, sign up — they need to pay a transaction fee in SOL, but they just arrived and hold none. **Gasless Solana transactions** solve this, and they do it without a special meta-transaction contract or off-chain trickery. The mechanism is already baked into the runtime: on Solana, the account that pays the fee is a separate signer from the accounts that authorize the instructions. Once you see that split, sponsored transactions stop looking like magic.
+
+## Why the fee payer is a separate signer
+
+Every Solana transaction carries a list of signatures. The first one belongs to the fee payer — the account at index 0 of the message's static account keys, always a signer and always writable. It covers the base fee (5,000 lamports per signature) plus any priority fee (compute-unit price × requested limit). What trips people up is that *nothing requires the fee payer to appear in any instruction*. The signers an instruction needs — a transfer's source authority, a program's admin — are declared per instruction, independent of who pays.
+
+Contrast this with EVM. On Ethereum, the sender (`msg.sender`) and the gas payer are the same externally-owned account; account abstraction (ERC-4337, EIP-7702) exists partly to pry those two apart. Solana never welded them together in the first place. That is a property of the SVM's explicit-account model — every account an instruction touches, including the payer, is named up front — so "let someone else pay" needs no new transaction type. (It is not the same as EVM fee sponsorship or a Polkadot `feeless` extrinsic; the payer here is simply another required signature on an otherwise ordinary transaction.)
+
+## The co-signing flow a relayer runs
+
+Your dApp builds the transaction message with the relayer's address as the fee payer, then appends the instruction the user actually authorizes:
+
+```ts
+const message = pipe(
+  createTransactionMessage({ version: 0 }),
+  // The relayer — not the user — pays the fee
+  (m) => setTransactionMessageFeePayer(relayerAddress, m),
+  // The instruction the user authorizes (e.g. an SPL transfer)
+  (m) => appendTransactionMessageInstruction(transferInstruction, m),
+  (m) => setTransactionMessageLifetimeUsingBlockhash(latestBlockhash, m),
+)
+```
+
+Line by line: a version-0 message; the relayer's address becomes the fee payer at index 0; the user's instruction is appended; a recent blockhash sets the transaction's lifetime.
+
+Now two parties sign the *same* message. The user signs first — their signature authorizes the transfer, nothing else — producing a partially signed transaction that is still missing the fee-payer signature. They hand those bytes to the relayer, which adds its fee-payer signature and submits. The user never needed SOL; the relayer paid, and its signature only ever covered the fee.
+
+Production relayers package this. Kora, an open-source fee relayer from the Solana ecosystem, co-signs as fee payer and — the part teams underrate — can charge the user in an SPL token such as USDC instead of sponsoring for free, by inserting a token-transfer instruction into the same transaction before it signs. Circle's Gas Station, Privy, and Openfort offer hosted variants of the same fee-payer pattern. Whichever you pick, the on-chain shape is identical: one transaction, two signatures, one of them purely for the fee.
+
+One caveat worth stating up front: because a relayer signs whatever message it is handed, a careless one can be griefed into paying for transactions it never meant to. Real relayers inspect the instructions — which programs, which accounts, what token payment — before adding their signature. Treat that signing policy as part of your threat model, not an afterthought.
+
+## Testing gasless Solana transactions end-to-end
+
+The wallet boundary is where a gasless flow quietly breaks: your dApp *thinks* it built a relayer-paid transaction, but the popup the user actually signs tells the truth. That seam is what an end-to-end test pins down.
+
+@avalix/chroma drives the real wallet popup. Solana signing routes through MetaMask's multichain session, so the user's approval is one `approve()` call; the relayer co-signing and submission are your dApp's job, asserted separately.
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({
+  wallets: [{ type: 'metamask' }],
+})
+
+test('user signs a gasless transfer without holding SOL', async ({ page, wallets }) => {
+  const metamask = wallets.metamask
+
+  await page.goto('http://localhost:3000')
+  await page.click('button:has-text("Connect Wallet")')
+  await metamask.approve() // one CAIP-25 session covers the Solana scope
+
+  // The dApp builds a relayer-paid transfer and asks the user to sign it
+  await page.click('button:has-text("Claim Airdrop")')
+  await metamask.approve() // the user signs their instruction, not the fee
+
+  // The relayer co-signed and submitted; assert the dApp's result
+  await expect(page.locator('.claim-success')).toBeVisible()
+})
+```
+
+What each step covers: connect authorizes the Solana scope; the second `approve()` is the user signing the instruction they own; the success assertion proves the relayer's co-signature landed and the transaction confirmed. If your dApp accidentally set the *user* as fee payer, this test fails the moment it runs against a wallet with no SOL — which is exactly the bug you want to catch before a real new user does.
+
+## Where this leaves you
+
+Gasless UX on Solana is not a bolt-on; it is the fee-payer split the runtime already hands you. Build the transaction with the relayer at index 0, let the user sign only what they authorize, and keep the relayer's signing policy tight. Then write the one test that asserts a fresh, SOL-less wallet can still clear your first flow — because that first flow is the one you can least afford to let break.
