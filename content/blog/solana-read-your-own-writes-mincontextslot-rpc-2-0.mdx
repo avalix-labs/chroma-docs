@@ -1,0 +1,61 @@
+---
+title: "Reading Your Own Writes on Solana: minContextSlot in the RPC 2.0 Era"
+description: "RPC 2.0 decouples Solana reads from the validator, so read-after-write can return stale state. Use minContextSlot and context.slot to fix it."
+date: 2026-08-07
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): RPC 2.0 decouples Solana reads from the validator, so read-after-write can return stale state. Use minContextSlot and context.slot to fix it. */}
+
+You send a Solana transaction, wait for it to confirm, then immediately read the account it changed — and the read comes back with the *old* value. Nothing errored. The write landed. But your very next `getAccountInfo` returned state from before your transaction existed. This Solana read-after-write gap has always been possible, and the RPC 2.0 read-layer rebuild rolling out through 2026 makes it more likely, not less. The good news: there is a first-class fix, and most dApps simply never wired it up.
+
+## Confirmed does not mean your next read sees it
+
+Solana's `context` model is the root of the confusion. Every read is answered "as of" a particular slot — the point in the ledger the answering node had processed when it served your request. Confirming a transaction only tells you the network accepted it at some slot *S*. It says nothing about whether the specific node that answers your *next* read has itself reached slot *S*.
+
+Behind a load balancer, this is a near-certainty rather than an edge case. Your `sendTransaction` may hit one backend, confirmation polling another, and the follow-up account read a third node that happens to be a few slots behind. That third node answers honestly with the freshest state *it* has — which predates your write. The transaction is final; the reader just hasn't caught up.
+
+## RPC 2.0 pulls reads off the validator entirely
+
+This is where the architecture shift matters. Historically, an RPC node was an Agave validator with a read API bolted on, so reads were served from the same process that tracked consensus. RPC 2.0 — a joint effort from Triton One, the Solana Foundation, Helius, Jupiter, and Anza — removes reads from the Agave client and splits them into two purpose-built modules, both open-sourced under the AGPL:
+
+- **Cloudbreak**, the accounts module, serves current state (`getAccountInfo`, `getProgramAccounts`, `getTokenAccountsByOwner`) from Postgres indexes that build themselves from query traffic — cutting a `getProgramAccounts` that took 1,725ms down to about 4ms.
+- **Superbank**, the historical module, serves everything since genesis from ClickHouse, taking `getSignatureStatuses` from ~1,885ms to ~49ms.
+
+Those numbers are why the change is worth it. But decoupling reads from the validator means the read layer *subscribes* to chain updates and applies them with its own propagation delay. You gain speed and horizontal scale; you also formalize the fact that a reader can trail the chain tip. Freshness is now something you assert, not something you assume.
+
+## minContextSlot pins the read to your write
+
+Solana's JSON-RPC already carries the tool for this. Every read that supports it returns a `context.slot` telling you which slot answered your request, and most account reads accept a `minContextSlot` parameter — the minimum slot the request may be evaluated at. Pass the slot your write landed in, and the node either answers with state at least that fresh or fails fast.
+
+First, capture the landed slot from the confirmed signature:
+
+```ts
+// @solana/kit — after the transaction confirms
+const { value } = await rpc.getSignatureStatuses([signature]).send()
+const landedSlot = value[0]?.slot // the slot your tx was processed in
+```
+
+`getSignatureStatuses` returns, per signature, the `slot` at which the transaction was processed. That is the floor your read must clear.
+
+Then pin the read to it:
+
+```ts
+const account = await rpc
+  .getAccountInfo(tokenAccount, {
+    minContextSlot: landedSlot,
+    encoding: 'base64',
+  })
+  .send()
+// account.context.slot >= landedSlot — this node had your write
+```
+
+`minContextSlot: landedSlot` tells the RPC "do not answer unless you have processed at least this slot." If the node is behind, it returns error `-32016`, "Minimum context slot has not been reached," instead of handing you stale bytes. You catch that, back off briefly, and retry — the node catches up in a slot or two, and your read now reflects the write. The `context.slot` in the response confirms which slot actually served you.
+
+One caveat worth knowing: coverage is uneven. Roughly a third of RPC methods accept `minContextSlot` or return a `context` object today (tracked in Agave issue #9028), so check the method you depend on. For the common account and balance reads that back a dApp's post-transaction UI refresh, it is available — which is exactly where read-after-write bugs live.
+
+## Where this surfaces in end-to-end tests
+
+This bug is slippery because it is timing-dependent: it passes locally against a single fast node and flakes in CI or production behind a fleet. An end-to-end test that drives a real Phantom approval — the kind [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom) runs against a live wallet — and then asserts on the balance the dApp renders will catch it, because the assertion exercises the same read path a user hits. If the test intermittently sees the pre-transaction balance, the fix is not a longer `waitFor` in the test; it is a pinned `minContextSlot` in the dApp's read layer.
+
+The takeaway is small and durable: on Solana, confirmation and readability are two separate guarantees, and RPC 2.0 makes that separation explicit. Any read that must reflect a write you just made should carry the slot that write landed in — then the answer is fresh by construction, not by luck.
