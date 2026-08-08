@@ -1,0 +1,57 @@
+---
+title: "Solana's Slot Time Is Halving to 200ms: The Deadlines in Your dApp That Shrink With It"
+description: "SIMD-0525 steps Solana slot time from 400ms to 200ms. Your blockhash window, epochs, and retry timers shrink in wall-clock time — what to re-audit."
+date: 2026-08-08
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): SIMD-0525 steps Solana slot time from 400ms to 200ms. Your blockhash window, epochs, and retry timers shrink in wall-clock time — what to re-audit. */}
+
+SIMD-0525 begins rolling out with Agave v4.2 the week of August 17, stepping Solana's slot time down from 400ms toward a target of 200ms. Faster blocks read like pure upside — quicker confirmations, snappier UX, a more responsive chain. But if your dApp hardcodes any timeout in seconds, some of those timers are about to fire sooner than you planned. The catch is that Solana measures time in slots, not seconds, and most of the deadlines your code depends on are counted in slots.
+
+## Slots, not seconds, are Solana's real clock
+
+A slot is Solana's fundamental unit of time: a fixed window in which one leader may produce a block. Nearly every protocol-level deadline is denominated in slots, never in seconds. A recent blockhash is valid for 150 slots. An epoch is exactly 432,000 slots. An address lookup table becomes usable one slot after you create it.
+
+None of those are defined in wall-clock time. They only *feel* like time because a slot has been roughly 400ms for years, so we quietly convert in our heads: 150 slots is "about a minute," 432,000 slots is "about two days." SIMD-0525 breaks that conversion. The slot counts stay exactly the same; the seconds behind each slot get shorter.
+
+## What SIMD-0525 actually changes
+
+The proposal, authored by Anza's Brennan Watt, stages the reduction rather than dropping it all at once: 400ms to 350, then 300, then 250, then 200, with a one-epoch delay between each step so validators have time to keep up. The first stage is targeted for the week of August 17 alongside the Agave v4.2 client. Devnet and testnet have already cleared the earlier gates.
+
+One distinction worth drawing early: this is about *block production cadence*, not finality. Solana's Alpenglow work cuts *finality* to around 150ms — how fast a block becomes irreversible. SIMD-0525 changes how *often* blocks are produced. Both compress the timeline, but for different reasons and through different mechanisms. Don't conflate them when you reason about what your users experience.
+
+## The deadlines that shrink in wall-clock time
+
+Here is where the fixed slot counts bite:
+
+- **The blockhash window.** A transaction's blockhash is still valid for 150 slots — but at 200ms that window is roughly 30 seconds instead of the familiar 60–90. A transaction a user leaves sitting in a wallet popup — reading it, tabbing away, coming back — is now far more likely to expire before they click Approve. The runtime error `Transaction expired: block height exceeded` moves from rare to routine, especially if you fetch the blockhash early in a flow and submit late.
+- **Retry and rebroadcast timing.** If you rebroadcast "every two seconds for a minute," you're now spanning twice as many slots — which is fine. But if you cap retries with a wall-clock timer that assumed ~150 slots of runway, that assumption is now wrong. Re-derive the cap from slots, not a stopwatch.
+- **Epoch cadence.** 432,000 slots is about 48 hours today and about 24 at 200ms. Stake activation, reward payouts, and anything you schedule per-epoch will land twice as often. Any UI copy or backend job that hardcodes "rewards arrive every two days" needs to read the epoch schedule instead.
+
+The clean escape hatch is the durable nonce: a nonce account stores a blockhash that stays valid until you explicitly advance it, so it doesn't ride slot time at all. That is exactly why relayer, multisig, and offline-signing flows lean on nonces — and shrinking slot times are one more reason more flows should.
+
+## Testing against the compressed window
+
+The failure that actually hurts is the human one: your dApp fetches a blockhash, renders the popup, the user pauses to read it, and the blockhash expires before they sign. Automated submitters that build and sign in milliseconds never reproduce that gap. An end-to-end test that drives a real wallet does — because the popup, the review, and the click all take real wall-clock time.
+
+That is the seam [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom) covers: it runs an actual Phantom extension inside Playwright, so the pause between building a transaction and approving it is genuine.
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({ wallets: [{ type: 'phantom' }] })
+
+test('transfer still lands after the user pauses on the popup', async ({ phantom, page }) => {
+  await phantom.importSeedPhrase({ seedPhrase: process.env.TEST_SEED! })
+  await page.getByRole('button', { name: 'Send' }).click()
+  await phantom.approve()
+  await expect(page.getByText('Confirmed')).toBeVisible()
+})
+```
+
+`createWalletTest` starts a real Phantom in the browser; `importSeedPhrase` loads a funded test account; the button click runs your dApp's own build-and-submit path; `phantom.approve()` signs in the live popup; and the final assertion checks that your UI actually confirms rather than swallowing an expiry. Because the time between building the transaction and `approve()` is real, this test surfaces the too-early-blockhash bug that unit tests hide. The library handles the wallet interaction; you control the timing.
+
+## Where this leaves you
+
+SIMD-0525 doesn't change a single API. It changes the wall-clock meaning of numbers already sitting in your code. Before Agave v4.2 reaches the validators you depend on, grep for durations — every retry loop, every "valid for N seconds" comment, every scheduled per-epoch job — and re-derive each one from slots. The safe assumption after this ships isn't a smaller constant to memorize; it's that slots, not seconds, were the unit all along.
