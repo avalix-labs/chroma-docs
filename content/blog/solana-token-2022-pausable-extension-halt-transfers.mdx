@@ -1,0 +1,58 @@
+---
+title: "Token-2022's Pausable Extension: When a Solana Token Can Halt Every Transfer at Once"
+description: "Token-2022's Pausable extension lets one authority halt every mint, burn, and transfer of a Solana token—what that means for your dApp and its tests."
+date: 2026-08-09
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): Token-2022's Pausable extension lets one authority halt every mint, burn, and transfer of a Solana token—what that means for your dApp and its tests. */}
+
+Most dApps treat a token transfer as a solved problem: build the instruction, get the signature, submit, and assume it lands unless the user is broke or clicks cancel. Token-2022's **Pausable extension** breaks that assumption in a way that has nothing to do with your user's balance. A single pause authority can stop *every* mint, burn, and transfer of a token in one instruction — and your dApp's transfer flow starts failing for a reason no amount of input validation catches. This is worth understanding now, because Anchor's SPL support just added pausable-mint handling, which means more programs are about to ship tokens that carry it.
+
+## What the Pausable extension actually does
+
+Pausable is a mint-level extension in the SPL Token-2022 program. When a mint is created with it, the extension stores a **pause authority** and a boolean. Three instructions govern it: `Initialize` sets the pause authority at mint creation, `Pause` flips the switch on, and `Resume` flips it off. That is the entire surface.
+
+The effect of the switch is broad. While a mint is paused, the Token-2022 program rejects **minting, burning, and transferring** for that mint. It is not a rate limit or a per-account block — it is a global stop on token movement, held by whoever controls the pause authority. Regulated stablecoins and tokenized real-world assets are the obvious adopters: issuers want a compliance lever they can pull during an incident without migrating holders to a new mint.
+
+## Pausable vs. the freeze authority you already know
+
+Solana developers already have a mental model for "a token that stopped moving" — the freeze authority — and it is the wrong model here. The freeze authority acts on a **single token account**: freeze one holder and that account can neither send nor receive, while every other holder transfers normally. It is surgical and asymmetric.
+
+Pausable is the opposite. It acts on the **mint**, so one `Pause` instruction stops the entire token at once, symmetrically, for everyone. A mint can carry both extensions, which means "can this token move right now?" is no longer answered by checking a single account's frozen flag — you also have to know whether the mint itself is paused. Two different authorities, two different scopes, two different failure surfaces to account for.
+
+## What a paused mint does to your dApp
+
+On Solana the transfer is a single instruction to the Token-2022 program, with the source account, mint, destination, and owner all passed in as explicit accounts. When the mint is paused, the program returns an error while processing that instruction, and because Solana transactions are atomic, the *whole* transaction fails — nothing partially applies. The user still pays the base fee and burns the compute units consumed up to the point of failure, so a paused transfer is not a free no-op.
+
+The practical consequence: a transfer your dApp built correctly, signed correctly, and submitted correctly can still bounce, and the raw program error is not something a user should ever read. Before you build the instruction, you can decode the mint and read the paused flag on its `PausableConfig`, then render an explicit "transfers for this token are paused" state instead of letting the transaction fail blind. Treat the flag as live, not cached — a mint can be paused between the moment your UI loads and the moment the user clicks send.
+
+## Testing the paused-transfer path with @avalix/chroma
+
+This is exactly the branch that mocked tests miss, because a mock happily "succeeds." The honest check is to drive a real wallet against a paused mint and confirm your UI degrades gracefully. [@avalix/chroma](https://github.com/avalix-labs/chroma) runs the real Phantom extension inside Playwright, so the signing popup is the one your users see:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({ wallets: [{ type: 'phantom' }] })
+
+test('surfaces a clear error when the token mint is paused', async ({ phantom, page }) => {
+  await phantom.importSeedPhrase({ seedPhrase: process.env.TEST_SEED! })
+
+  await page.goto('http://localhost:3000/send')
+  await page.getByRole('button', { name: 'Connect' }).click()
+  await phantom.approve() // clears the connection popup
+
+  await page.getByLabel('Amount').fill('10')
+  await page.getByRole('button', { name: 'Send' }).click()
+  await phantom.approve() // user signs; the paused mint rejects it on-chain
+
+  await expect(page.getByText('Transfers for this token are paused')).toBeVisible()
+})
+```
+
+`importSeedPhrase` seeds the account before the dApp loads, `approve()` clears the connection popup and then signs the transfer, and the final assertion is the one that matters: the transaction failed on-chain for a protocol reason, and your dApp turned that into a message a human understands rather than a spinner that never resolves. Swap in an unpaused mint and the same test should reach your success state — the two runs together pin both sides of the behavior.
+
+## Where this leaves you
+
+The Pausable extension adds one bit of state — paused or not — that sits outside your user's control and outside your transaction's correctness. Read it before you build a transfer, keep it distinct from the freeze authority in your code and your copy, and cover the paused branch with a test that signs against a real wallet. A token that can stop moving is only a problem if your dApp finds out from a failed transaction instead of from you.
