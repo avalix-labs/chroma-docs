@@ -1,0 +1,55 @@
+---
+title: "M-of-N on Solana: How SPL Token Multisig Authorities Actually Work"
+description: "SPL Token multisig authorities put mint, freeze, and treasury actions behind M-of-N signers on Solana. How they work and why every signer is an account."
+date: 2026-08-10
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): SPL Token multisig authorities put mint, freeze, and treasury actions behind M-of-N signers on Solana. How they work and why every signer is an account. */}
+
+You shipped a Solana token where a single keypair controls minting. That key is now the whole security model: one leaked secret and someone inflates supply, drains a treasury, or freezes every holder. The fix is not a governance framework or a new program to audit — it is a primitive the SPL Token program has shipped from the start. An **SPL Token multisig authority** replaces that lone key with an M-of-N set of signers. A recent Solana changelog notes Anchor is adding support for multisig authorities on its SPL token interface, so it is worth understanding exactly what an M-of-N authority is and how the SVM's account model shapes the way you sign with one.
+
+## What a multisig authority actually is
+
+A multisig is a plain account owned by the Token program — 355 bytes, nothing exotic. Its layout is four fields: `m`, the number of signatures required; `n`, the number of valid signers; an `is_initialized` flag; and a fixed `signers: [Pubkey; 11]` array. The constants that bound it are `MIN_SIGNERS = 1` and `MAX_SIGNERS = 11`, so you can express anything from 1-of-1 up to 11-of-11 — a 2-of-3 team wallet, a 3-of-5 treasury, whatever your threshold is.
+
+You create one with `InitializeMultisig`, passing `m` and the list of signer pubkeys; those pubkeys are frozen into the account at creation. There is also an `InitializeMultisig2` variant that drops the rent sysvar from the account list, matching the `*2` instructions elsewhere in the program. The important thing to internalize: a multisig stores *public keys*, not code. It is not a PDA and not a program. No custom logic runs — the Token program itself reads the account and enforces the threshold.
+
+## Why every signer is an explicit account
+
+This is where the SVM model diverges sharply from Ethereum, and the difference is easy to miss. On EVM, a multisig like a Safe is a *contract* that holds logic and verifies signatures internally; your dApp calls one address and the contract does the rest. Solana instructions are stateless, and every account an instruction touches is declared up front. A multisig therefore cannot "hold" anything or run checks on its own — it is just data the Token program loads and reads.
+
+So when you mint from a mint whose authority is a multisig, the `MintTo` instruction's account list is: the mint, the destination token account, then the multisig account (read-only, **not** marked as a signer), followed by M of the N individual signer accounts, each one marked `[signer]`. The program loads the multisig, checks that at least `m` of its stored pubkeys appear among the transaction's signers, and only then executes. The same pattern applies to `Burn`, `FreezeAccount`, `Transfer`, and any other authority-gated instruction.
+
+Two consequences fall out of this. First, all required signers must sign the same transaction — either co-present, or by assembling partial signatures offline and combining them before submission. Second, each additional signer adds a 32-byte pubkey and a 64-byte signature to the wire, so a high threshold eats into your transaction size budget. That budget just grew from 1,232 to 4,096 bytes, which makes larger signer sets more practical — but it is still worth counting bytes at 7-of-11.
+
+## Setting a multisig as your mint or freeze authority
+
+Adopting this on an existing token is a single instruction. You call `SetAuthority` with an authority type of `MintTokens` or `FreezeAccount` and point the new authority at the multisig account's pubkey. From that transaction forward, every privileged action needs M signatures. The same move works for a token account's owner or a delegate, so you can gate a program-controlled treasury the same way you gate a mint.
+
+This is what Anchor's new support smooths over. Anchor's SPL token interface has assumed a single `Signer` authority, which meant using a multisig authority forced you out of the typed helpers and into raw instruction building. With multisig authorities supported directly, a token minted by an Anchor program can name a multisig as its authority and your program's CPIs can pass the signer set through the interface — one less place where you drop to hand-rolled instructions.
+
+## Testing the M-of-N flow
+
+The security you gain only holds if the client actually collects and submits every required signature. That is the kind of integration bug unit tests hide: a UI that greys out the mint button after the first approval, or a builder that forgets to append the second signer account so the program rejects the transaction as under-signed.
+
+If you drive the signer-facing flow with @avalix/chroma, each approval is one genuine wallet click — the same real bytes the Token program will check:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({ wallets: [{ type: 'phantom' }] })
+
+test('a signer approves one leg of the 2-of-3 mint', async ({ phantom, page }) => {
+  await phantom.importSeedPhrase({ seedPhrase: process.env.SIGNER_SEED! })
+  await page.getByRole('button', { name: 'Approve mint' }).click()
+  await phantom.approve() // signs the real MintTo with this signer's key
+  await expect(page.getByText('1 of 2 signatures')).toBeVisible()
+})
+```
+
+`phantom.approve()` signs the actual transaction rather than a mock, so the test proves your dApp built a `MintTo` that names the multisig plus this signer — not that a stub returned success. Assembling all M legs is more wiring, but the load-bearing check is that each real signature lands where the program expects it.
+
+## Where this leaves you
+
+A multisig authority costs almost nothing to adopt: no governance contract to audit, no program to deploy, no new trust assumptions beyond the keys you already control. It turns a single point of failure into an M-of-N one using a struct the Token program has always understood. Pick your threshold, initialize the account, repoint the authority with `SetAuthority`, and — because the SVM makes every signer an explicit input — test that your client actually gathers each required signature before it submits.
