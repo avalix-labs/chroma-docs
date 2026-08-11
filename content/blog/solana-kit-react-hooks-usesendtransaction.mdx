@@ -1,0 +1,78 @@
+---
+title: "Solana Kit's New React Hooks: When Sending a Transaction Becomes One Call"
+description: "Solana Kit's new @solana/react-hooks fold the assemble-sign-send-poll pipeline into useSendTransaction, with usePayer and useIdentity as reactive state."
+date: 2026-08-11
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): Solana Kit's new @solana/react-hooks fold the assemble-sign-send-poll pipeline into useSendTransaction, with usePayer and useIdentity as reactive state. */}
+
+If you have wired a send button in a `@solana/kit` React app, you know the shape of the work. A click handler fetches a blockhash, pipes a transaction message through a chain of pure functions, sets the fee payer, appends instructions, signs, submits, and then opens a subscription to watch the signature reach a commitment level — all while you hand-roll `isPending` and `error` state so the button can show something. It works, but every send button reimplements the same lifecycle. The `@solana/react-hooks` package announced in the August 6 changelog is Kit's answer to that repetition: it turns the pipeline into a hook and the lifecycle into reactive state. This is the practical shift for anyone building a **Solana Kit React** frontend.
+
+## The pipeline these hooks fold up
+
+On the SVM, a transaction is a message — a fee payer, a blockhash-based lifetime, and an ordered list of instructions, each naming the explicit accounts it touches. Programs hold no internal state, so assembling that account list is your job, and none of it is React-aware. The manual version reads roughly like this:
+
+```ts
+const { value: latestBlockhash } = await rpc.getLatestBlockhash().send();
+const message = pipe(
+  createTransactionMessage({ version: 0 }),
+  m => setTransactionMessageFeePayerSigner(signer, m),
+  m => setTransactionMessageLifetimeUsingBlockhash(latestBlockhash, m),
+  m => appendTransactionMessageInstructions(instructions, m),
+);
+const signed = await signTransactionMessageWithSigners(message);
+const signature = await sendAndConfirmTransaction(signed, { commitment: 'confirmed' });
+```
+
+Every line is necessary, and every line is imperative. Your component still has to translate "this promise is in flight" and "this promise rejected" into rendered UI by hand. The new hooks keep the model — instructions, explicit accounts, a versioned (v0) message — but move the plumbing behind a React boundary.
+
+## One hook, the whole send lifecycle
+
+`useSendTransaction` accepts instructions and optional prepare overrides, and hands back the state a button actually needs:
+
+```tsx
+function SendPrepared({ instructions }) {
+  const { send, isSending, status, signature, error, reset } = useSendTransaction();
+  return (
+    <div>
+      <button disabled={isSending} onClick={() => send({ instructions })}>
+        {isSending ? "Submitting..." : "Send Transaction"}
+      </button>
+      <p>Status: {status}</p>
+      {signature && <p>Signature: {signature}</p>}
+      {error && <p>Error: {String(error)}</p>}
+    </div>
+  );
+}
+```
+
+`send({ instructions })` runs the assemble-sign-submit path for you; `isSending` is the in-flight flag; `status` tracks where the transaction is in its lifecycle; `signature` fills in once it lands; `error` captures a rejection or an RPC failure; and `reset` clears the state so the same component can send again. The "optional prepare overrides" are the escape hatch that keeps the SVM's cost knobs in reach — the fee payer, a compute-unit limit, or a priority fee you want applied while the message is built, rather than accepting whatever default the provider assembles. You are not giving up control of the instruction list or the account model; you are giving up the boilerplate around it.
+
+## Payer and identity as reactive state, not props you thread
+
+The lifecycle hook is the headline, but the release ships a cluster of smaller hooks that read from a single `SolanaProvider` you wrap your tree in once: `usePayer` exposes the account currently set as fee payer, `useIdentity` the connected wallet identity, and `useAirdrop` a request helper for funding an account on devnet or a local validator. The point is that the fee payer is an explicit account on every Solana instruction — so making it a value any component can read, rather than a prop threaded down through five layers, removes a class of "which account signed this?" bugs. When the connected wallet changes, the hooks that depend on it re-render; you are not manually syncing a payer address into component state. For batch flows there are `usePlanTransaction` and `useSendTransactions`, which lean on Kit's transaction planner to split an instruction plan across multiple messages when it grows past the per-message limit.
+
+## The states you now have to test
+
+Folding the lifecycle into a hook means your UI now has explicit `Submitting…`, signed, and error states — and those are exactly what an end-to-end test should pin down, because a mocked wallet never exercises the real pending window between submit and confirmation. Drive a live [Phantom](https://chroma.avalix.dev/docs/wallets/phantom) extension with [@avalix/chroma](https://chroma.avalix.dev/docs) and assert each state the hook renders:
+
+```tsx
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({ wallets: [{ type: 'phantom' }] })
+
+test('send button shows pending, then a signature', async ({ phantom, page }) => {
+  await phantom.importSeedPhrase({ seedPhrase: process.env.TEST_SEED! })
+  await page.getByRole('button', { name: 'Send Transaction' }).click()
+  await expect(page.getByText('Submitting...')).toBeVisible()
+  await phantom.approve() // signs the real bytes in the live popup
+  await expect(page.getByText(/Signature:/)).toBeVisible()
+})
+```
+
+`importSeedPhrase` loads a funded test account; the click runs your dApp's own `send()` path; `phantom.approve()` signs the actual transaction bytes; and the assertions check that `isSending` and `signature` reach the DOM. Swap `approve()` for `phantom.reject()` and assert the `error` branch renders — the two paths your users split on. Because the wallet signs real bytes, the test proves the hook wired the instructions correctly, not that a stub resolved.
+
+## Takeaway
+
+The new `@solana/react-hooks` do not change what a Solana transaction is — the instruction list, the explicit accounts, and the versioned-message model are untouched. What changes is that the send lifecycle is now first-class React state instead of hand-rolled flags. If you are still translating promises into `isPending` by hand, the migration is mostly deletion: replace the click handler's pipeline with `send({ instructions })`, read `status` and `signature` from the hook, and let the provider own the fee payer. Then write the E2E test that proves each of those states actually renders.
