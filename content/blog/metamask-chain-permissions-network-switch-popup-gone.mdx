@@ -1,0 +1,57 @@
+---
+title: "MetaMask Chain Permissions: The Network-Switch Popup Your dApp No Longer Triggers"
+description: "MetaMask now permissions networks per-dapp at connection, so signing on a permitted chain skips the switch-approval popup. What it changes for tests."
+date: 2026-08-12
+author: Chroma Team
+---
+
+Every multichain dApp has shipped the same awkward moment. A user lands on your app while their MetaMask is pointed at Ethereum mainnet, clicks "Swap on Base," and — before anything useful happens — a popup appears asking them to approve a network switch. They approve it, the wallet flips chains, and *then* the transaction confirmation shows up. Two popups for one intent. **MetaMask Chain Permissions** removes the first one. Networks are now permissioned per-dapp at connection time, and once a chain is permitted, signing a transaction on it no longer requires a separate switch-approval step.
+
+This is a small change in wallet behavior with an outsized effect on connection UX — and on any E2E test that scripted the old two-popup dance. Here is what actually moved.
+
+## The old flow: a switch-approval popup between connect and send
+
+For years, the mechanism was [EIP-3326](https://eips.ethereum.org/EIPS/eip-3326)'s `wallet_switchEthereumChain`. Your dApp detected that the user's active chain didn't match the chain your next transaction needed, called `wallet_switchEthereumChain` with the target chain id, and MetaMask raised a confirmation. The user had to approve the switch before you could call `eth_sendTransaction`. If the chain wasn't even added to their wallet yet, you first called `wallet_addEthereumChain`, which raised its *own* prompt.
+
+MetaMask tracked a single globally-selected network — one active chain for the whole wallet — so every dApp shared it. Sending on a different chain meant moving that global pointer, and moving it was a user-facing decision the wallet insisted on confirming each time. For a single-chain dApp this was invisible. For anything spanning mainnet, Base, and an L2, it meant a switch prompt threaded through the middle of otherwise clean flows.
+
+## What Chain Permissions actually change
+
+MetaMask now manages network connections on a per-dapp basis. When a user connects, the wallet shows one review screen listing both the accounts *and* the networks the dApp wants access to. Approving that screen grants the dApp a set of permitted chains up front. From then on:
+
+- **Signing on any permitted network skips the switch prompt.** The user already consented to those chains at connection, so a transaction on Base — when Base is permitted — goes straight to the transaction confirmation. No intervening switch-approval popup.
+- **Each dApp has its own selected network.** The wallet uses the dapp-selected chain for permissioned sites and the global chain only for sites without permissions. Two dApps can be connected at once on two different networks without fighting over one global pointer.
+- **A dApp spanning several permitted chains moves between them without asking.** Requesting a chain the dApp *isn't* permitted for — or one not yet added to the wallet — still prompts, because that is genuinely new consent. The popup didn't disappear; it moved to connection time, where it belongs.
+
+The practical shift for your frontend: front-load the networks you need into the connection request instead of reaching for `wallet_switchEthereumChain` mid-flow. The chains a user approves when they connect are the chains you can transact on silently afterward.
+
+## What this breaks in your test suite
+
+Here is the part that bites quietly. If your E2E tests were written against the old behavior, some of them encode a step that no longer happens: after "connect," they wait for and approve a network-switch confirmation, *then* approve the transaction. On a wallet with Chain Permissions, that intermediate approval never appears for a permitted chain — so a test that blocks waiting for it will hang or time out, even though the app is behaving correctly.
+
+This is exactly the class of drift a mocked provider hides and a real extension exposes. With [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/metamask), you drive the actual MetaMask extension, so the popups your test scripts are the popups a user sees:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({ wallets: [{ type: 'metamask' }] })
+
+test('swap on Base needs one confirmation, not two', async ({ page, metamask }) => {
+  await metamask.importSeedPhrase({ seedPhrase: process.env.TEST_SEED! })
+
+  await page.goto('/swap')
+  await page.getByRole('button', { name: 'Connect Wallet' }).click()
+  await metamask.authorize() // grants accounts + permitted networks in one prompt
+
+  await page.getByRole('button', { name: 'Swap on Base' }).click()
+  await metamask.confirm()    // the transaction confirmation — no switch step before it
+
+  await expect(page.getByText('Swap submitted')).toBeVisible()
+})
+```
+
+Reading it line by line: `importSeedPhrase` seeds the account before the dApp loads. `authorize()` clears the single connection prompt — the one place network permissions are now granted. `confirm()` approves the transaction itself. There is no `metamask.confirm()` for a switch step in between, because on a permitted chain there is no switch step. If your app still forces one, the test fails, and you have found a stale `wallet_switchEthereumChain` call worth deleting. Swap `confirm()` for `reject()` to prove the cancel path recovers.
+
+## The takeaway
+
+Chain Permissions doesn't add an API you have to adopt — it changes when consent is collected. Request the networks your dApp needs at connection, drop the mid-flow `wallet_switchEthereumChain` calls that only exist to move a global pointer, and re-read your E2E specs for an approval step that no longer fires. The cleaner flow is the one where the user decided which chains you can touch exactly once — when they connected.
