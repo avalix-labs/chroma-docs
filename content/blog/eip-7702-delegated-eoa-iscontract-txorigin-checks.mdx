@@ -1,0 +1,78 @@
+---
+title: "An EOA With Code: How EIP-7702 Delegated Accounts Break isContract and tx.origin Checks"
+description: "MetaMask now upgrades everyday EOAs to smart accounts, so a delegated EOA carries 0xef0100 code that breaks isContract and tx.origin checks. Here's the fix."
+date: 2026-08-13
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): MetaMask now upgrades everyday EOAs to smart accounts, so a delegated EOA carries 0xef0100 code that breaks isContract and tx.origin checks. Here's the fix. */}
+
+For years, one line of Solidity told you whether an address was a person or a program: `addr.code.length > 0`. In 2026 that line quietly became a lie. MetaMask has started upgrading ordinary users to smart accounts — when someone confirms a batched action on a modern dApp, their externally owned account (EOA) gets an **EIP-7702 delegation**, and from that moment its on-chain code is no longer empty. An **EIP-7702 delegated EOA** is still controlled by a private key, still an EOA in every way that matters to the user, but it now reports bytecode. Every access check, mint gate, and anti-bot guard that treated "has code" as "is a contract" is now reading the wrong signal about your real users.
+
+## Why "code means contract" was a safe bet
+
+The EVM gives you two account types. A contract has bytecode at its address; an EOA does not. So the whole ecosystem standardized on a shortcut: read the account's code size, and if it's zero, you're talking to a person. The old OpenZeppelin `Address.isContract` helper, countless `require(msg.sender.code.length == 0)` mint guards, and the classic `require(msg.sender == tx.origin)` "no contracts allowed" check were all built on that shortcut. It worked because the mapping was clean — until an EOA could point at code without becoming a contract.
+
+## What the 0xef0100 delegation designator actually is
+
+EIP-7702 introduced a transaction type that sets an EOA's code to a **delegation designator**: exactly 23 bytes, `0xef0100 || address`, where the trailing 20 bytes name the contract the account delegates its logic to. The `0xef` prefix is deliberate — it reuses a byte that [EIP-3541](https://eips.ethereum.org/EIPS/eip-3541) banned for regular contract code, so a delegated EOA can never be mistaken for a normally deployed contract by anything that checks the prefix.
+
+The subtlety is in how code-reading opcodes respond. When another contract inspects a delegated account, `EXTCODESIZE` returns **23** (the designator length) and `EXTCODEHASH` / `EXTCODECOPY` and the `eth_getCode` RPC all return the 23-byte designator — not the delegate's code. Only `CODESIZE` and `CODECOPY`, evaluated while the delegated code is *executing*, follow the pointer to the real logic. So from the outside, a delegated EOA looks like an address holding 23 bytes of code that decode to a target address.
+
+## Where this breaks your dApp
+
+Three distinct failures fall out of that one change, and they cut in different directions:
+
+**Anti-contract gates now reject real users.** A fair-mint or airdrop that enforces `msg.sender.code.length == 0` to keep contracts out will now turn away anyone whose wallet has upgraded them to a smart account. These are your most active users, and they get a revert with no idea why.
+
+**`isContract` misclassifies people as programs.** Logic that branches on "is this a contract?" — routing, fee tiers, callback assumptions — will treat a delegated EOA as a contract and take the wrong path.
+
+**`tx.origin == msg.sender` no longer means "no code ran."** An attacker can delegate their own EOA to a malicious contract, then call your function directly. Both `msg.sender` and `tx.origin` are still that EOA, so the check passes — while attacker-controlled code executes inside the call. Anti-flash-loan and reentrancy guards built on this equality are no longer sound.
+
+If you need to distinguish a plain EOA from a delegated one, detect the designator explicitly rather than measuring length:
+
+```solidity
+// EVM / Solidity
+function _isDelegatedEOA(address a) internal view returns (bool) {
+    bytes memory c = a.code;
+    return c.length == 23 && c[0] == 0xef && c[1] == 0x01 && c[2] == 0x00;
+}
+```
+
+Off-chain, the same check reads the designator prefix and can even recover the delegate target:
+
+```ts
+// EVM / viem
+const code = await publicClient.getCode({ address })
+const isDelegated = code?.startsWith('0xef0100') ?? false
+const delegateTarget = isDelegated ? `0x${code!.slice(8)}` : undefined
+```
+
+`getCode` returns `0xef0100` followed by 40 hex characters; slicing off the 8-character prefix leaves the 20-byte delegate address.
+
+## Test with a delegated account, not just a fresh one
+
+Here's the trap in your test suite: a brand-new test wallet is a plain EOA with empty code, so it sails through every gate and never exercises the delegated path your production users are on. You need at least one account in your matrix that has actually been upgraded. Because [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/metamask) drives a real MetaMask extension rather than a mock, an imported account that MetaMask has already upgraded behaves on-chain exactly like your users' — its code is `0xef0100 || <delegate>`.
+
+```ts
+import { createWalletTest } from '@avalix/chroma'
+
+const test = createWalletTest({ wallets: [{ type: 'metamask' }] })
+
+test('a delegated smart account can still mint', async ({ page, metamask }) => {
+  await metamask.importSeedPhrase({ seedPhrase: process.env.SEED_PHRASE! })
+
+  await page.goto('/mint')
+  await page.getByRole('button', { name: 'Connect' }).click()
+  await metamask.authorize()
+
+  await page.getByRole('button', { name: 'Mint' }).click()
+  await metamask.confirm()
+
+  await expect(page.getByText('Mint successful')).toBeVisible()
+})
+```
+
+`importSeedPhrase` loads the account, `authorize` approves the connection, and `confirm` accepts the mint. If your mint gate secretly rejects code-bearing accounts, this test fails where a fresh-EOA test would have passed — which is the whole point.
+
+The fix is not to chase every `code.length` in your codebase, but to stop conflating three separate questions: *does this address have code*, *is it a delegated EOA*, and *did contract code run in this call*. EIP-7702 pulled those apart. Audit the checks that assumed they were the same, and put a delegated account in your test matrix so the gap shows up in CI instead of in a user's failed transaction.
