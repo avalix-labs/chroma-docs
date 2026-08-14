@@ -1,0 +1,71 @@
+---
+title: "Metaplex Core: Why Solana's NFT Standard Collapsed Into a Single Account"
+description: "Metaplex Core replaces Solana's multi-account Token Metadata with one asset account and on-chain plugins. Here's the model and what changes for builders."
+date: 2026-08-14
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): Metaplex Core replaces Solana's multi-account Token Metadata with one asset account and on-chain plugins. Here's the model and what changes for builders. */}
+
+For most of Solana's history, minting one NFT meant creating three accounts. The old Token Metadata standard leaned on SPL Token: an NFT was an SPL mint with a supply of one, a separate metadata account keyed to that mint, and a token account to hold the single unit. Three accounts, three rent deposits, and three things to keep in sync for what a user thinks of as one object. **Metaplex Core** is the standard that collapses all of that into a single account — and if you are building anything NFT-shaped on Solana in 2026, it is now the default worth reaching for.
+
+## One account, not three
+
+Solana's execution model makes every account an explicit input to an instruction. Token Metadata's three-account design meant every operation on an NFT had to name and load the mint, the metadata account, and the token account, then reason about which authority governed which. Core's `AssetV1` folds ownership, metadata, and identity into one account. Transfer changes the `owner` field on that account directly — there is no separate token account whose balance moves from one to zero.
+
+The immediate payoff is cost. A Token Metadata NFT that ran roughly 0.022 SOL in rent to mint drops to about 0.0037 SOL under Core — the reduction comes almost entirely from not paying rent on two extra accounts. At scale — a 10,000-piece collection, or a game minting assets per player — that difference stops being rounding error.
+
+The subtler payoff is that there is one authority surface instead of several. You are no longer reconciling an update authority on the metadata account against a mint authority against a freeze authority on the token account. The asset has an owner and an update authority, and that is the model your dApp code reasons about.
+
+## Plugins: behavior that lives on the asset
+
+Core's second idea is that behavior is data attached to the asset, not logic buried in a wrapper program. A **plugin** is an on-chain extension on an asset or a collection. Plugins do one of three things: store data, enforce a rule, or delegate a permission. They are not passive metadata — they run during the asset's *lifecycle events* (create, transfer, burn) and can approve, reject, or force-approve the operation.
+
+That validation step is why royalties finally have teeth. The `Royalties` plugin enforces creator payouts by default and carries an allowlist/denylist rule set, so a transfer that would skip royalties can be rejected at the protocol level rather than politely ignored by a marketplace. `FreezeDelegate` lets a program freeze an asset in place — the primitive behind staking and in-game locking, where the asset must stay put without leaving the owner's wallet. `Attributes` stores key/value traits directly on-chain instead of only in off-chain JSON.
+
+Plugins are grouped by who can attach them. **Owner-managed** plugins — Transfer, Freeze, and Burn delegates — require the owner's signature to add, because they hand someone else control over the owner's asset. **Authority-managed** plugins — Royalties, Attributes, Update Delegate — can be added by the update authority, since they govern the collection's rules rather than the holder's custody. A third class is permanent: set at creation and immutable thereafter, for guarantees a buyer should be able to trust.
+
+Creating an asset with a plugin is a single instruction:
+
+```ts
+import { create, ruleSet } from '@metaplex-foundation/mpl-core'
+import { generateSigner } from '@metaplex-foundation/umi'
+
+const asset = generateSigner(umi)
+
+await create(umi, {
+  asset,
+  name: 'Founder Pass #1',
+  uri: 'https://example.com/metadata.json',
+  plugins: [
+    { type: 'Royalties', basisPoints: 500, creators: [{ address: creator, percentage: 100 }], ruleSet: ruleSet('None') },
+  ],
+}).sendAndConfirm(umi)
+```
+
+`generateSigner` creates the keypair for the one asset account. `create` from `@metaplex-foundation/mpl-core` builds and sends the instruction. The `plugins` array attaches a 500-basis-point (5%) royalty that the runtime enforces on every future transfer — no separate metadata account, no post-hoc royalty registry.
+
+## Collections are first-class accounts too
+
+A Core collection is its own account (`CollectionV1`), not a convention layered on shared metadata. Plugins set at the collection level apply to every asset in it, and an individual asset can override them. That means you configure royalties or an update-delegate policy once on the collection instead of stamping it onto each mint — and collection-wide operations become one authority check instead of ten thousand.
+
+## Testing a Core mint end to end
+
+Minting a Core asset still ends where every Solana flow ends: a wallet prompt the user has to approve. Because Core settles the mint in a single account and a single signature, an end-to-end test should assert exactly that — one approval, one owned asset — rather than the multi-step confirmation dance Token Metadata used to produce. Driving a real Phantom extension with [@avalix/chroma](https://chroma.avalix.dev) covers the boundary a mocked wallet skips:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({ wallets: [{ type: 'phantom' }] })
+
+test('minting a Core asset settles with one signature', async ({ phantom, page }) => {
+  await phantom.importSeedPhrase({ seedPhrase: process.env.TEST_SEED! })
+  await page.getByRole('button', { name: 'Mint' }).click()
+  await phantom.approve()
+  await expect(page.getByText('You own Founder Pass #1')).toBeVisible()
+})
+```
+
+`importSeedPhrase` loads a real account into the extension, `phantom.approve()` signs the actual mint transaction, and the assertion proves the asset landed. Swap in `phantom.reject()` to cover the user who backs out at the prompt and confirm nothing was created.
+
+Core is not a migration you are forced into — your Token Metadata NFTs keep working. But for anything new, the single-account model is cheaper to mint, simpler to reason about, and enforces rules the old standard could only suggest. Start by mapping which of your NFT's behaviors are really plugins, and let the account do the rest.
