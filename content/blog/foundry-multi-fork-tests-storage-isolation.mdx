@@ -1,0 +1,64 @@
+---
+title: "Foundry Multi-Fork Tests: How Fork Storage Isolation Works (and the Poisoning Bug Just Fixed)"
+description: "Foundry runs each fork as its own EVM. How multi-fork storage isolation and persistent accounts work, and the cross-fork poisoning bug just fixed."
+date: 2026-09-28
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): Foundry runs each fork as its own EVM. How multi-fork storage isolation and persistent accounts work — and the cross-fork poisoning bug just fixed. */}
+
+Multi-fork Foundry tests are where a lot of cross-chain and integration suites quietly go wrong. You fork mainnet, fork an L2, switch between them, and assert on balances — and every so often a value reads back that no chain ever held. The reflex is to blame the RPC or a flaky block number. More often it is the fork model itself: **Foundry multi-fork testing** gives each fork its own independent EVM, and the moment you lose track of which accounts cross that boundary, your assertions start reading state from the wrong place. A fix landed in the September 25, 2026 nightly (`fix(forge): prevent cross-fork storage poisoning`, #16987) that tightens exactly this seam — a good moment to get the mental model straight.
+
+## Each fork is its own EVM
+
+Forking cheatcodes let you enter fork mode from inside your Solidity test, on a test-by-test basis, and hold several forks at once. `vm.createFork(rpcUrl)` spins one up and returns a `uint256` fork id without activating it; `vm.createSelectFork(rpcUrl)` creates and activates in one call; `vm.selectFork(forkId)` switches which one is live. Only one fork is active at a time, and `vm.activeFork()` tells you which.
+
+The rule that catches people is storage: *each fork is a standalone EVM, so all forks use completely independent storage*. Any write you make while fork A is active is recorded only in fork A. Select fork B and that write is gone — B has its own copy of the world.
+
+```solidity
+uint256 mainnet = vm.createSelectFork(vm.rpcUrl("mainnet")); // created and active
+uint256 arbitrum = vm.createFork(vm.rpcUrl("arbitrum"));     // created, not yet active
+
+// ...reads and writes here land in mainnet's storage only...
+
+vm.selectFork(arbitrum);              // Arbitrum is now the live EVM
+assertEq(vm.activeFork(), arbitrum);  // confirm which fork you are on
+```
+
+`vm.rollFork(blockNumber)` moves a fork to a specific block. Pinning the block matters: an unpinned fork tracks the chain head, so the same test reads different state on different days.
+
+## The two accounts that cross the boundary
+
+There is one deliberate exception to the isolation rule. By default, only `msg.sender` and the test contract itself stay persistent across fork swaps. That is why your fork-id variables, your helper state, and everything stored in the test contract survive a `selectFork` — the test contract is persistent, so its storage travels with you.
+
+This is also the exact spot where the mental model breaks. Developers see their test-contract variables persist and assume *all* state persists. It does not. A mock you deployed on fork A does not exist on fork B until you say so:
+
+```solidity
+function test_priceParity() public {
+    uint256 l1 = vm.createSelectFork(vm.rpcUrl("mainnet"), 20_000_000); // pinned block
+    uint256 l2 = vm.createFork(vm.rpcUrl("arbitrum"), 250_000_000);
+
+    MockOracle oracle = new MockOracle(); // lives only on the L1 fork so far
+    vm.makePersistent(address(oracle));   // now its account exists on every fork
+    oracle.set(2000e8);
+
+    vm.selectFork(l2);                    // switch EVMs
+    assertEq(oracle.price(), 2000e8);     // persistent: state carried across
+}
+```
+
+`vm.makePersistent(address)` marks an account so its state is available regardless of the active fork; `vm.isPersistent(address)` checks the flag and `vm.revokePersistent(address)` removes it. Without the `makePersistent` line here, the call to `oracle` after `selectFork(l2)` reverts — there is no code at that address on Arbitrum.
+
+## What "cross-fork storage poisoning" means
+
+The mirror-image mistake is over-persisting. If you `makePersistent` a *real* contract that genuinely exists on both chains with different state — a token, a price feed — you freeze one chain's snapshot onto every fork. Every assertion after that reads the wrong chain's numbers while looking completely legitimate. That is the self-inflicted shape of poisoning: state from one fork standing in for another. The rule of thumb is to persist only accounts you own in the test — mocks and helpers — never a real contract whose per-chain state is the thing under test.
+
+The September 25 nightly's `fix(forge): prevent cross-fork storage poisoning` (#16987), alongside a batch of isolated-snapshot restore fixes in the same release, closes a framework-level version of the same failure: cases where writes could bleed across the fork boundary even for accounts you had *not* marked persistent. If you run multi-fork suites, upgrade past that nightly. But the fix does not relieve you of the model — correctness still depends on you naming what persists.
+
+## Writing Foundry multi-fork tests you can trust
+
+Three habits keep these suites honest. Pin every fork to a block number so runs are deterministic. Call `makePersistent` only on mocks and helpers you created, and audit any place it points at a real address. Assert `vm.activeFork()` at branch points where the live fork is not obvious from three lines up.
+
+Fork tests prove contract logic against real state across chains, but they stop at the wallet. The connect, sign, and network-switch path a user actually walks lives above Solidity, and a mocked provider will not catch a mismatch there. That layer is what [@avalix/chroma](https://chroma.avalix.dev) covers — driving a real MetaMask extension through Playwright so a cross-chain flow is exercised end to end, wallet popups included. The two layers are complementary: forge fork tests confirm the contracts behave against real on-chain state; E2E confirms a user can actually reach them.
+
+If you maintain multi-fork tests, take ten minutes this week to audit them: which accounts are persistent, are the blocks pinned, and are you on a nightly past #16987. A test that reads state no chain ever held is worse than no test — it passes.
