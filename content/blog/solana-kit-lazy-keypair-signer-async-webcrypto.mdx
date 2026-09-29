@@ -1,0 +1,72 @@
+---
+title: "Why Creating a Solana Signer Is Async — and Kit's Synchronous Escape Hatch"
+description: "Solana Kit's createLazyKeyPairSignerFromBytes returns a signer synchronously and defers the async WebCrypto key import to the first time you sign."
+date: 2026-09-29
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): Solana Kit's createLazyKeyPairSignerFromBytes returns a signer synchronously and defers the async WebCrypto key import to the first time you sign. */}
+
+You have 64 bytes of secret key sitting in a variable, you call `createKeyPairSignerFromBytes`, and TypeScript makes you `await` it. That pause is easy to accept and easy to resent: the address is right there in the bytes, so why is turning them into a **Solana Kit signer** an asynchronous operation? The answer is WebCrypto, and as of Kit v8.3.0 (shipped September 9, 2026) there is a synchronous way out — `createLazyKeyPairSignerFromBytes` — for the places where `await` is genuinely in your way. It is worth understanding both the reason for the wait and the tradeoff you accept to skip it.
+
+## Why the `await` is there
+
+Kit does not keep your ed25519 private key as a loose byte array. It models a keypair as a pair of WebCrypto `CryptoKey` objects, and the call that produces them — `crypto.subtle.importKey` — returns a `Promise`. That is the whole reason `createKeyPairSignerFromBytes` is async: it has to import both halves before it can hand you anything.
+
+The private half is imported as a **non-extractable** key. Once it is inside the crypto subsystem, your code cannot read the raw bytes back out; signing happens by passing data *into* WebCrypto, never by pulling the key material out. That is a deliberate security posture — a leaked reference to the signer does not leak the key.
+
+On top of the import, `createKeyPairSignerFromBytes` does eager work: it cryptographically verifies that the public half and the private half actually correspond before returning. So the standard constructor is both async and strict by design. A related helper, `createKeyPairSignerFromPrivateKeyBytes`, does the same from a 32-byte private key.
+
+## Where async creation bites
+
+None of this matters until you need a signer in a place that cannot wait. A few show up constantly:
+
+- **React render paths.** A component body and a `useMemo` are synchronous. Deriving a signer inside them forces you into a `useEffect` plus state, just to end up with an address the bytes already encode.
+- **Config and module scope.** A top-level `const signer = ...` cannot `await`. You either wrap the module in an init function or leak a promise into everything downstream.
+- **Test fixtures.** Setting up a deterministic signer for a test is the kind of thing you want as a plain value, not a step that turns your whole `beforeEach` async.
+
+In each case you are paying an async cost to get an address that requires no cryptography to know — it is literally the public-key half of the bytes you already hold.
+
+## `createLazyKeyPairSignerFromBytes`: address up front, import deferred
+
+The lazy constructor splits those two concerns. It reads the public-key half of the 64-byte input and derives the address immediately, so it can return **synchronously** — no `await`, and `signer.address` is populated right away. The expensive part, importing the `CryptoKey`, is deferred until the first `signMessages` or `signTransactions` call and then memoised, so it happens at most once.
+
+```ts
+import { createLazyKeyPairSignerFromBytes } from '@solana/kit';
+
+// No await — usable inside a component body or a config object.
+const signer = createLazyKeyPairSignerFromBytes(secretKeyBytes);
+signer.address; // available now
+
+// The CryptoKey import runs here, on first use, then is cached.
+const [signatures] = await signer.signTransactions([transaction]);
+```
+
+Line by line: the first call returns synchronously and gives you the address derived from the public half; reading `signer.address` costs nothing; and the `signTransactions` call is where the deferred WebCrypto import finally runs before producing the 64-byte signature over the compiled message.
+
+Two details are worth internalising. First, you trade away eager validation: because the pair is only imported on first sign, a mismatched or malformed secret key throws *then*, not at creation — though a failed import is not cached, so signing can be retried. Second, the internal copy of the secret bytes is zeroed once the import succeeds, and the returned value is a `MessagePartialSigner & TransactionPartialSigner` with no `keyPair` property. It deliberately is not a `KeyPairSigner`, because at construction time there is no key yet — only the promise of one.
+
+## What this does not replace: the real wallet path
+
+An in-process keypair signer is the right tool for backends, scripts, and test fixtures. It is not what your users do. On the SVM they sign in a browser extension, and that path — the Wallet Standard handshake, the approval popup, the split between a wallet that broadcasts and one that only signs — is not exercised by any signer you construct from raw bytes.
+
+So keep the two apart: use a keypair signer where you own the key, and end-to-end test the flow where the wallet owns it. Driving a real [Phantom](https://chroma.avalix.dev/docs/wallets/phantom) extension with [@avalix/chroma](https://chroma.avalix.dev/docs) covers the second case against the genuine signing UI rather than a mock:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({ wallets: [{ type: 'phantom' }] })
+
+test('user approves the transfer', async ({ page, phantom }) => {
+  await phantom.importSeedPhrase({ seedPhrase: process.env.TEST_SEED! })
+  await page.getByRole('button', { name: 'Send' }).click()
+  await phantom.approve() // clicks through the real approval popup
+  await expect(page.getByText('Confirmed')).toBeVisible()
+})
+```
+
+`phantom.approve()` signs the real bytes through the extension, so the test proves your dApp built the transaction correctly — something an in-process signer can never tell you.
+
+## Takeaway
+
+Reach for `createLazyKeyPairSignerFromBytes` when you need a signer in a synchronous context and can tolerate validation that lands on first sign. Keep the eager, async `createKeyPairSignerFromBytes` when you want the keypair verified the moment it is created. And remember that neither one stands in for testing the wallet your users actually click through.
