@@ -1,0 +1,90 @@
+---
+title: "Anchor's TypeScript Client Is Moving to @solana/kit: What Changes in Your Tests"
+description: "Anchor is rewriting its TypeScript client on @solana/kit. Here's how the provider, wallet setup, and your test boilerplate change."
+date: 2026-09-30
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): Anchor is rewriting its TypeScript client on @solana/kit. Here's how the provider, wallet setup, and your test boilerplate change. */}
+
+If you have written a single `anchor test` suite, you know the opening lines by heart: build a `Connection`, wrap a `Keypair` in a `NodeWallet`, hand both to an `AnchorProvider`, and call `setProvider`. That boilerplate has been stable for years. It is now being rewritten. Anchor is porting its TypeScript client onto [`@solana/kit`](https://github.com/anza-xyz/kit) — the modern, tree-shakable successor to `@solana/web3.js` — and the provider sits at the center of the change. If you maintain Anchor programs, the setup code at the top of every test file is about to look different.
+
+This is not a rename. The old `Wallet` interface and `NodeWallet` class are being removed outright, and the provider no longer imports anything from `@solana/web3.js`. Here is what the migration actually does and how to adjust your tests without breaking them.
+
+## The provider now speaks Kit, not web3.js
+
+The core change is what `AnchorProvider` holds. The old provider wrapped a `Connection` object. The rewritten one holds a Kit `rpc` client and an optional `rpcSubscriptions` client:
+
+```ts
+// Solana / Anchor — the new provider interface
+readonly rpc: Rpc<SolanaRpcApiMainnet>
+readonly rpcSubscriptions?: RpcSubscriptions<SolanaRpcSubscriptionsApi>
+readonly wallet?: WalletSigner  // TransactionPartialSigner | TransactionModifyingSigner
+```
+
+The `connection` and `publicKey` getters still exist but are deprecated shims. The meaningful shift is the `wallet`: it is no longer a bespoke Anchor type but a plain Kit `TransactionSigner`. That means the same signer abstraction your instruction-building code already uses is the one the provider signs with — one less adapter in the chain.
+
+The constructor accepts a few shapes, so you can pass an endpoint string, an endpoint plus a websocket URL, or a Kit client directly:
+
+```ts
+new AnchorProvider(url, wallet, opts)
+new AnchorProvider({ url, websocketUrl }, wallet, opts)
+new AnchorProvider({ rpc, rpcSubscriptions }, wallet)
+```
+
+A bare `http(s)` URL derives its `ws(s)` subscription endpoint automatically, so the common case stays a one-liner.
+
+## Rewriting your test setup
+
+The wallet is where most test files will need an edit. `NodeWallet` is gone; in its place are two factory functions that return a Kit signer:
+
+```ts
+// Before — Solana / web3.js
+import { AnchorProvider, Wallet, setProvider } from '@coral-xyz/anchor'
+import { Connection, Keypair } from '@solana/web3.js'
+
+const connection = new Connection(url)
+const wallet = new Wallet(Keypair.fromSecretKey(secret))
+setProvider(new AnchorProvider(connection, wallet, {}))
+```
+
+```ts
+// After — Solana / @solana/kit
+import { AnchorProvider, createWallet, setProvider } from '@coral-xyz/anchor'
+
+const wallet = createWallet(secret)           // sync signer, defers WebCrypto
+setProvider(new AnchorProvider(url, wallet, {}))
+
+// or, reading ANCHOR_WALLET from the environment:
+setProvider(AnchorProvider.env())
+```
+
+`createWallet(secretKey)` returns a synchronous signer even though Kit signing uses WebCrypto under the hood — the import is deferred so construction stays synchronous. That detail matters: it is what keeps `setProvider(AnchorProvider.env())` working as a top-of-file statement instead of forcing you to `await` your provider setup. `createLocalWallet()` is the equivalent that reads the `ANCHOR_WALLET` environment variable.
+
+Error handling changes too. Failures now throw a `ProviderError` carrying a `.logs` array and a `.cause` chain that wraps the underlying `SolanaError`. Custom program error codes are resolved by walking that cause chain rather than scraping a message string — so your `try/catch` assertions should read `err.cause` instead of regexing a human-readable message that Kit strips out of production builds.
+
+## The wallet boundary your E2E tests own
+
+Everything above is program-level: it exercises your instructions against an RPC with a signer you control in-process. It is essential, and it is not the whole picture. It never opens Phantom, never renders your dApp, and never touches the versioned transaction your user actually approves in the extension popup.
+
+That boundary is exactly what an end-to-end test covers, and it is indifferent to the SDK churn. Whether your client is built on web3.js or Kit, the wallet signs the same SVM transaction — the same instructions, account inputs, and compute budget. A test that drives a real Phantom extension proves the signed bytes are correct regardless of which client assembled them. With [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom) you drive the actual extension inside Playwright:
+
+```ts
+import { createWalletTest, expect } from '@avalix/chroma'
+
+const test = createWalletTest({ wallets: [{ type: 'phantom' }] })
+
+test('mint approval lands', async ({ phantom, page }) => {
+  await phantom.importSeedPhrase({ seedPhrase: process.env.TEST_SEED! })
+  await page.goto('/')
+  await page.getByRole('button', { name: 'Mint' }).click()
+  await phantom.approve()           // signs the real transaction bytes
+  await expect(page.getByText('Minted')).toBeVisible()
+})
+```
+
+`importSeedPhrase` loads a funded test account, `phantom.approve()` signs the actual bytes in the live popup, and the assertion checks the state your user sees. Swap in `phantom.reject()` for the case where the user backs out. Run this suite before and after the Kit migration — if the outcome holds on both sides, the client swap changed nothing your users can feel.
+
+## Takeaway
+
+The Kit rewrite is a maintenance win — fewer dependencies, a single signer type, a cleaner error chain — but it will touch the top of every Anchor test file you own. Update your provider setup to `createWallet` / `AnchorProvider.env()`, move error assertions to the `.cause` chain, and lean on a wallet-level E2E suite as the invariant that outlives whichever SDK you build transactions with.
