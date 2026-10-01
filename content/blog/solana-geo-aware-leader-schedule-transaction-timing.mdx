@@ -1,0 +1,46 @@
+---
+title: "Solana's Leader Schedule Is Going Geographic: What SIMD-0675 Means for Transaction Timing"
+description: "SIMD-0674/0675 reorder the Solana leader schedule by geography, cutting handover latency ~53%. How the leader schedule works and what shifts for dApps."
+date: 2026-10-01
+author: Chroma Team
+---
+
+When you send a Solana transaction, its first few hundred milliseconds are decided by a data structure most dApp developers never read: the Solana leader schedule. Two proposals Anza opened on September 29, 2026 — SIMD-0674 and SIMD-0675 — would reorder that schedule by geography, and an early simulation cut the time it takes for block production to pass from one validator to the next by more than half. This is a networking change at heart, but the timing it tightens is the same timing your confirmation logic races against.
+
+## What the leader schedule actually decides
+
+Solana has no mempool. Block production rotates: in windows of four consecutive slots, exactly one validator is the leader — the only node allowed to produce blocks for those slots. Which validator holds each slot is fixed an epoch in advance by the leader schedule, a stake-weighted, pseudo-random assignment that every node computes identically from the epoch's stake distribution. You can read it yourself:
+
+```ts
+import { createSolanaRpc } from '@solana/kit'
+
+const rpc = createSolanaRpc('https://api.mainnet-beta.solana.com')
+const schedule = await rpc.getLeaderSchedule().send()
+// { "<validator identity pubkey>": [0, 1, 2, 3, 128, 129, ...], ... }
+```
+
+`getLeaderSchedule` returns a map from each validator's identity to the slot indices it will lead this epoch. `.send()` dispatches the request through Kit's RPC proxy. RPC providers and SDKs use exactly this map to route your transaction: instead of gossiping it blindly, they forward it over QUIC straight to the current leader's TPU (Transaction Processing Unit) and to the next few upcoming leaders, so whoever picks up the baton already holds your transaction.
+
+## Why handover latency is the hidden tax
+
+The current schedule is stake-weighted but geographically blind. A validator in Frankfurt can be followed by one in Tokyo, then one in Virginia. Every time leadership changes hands, the outgoing leader's final block has to reach the incoming leader before it can safely build on top — and when the two sit on opposite sides of the planet, that handover costs real milliseconds. On epoch-1038 mainnet data across 661 validators, the mean handover latency measured 36.2 ms.
+
+That gap is overhead: nothing is being processed while the network waits for the baton to arrive. It also widens the window in which a transaction you forwarded to "the next leader" lands a slot later than you assumed — the kind of tail that turns a confirmation race into a resubmission.
+
+## How SIMD-0674 and 0675 group leaders by geography
+
+The pair splits the work. SIMD-0674 lets a validator register its physical location as an ECEF coordinate triple — earth-centered, earth-fixed, three integers — through a new Vote program instruction. SIMD-0675 consumes those coordinates to build the schedule: it groups validators into geographic bins and runs them consecutively, so the baton mostly passes between neighbors instead of across oceans. All consensus-relevant math, including the squared-chord-distance comparison, is exact 64-bit integer arithmetic — no floating point, no trigonometry — so every node derives the identical schedule.
+
+Two guardrails keep it from recentralizing. A `RUN_LENGTH` cap bounds how many consecutive leaders come from one region (the authors size a regional run at roughly 2.4 seconds), and a `STAKE_FLOOR` requires enough nearby stake before a bin forms, so no small cluster of co-located validators can seize a long uninterrupted run. Every validator still receives exactly the same number of leader windows it would under the stake-weighted schedule — only the order changes. In simulation, that reordering dropped mean handover latency from 36.2 ms to 17.0 ms, and the proposal also retunes `HANDOVER_COMPENSATION` from 25 ms to 50 ms.
+
+Both are early. SIMD-0675 was marked ready for review on September 30, 2026; SIMD-0674 is still a draft; and neither merges without sign-off from both the Anza and Firedancer teams.
+
+## What changes for your dApp — and your tests
+
+Nothing in your transaction-building code changes. What shifts is the timing distribution underneath it. Confirmation gets a little faster and, more usefully, more predictable: with the baton staying regional, the tail latencies that make a transaction land a slot late get shorter. If your dApp forwards to upcoming leaders or runs its own send loop, the set of "next leaders" becomes geographically clustered — worth knowing if you co-locate senders near the validators you expect to lead.
+
+The durable takeaway predates this proposal: never hardcode a wall-clock deadline for confirmation. Derive timing from slots and blockhash expiry, not from a millisecond budget you measured once on a good day.
+
+Your end-to-end tests feel this only at the edges. The wallet boundary — a user approving a transaction in Phantom — is untouched, so a tool like [@avalix/chroma](https://github.com/avalix-labs/chroma) that drives the real extension exercises the same flow before and after. The thing to check is your assertions: a test that asserts on confirmation timing rather than the final on-chain result is asserting on a number this proposal is designed to move. Assert on the state your user ends up seeing, not the milliseconds it took to get there.
+
+The leader schedule has always been the quiet arbiter of when your transaction lands. SIMD-0674 and 0675 don't change what it decides, only how it's ordered — but that ordering is the difference between a baton passed next door and one flung across the planet. Read `getLeaderSchedule` once to see the structure your confirmation path already leans on, and follow the two SIMDs as they move through review.
