@@ -1,0 +1,50 @@
+---
+title: "Why Solana Is Removing Floating-Point Math From Its Core — and the Rounding Gap in Your dApp"
+description: "Solana is pulling IEEE-754 floating-point out of its core for fixed-point integer math. Here's why — and the rounding gap in your dApp."
+date: 2026-10-02
+author: Chroma Team
+---
+
+{/* Meta description (≤155 chars): Solana is pulling IEEE-754 floating-point out of its core for fixed-point integer math. Here's why — and the rounding gap in your dApp. */}
+
+Somewhere in the Solana stake program, a `0.09` has been doing quiet work for years — the 9% warmup/cooldown rate that decides how much stake can activate or deactivate each epoch. It is also a floating-point literal, and that is something a consensus network cannot live with forever. Anza is now pulling every IEEE-754 double out of Solana's core. The change is protocol-internal, but it points straight at a bug that probably lives in your dApp's frontend.
+
+## The consensus risk hiding in a floating-point `0.09`
+
+Floating-point math is not associative, and it does not produce identical results across every machine. IEEE-754 doubles can round differently depending on the CPU, the compiler, and the optimization level. Inside a single process that is a rounding annoyance. In a consensus system, where every validator has to compute byte-identical results to agree on a block, it is a liveness risk: if two clients disagree on a stake-history figure by a single bit, they can disagree on the chain.
+
+This is exactly why standard eBPF — the instruction set Solana programs compile to — forbids floating-point operations outright. Solana's fork has allowed soft-float through compiler built-ins, but aligning with the upstream eBPF toolchain means removing floating point entirely. Determinism is the whole point of the exercise.
+
+## What SIMD-0391 and SIMD-0607 actually replace
+
+**SIMD-0391** (activated on mainnet around epoch 1026) rewrites the stake program's warmup/cooldown logic. The 9% rate is no longer `0.09`; it is `900` basis points, and the per-epoch change is computed in unsigned 128-bit integers with saturating multiplication, dividing last to preserve precision. It even guarantees a minimum of one lamport of progress per epoch once an account has stake, so nothing stalls on a rounding floor. That single calculation feeds stake merging, splitting, redelegation, withdrawal, and the epoch-boundary stake history every validator has to agree on.
+
+**SIMD-0607** goes after the runtime itself: the inflation-reward and rent calculation paths. Same move — IEEE-754 out, deterministic integer math in, with per-slot decay derived at higher intermediate precision. It is also a gate. Anza has said SIMD-0607 needs to land before the SIMD-0550 disinflation schedule can safely activate, because you do not want to change the inflation curve while the arithmetic underneath it is still non-deterministic.
+
+The through-line: every value Solana settles — stake, rewards, rent — is denominated in lamports, which are `u64` integers. The protocol is making sure those integers are computed with integer math from end to end.
+
+## The same rounding gap lives in your frontend
+
+Here is why this matters to someone who never touches validator code. Your dApp almost certainly previews some of these numbers before the user signs: "you'll earn ~X SOL this epoch," "this account needs Y SOL to be rent-exempt," "your stake activates over N epochs." If you compute those with JavaScript's `Number`, you are doing the exact thing Solana just decided it cannot afford — IEEE-754 floating point on values the chain tracks as 64-bit integers.
+
+A JS `Number` is a double. It carries 53 bits of integer precision, and lamport amounts and stake totals routinely exceed 2^53. The moment they do, an expression like `0.09 * largeLamportAmount` silently drops the low bits, and your preview drifts from what the runtime actually credits. Users notice when the figure they were shown is not the figure that landed.
+
+The fix mirrors the protocol's. Do lamport math in `BigInt`, not `Number`:
+
+```ts
+// Reward preview, the way the chain now does it: integers and basis points.
+const stakeLamports = 125_000_000_000_000n // > 2^53, unsafe as a JS Number
+const rateBps = 900n // 9%, expressed in basis points
+
+const grossReward = (stakeLamports * rateBps) / 10_000n // divide last
+```
+
+Each value stays a `BigInt`, the rate is basis points rather than `0.09`, and the division happens last — the same ordering SIMD-0391 uses so precision is not lost before the final step. Convert to a floating-point SOL figure only at the very end, purely for display.
+
+## Read the number, don't guess it
+
+For anything the chain has already computed, the safest client does not re-derive the value in a different number system — it reads the result back. The rent-exempt minimum comes from `getMinimumBalanceForRentExemption`. Effective stake comes from the account. The reward that posted comes from the epoch boundary. Reading the authoritative value sidesteps the precision question entirely, and it is also the cleanest thing to assert in a test: build the flow, let a real wallet sign it, and check the number your UI displays against the number on-chain.
+
+That boundary — the transaction your dApp builds, the Phantom approval your user taps, and the figure they read back afterward — is exactly what an end-to-end tool like [@avalix/chroma](https://chroma.avalix.dev/docs/wallets/phantom) exercises against a real extension, so a rounding gap between your preview and the on-chain result surfaces in CI instead of in a user's screenshot.
+
+Solana removing floating point from its core is a reminder that determinism is a property you engineer, not one you assume. The protocol is holding up its end. The question worth asking this week is whether your frontend is doing integer math on integer values — or quietly rounding them through a double and hoping nobody checks.
