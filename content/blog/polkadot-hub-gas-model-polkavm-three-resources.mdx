@@ -1,0 +1,54 @@
+---
+title: "The Polkadot Hub Gas Model: Why One Gas Number Hides Three Resources"
+description: "The Polkadot Hub gas model flattens three resources into one gas value. How ref_time, proof_size, and storage_deposit work — and where EVM habits break."
+date: 2026-10-03
+author: Chroma Team
+---
+
+Polkadot Hub runs your Solidity contracts natively, and from MetaMask the experience looks like any other EVM chain: you sign a transaction, you see a gas figure, you confirm. That familiarity is the trap. The **Polkadot Hub gas model** is not Ethereum's single-dimension gas meter wearing a costume — it is a multidimensional resource accounting system that flattens itself into one number for your wallet's benefit. Carry over your EVM gas habits unchanged, and the places where the two models disagree are exactly the places your contract behaves in ways your mainnet fork never predicted.
+
+## The Polkadot Hub gas model: one number, three resources
+
+On Ethereum, every operation costs gas, gas is a single scalar, and the block gas limit caps the whole block. Polkadot Hub, which executes contracts on the PolkaVM environment via the `revive` compiler, meters three separate resources instead:
+
+- **ref_time** — computational time, denominated in picoseconds of reference hardware. This is the dimension closest to EVM gas: it tracks how long your contract takes to execute.
+- **proof_size** — the number of bytes a validator must include in the state proof to re-execute your transaction. Every storage slot you read or write enlarges that proof. The EVM has no equivalent; on Ethereum, reading storage costs gas, but nobody meters the *proof* of the read.
+- **storage_deposit** — a refundable amount of the native token locked when your contract creates new storage, and returned when that storage is freed. It is not a fee. It is a deposit that makes holding state expensive rather than creating it cheap.
+
+ref_time and proof_size together form what the runtime calls *weight*, a two-dimensional metric. storage_deposit rides alongside as a balance movement. Three independent quantities, none reducible to the others.
+
+## How the RPC flattens three dimensions into one
+
+Your MetaMask only understands one gas field, so Polkadot Hub's Ethereum-compatible RPC does the reconciliation for you. When the wallet calls `eth_estimateGas`, the node performs a dry run of the transaction and measures all three resources it actually consumes — ref_time, proof_size, and any storage_deposit — then maps that result back into a single gas value the wallet can display and the user can approve.
+
+Fees follow a `WeightToFee` conversion that takes the dominant dimension — roughly, the maximum of ref_time and proof_size after each is scaled by its own coefficient — rather than summing them. A transaction that is cheap on computation but reads a lot of state can therefore be priced by its proof_size, not its ref_time. That is the opposite of the intuition an EVM developer brings, where more storage access simply means proportionally more gas.
+
+The practical upshot: the gas number in the popup is a projection, not the thing being metered. Re-estimate against the live node instead of reusing a figure you measured once on a fork.
+
+## Where your EVM gas habits break
+
+Solidity only lets you attach a `gas_limit` to a cross-contract call — there is no syntax for "limit the proof size of this call." Conceptually `gas_limit` lines up with ref_time, but not with the other two dimensions. Because of that mismatch, the `revive` Solidity compiler does not forward an imposed `gas_limit` on cross-contract calls at all: `gas_limit` and ref_time are not the same quantity, and proof_size and storage_deposit don't exist in the EVM, so they would be uncapped regardless.
+
+That has concrete consequences for patterns you may rely on:
+
+- **`address.call{gas: N}(...)`** — the explicit gas stipend is not the hard ceiling you assume. You cannot bound a sub-call's proof_size or storage_deposit from Solidity.
+- **`gasleft()` branches** — code that forks on remaining gas is reading a ref_time projection, not a faithful account of all three resources.
+- **Hardcoded gas constants** — a magic number that worked on Ethereum encodes assumptions about a one-dimensional meter that Polkadot Hub does not share.
+
+None of this means your contract won't run. It means the failure modes move. A call that passes on an Ethereum fork can hit a proof_size wall on Polkadot Hub, and the single gas figure gave you no warning because proof_size was never inside it.
+
+This is worth pinning down in an end-to-end test rather than discovering in production. Because Polkadot Hub speaks the Ethereum JSON-RPC, you can drive the real MetaMask confirmation — the one showing that flattened gas value — with @avalix/chroma:
+
+```ts
+// EVM wallet (MetaMask) against a Polkadot Hub dApp
+const { metamask } = await createWalletTest({ wallets: [{ type: 'metamask' }] });
+await metamask.importSeedPhrase({ seedPhrase: process.env.SEED });
+await metamask.authorize(); // approve the connection to the dApp
+await metamask.confirm();    // sign the tx and its mapped gas value
+```
+
+`authorize()` approves the connection and `confirm()` signs the transaction, so the test exercises the same estimate-and-map path a real user hits — not a mocked gas number you hand-picked.
+
+## Where this leaves you
+
+Treat the gas figure on Polkadot Hub as a convenience, not a contract. Re-run `eth_estimateGas` against the live node before every send, stop hardcoding gas constants ported from Ethereum, and remember that a storage-heavy transaction is priced by a proof_size you can't see in the popup. The EVM compatibility is real; the resource model underneath it is not Ethereum's, and the distance between the two is where the surprises live.
