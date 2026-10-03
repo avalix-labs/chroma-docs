@@ -1,0 +1,71 @@
+---
+title: "MetaMask Embedded Wallets: How MPC-TSS Signs Without a Seed Phrase"
+description: "MetaMask Embedded Wallets swap the seed phrase for social login. Here's how the 2-of-3 MPC-TSS share model signs without ever rebuilding your key."
+date: 2026-08-06
+author: Chroma Team
+---
+
+{/* Suggested meta description (147 chars): MetaMask Embedded Wallets swap the seed phrase for social login. Here's how the 2-of-3 MPC-TSS share model signs without ever rebuilding your key. */}
+
+Every dApp onboarding funnel has the same cliff. A new user clicks "connect," the wallet asks them to write down twelve words, and a large share of them never come back. **MetaMask Embedded Wallets** — the productized form of Web3Auth, now folded into the MetaMask Developer Platform — is MetaMask's answer to that cliff: users sign in with Google, email, or SMS, and a wallet is provisioned behind the scenes with no extension and no seed phrase.
+
+The interesting part is not the login screen. It is the cryptography underneath. "No seed phrase" usually means "someone else holds the key," and that is exactly the trade embedded wallets refuse to make. Here is how the MPC-TSS model gets there, and what actually reaches your dApp.
+
+## Why the seed phrase was always a custody trap
+
+A traditional EOA is a single private key. Self-custody, in the strict sense, means one secret governs everything: lose it and the funds are gone, leak it and they are stolen. The seed phrase is just that key in a memorable encoding. It is a good primitive for someone who understands the stakes and a terrible one for someone opening your app for the first time.
+
+The obvious escape — a custodial backend that holds keys — throws away the property that made the wallet worth having. You are now the bank, with the liability that implies. Embedded wallets avoid both failure modes: no single seed phrase for the user to lose, and no single party that can move funds.
+
+## How MPC-TSS splits the key into shares that never meet
+
+MetaMask Embedded Wallets use a Threshold Signature Scheme (TSS) built on multi-party computation. Instead of one private key, the account is governed by three shares in a 2-of-3 arrangement:
+
+- **Device share** — stored on the user's device, gated by biometrics.
+- **Network share** — held by the Web3Auth node network and released after the user authenticates through their OAuth provider.
+- **Recovery share** — a backup the user can stash on a second device, download, or derive from a passphrase.
+
+Any two of the three can produce a signature. That is what makes losing a laptop survivable: the network and recovery shares still clear the threshold.
+
+The subtlety that separates TSS from ordinary secret sharing is *when the key exists*. In Shamir's Secret Sharing, shares are recombined into the full key at signing time — for a moment, the complete private key sits in memory. TSS never does that. Each share independently produces a partial signature, and those partials are aggregated (via Lagrange interpolation) into one valid signature. The full private key is never assembled, not on the user's device and not on any node. There is no single moment or single machine where the whole secret is present to be stolen.
+
+## What your dApp actually sees: a familiar EIP-1193 provider
+
+None of that leaks into your application code. Once a user is signed in, the SDK hands you a standard EIP-1193 provider — the same interface `window.ethereum` implements — so ethers.js and web3.js work unchanged:
+
+```ts
+// EVM only — MetaMask Embedded Wallets, after social login
+import { ethers } from "ethers";
+
+// The SDK exposes a standard EIP-1193 provider once the user is authenticated
+const provider = web3auth.connection?.ethereumProvider;
+
+// Wrap it exactly like you'd wrap the injected extension provider
+const ethersProvider = new ethers.BrowserProvider(provider);
+const signer = await ethersProvider.getSigner();
+// signer.sendTransaction(...) triggers a 2-of-3 threshold signature —
+// no private key is ever reconstructed in the browser
+```
+
+Line by line: `ethereumProvider` is the EIP-1193 object the embedded wallet exposes after auth; wrapping it in `BrowserProvider` gives you the ethers abstraction you already use; `getSigner()` returns a signer whose `sendTransaction` and `signMessage` calls fan out to the MPC network under the hood. Your contract calls do not know the difference. Embedded wallets can also back a MetaMask smart account for gas sponsorship and batching — but the base signing path is the same provider you already target.
+
+## What changes for your end-to-end tests
+
+The provider parity is real, but the *user-facing flow* is not the one your extension tests exercise. With the browser extension, the signing surface is a MetaMask popup — precisely what an E2E tool drives. Testing that path with [@avalix/chroma](https://chroma.avalix.dev) scripts the real extension:
+
+```ts
+// EVM only — @avalix/chroma drives the real MetaMask extension
+const { metamask } = await createWalletTest({
+  wallets: [{ type: "metamask" }],
+});
+
+await metamask.importSeedPhrase({ seedPhrase: process.env.TEST_SEED! });
+await metamask.authorize(); // approve the connection request
+await metamask.confirm();   // sign the transaction in the popup
+```
+
+An embedded wallet has no popup and no seed phrase to import; its authentication surface is an OAuth redirect or social-login modal, and the signature happens across the MPC network, not in an extension window. If you support both entry points — many dApps do — treat them as two distinct test targets: the extension flow, where the confirmation lives in the wallet UI Chroma automates, and the embedded flow, where the assertions move to the login handoff and the resulting on-chain state.
+
+## The takeaway
+
+MetaMask Embedded Wallets remove the seed phrase without conceding custody, and they do it with a threshold-signature model worth understanding before you adopt it: a 2-of-3 share split where the private key is never whole. For your code, it arrives as the EIP-1193 provider you already know. For your test suite, it is a different door into the same contract calls — so make sure you are testing the door your users actually walk through.
